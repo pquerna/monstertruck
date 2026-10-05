@@ -10,10 +10,112 @@ use mesh::spade_round;
 use std::{f64::consts::TAU, iter, mem};
 
 const ISOPARAM_BOUNDARY_SEARCH_ITERATIONS: usize = 32;
+const BOUNDARY_SEGMENT_TOLERANCE: f64 = 1.0e-9;
+
+pub(in crate::tessellation::triangulation) struct SplitVertices(
+    Vec<(FixedVertexHandle, Point2, usize)>,
+);
+
+impl SplitVertices {
+    pub(in crate::tessellation::triangulation) fn new(triangulation: &Cdt) -> Self {
+        let mut vertices = triangulation
+            .vertices()
+            .enumerate()
+            .map(|(order, vertex)| {
+                let point = vertex.position();
+                (vertex.fix(), Point2::new(point.x, point.y), order)
+            })
+            .collect::<Vec<_>>();
+        vertices.sort_unstable_by(|lhs, rhs| lhs.1.x.total_cmp(&rhs.1.x));
+        Self(vertices)
+    }
+
+    pub(in crate::tessellation::triangulation) fn ordered_handles(
+        &self,
+        front: (FixedVertexHandle, Point2),
+        back: (FixedVertexHandle, Point2),
+    ) -> impl Iterator<Item = FixedVertexHandle> {
+        let min = Point2::new(
+            front.1.x.min(back.1.x) - BOUNDARY_SEGMENT_TOLERANCE,
+            front.1.y.min(back.1.y) - BOUNDARY_SEGMENT_TOLERANCE,
+        );
+        let max = Point2::new(
+            front.1.x.max(back.1.x) + BOUNDARY_SEGMENT_TOLERANCE,
+            front.1.y.max(back.1.y) + BOUNDARY_SEGMENT_TOLERANCE,
+        );
+        let start = self.0.partition_point(|vertex| vertex.1.x < min.x);
+        let end = self.0.partition_point(|vertex| vertex.1.x <= max.x);
+        let mut chain = self.0[start..end]
+            .iter()
+            .filter_map(|(handle, point, order)| {
+                if *handle == front.0 || *handle == back.0 || point.y < min.y || point.y > max.y {
+                    None
+                } else {
+                    boundary_segment_parameter(*point, front.1, back.1)
+                        .map(|parameter| (parameter, *order, *handle))
+                }
+            })
+            .collect::<Vec<_>>();
+        // Preserve original snapshot order when projected parameters tie.
+        chain.sort_unstable_by(|lhs, rhs| lhs.0.total_cmp(&rhs.0).then(lhs.1.cmp(&rhs.1)));
+        chain.into_iter().map(|(_, _, handle)| handle)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::tessellation::triangulation) struct BoundaryLoop {
+    points: Vec<SurfacePoint>,
+    uv_min: Point2,
+    uv_max: Point2,
+}
+
+impl BoundaryLoop {
+    fn new(points: Vec<SurfacePoint>) -> Self {
+        let mut uv_min = Point2::new(f64::INFINITY, f64::INFINITY);
+        let mut uv_max = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for point in &points {
+            uv_min.x = uv_min.x.min(point.x);
+            uv_min.y = uv_min.y.min(point.y);
+            uv_max.x = uv_max.x.max(point.x);
+            uv_max.y = uv_max.y.max(point.y);
+        }
+        Self {
+            points,
+            uv_min,
+            uv_max,
+        }
+    }
+
+    fn may_contain(&self, point: Point2) -> bool {
+        // Closed-loop winding is zero outside its box. Keep the existing
+        // boundary tolerance inside the broad phase as well.
+        point.x >= self.uv_min.x - TOLERANCE
+            && point.x <= self.uv_max.x + TOLERANCE
+            && point.y >= self.uv_min.y - TOLERANCE
+            && point.y <= self.uv_max.y + TOLERANCE
+    }
+}
+
+impl FromIterator<SurfacePoint> for BoundaryLoop {
+    fn from_iter<T: IntoIterator<Item = SurfacePoint>>(points: T) -> Self {
+        Self::new(points.into_iter().collect())
+    }
+}
+
+impl std::ops::Deref for BoundaryLoop {
+    type Target = [SurfacePoint];
+    fn deref(&self) -> &Self::Target { &self.points }
+}
+
+impl<'a> IntoIterator for &'a BoundaryLoop {
+    type Item = &'a SurfacePoint;
+    type IntoIter = std::slice::Iter<'a, SurfacePoint>;
+    fn into_iter(self) -> Self::IntoIter { self.points.iter() }
+}
 
 #[derive(Debug, Clone)]
 pub(in crate::tessellation::triangulation) struct PolyBoundary {
-    pub(in crate::tessellation::triangulation) loops: Vec<Vec<SurfacePoint>>,
+    pub(in crate::tessellation::triangulation) loops: Vec<BoundaryLoop>,
     /// UV-space axis-aligned bounding box for cheap rejection in `include()`.
     pub(in crate::tessellation::triangulation) uv_min: Point2,
     pub(in crate::tessellation::triangulation) uv_max: Point2,
@@ -82,7 +184,9 @@ pub(in crate::tessellation::triangulation) fn boundary_segment_parameter(
         let offset = point - front;
         let parameter = offset.dot(segment) / denom;
         let projected = front + segment * parameter;
-        (parameter > 0.0 && parameter < 1.0 && projected.distance(point) <= 1.0e-9)
+        (parameter > 0.0
+            && parameter < 1.0
+            && projected.distance(point) <= BOUNDARY_SEGMENT_TOLERANCE)
             .then_some(parameter)
     }
 }
@@ -294,18 +398,19 @@ impl PolyBoundary {
             closed.push(connect_edges([vec0, vec1, vec2, vec3]));
         }
         normalize_closed_loop_winding(&mut closed);
+        let loops: Vec<_> = closed.into_iter().map(BoundaryLoop::new).collect();
         let (mut uv_min, mut uv_max) = (
             Point2::new(f64::INFINITY, f64::INFINITY),
             Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
         );
-        for pt in closed.iter().flatten() {
-            uv_min.x = f64::min(uv_min.x, pt.x);
-            uv_min.y = f64::min(uv_min.y, pt.y);
-            uv_max.x = f64::max(uv_max.x, pt.x);
-            uv_max.y = f64::max(uv_max.y, pt.y);
+        for boundary in &loops {
+            uv_min.x = uv_min.x.min(boundary.uv_min.x);
+            uv_min.y = uv_min.y.min(boundary.uv_min.y);
+            uv_max.x = uv_max.x.max(boundary.uv_max.x);
+            uv_max.y = uv_max.y.max(boundary.uv_max.y);
         }
         Self {
-            loops: closed,
+            loops,
             uv_min,
             uv_max,
         }
@@ -322,6 +427,7 @@ impl PolyBoundary {
         let r = Vector2::new(f64::cos(t), f64::sin(t));
         self.loops
             .iter()
+            .filter(|boundary| boundary.may_contain(c))
             .flat_map(|vec| vec.iter().circular_tuple_windows())
             .try_fold(0_i32, move |counter, (p0, p1)| {
                 let a = **p0 - c;
@@ -497,13 +603,7 @@ impl PolyBoundary {
                 }
             })
             .collect();
-        let split_vertices = triangulation
-            .vertices()
-            .map(|vertex| {
-                let point = vertex.position();
-                (vertex.fix(), Point2::new(point.x, point.y))
-            })
-            .collect::<Vec<_>>();
+        let split_vertices = SplitVertices::new(triangulation);
         let mut counter = 0;
         let mut added_constraints = 0usize;
         let mut skipped_constraints = 0usize;
@@ -515,57 +615,144 @@ impl PolyBoundary {
                 let back_point = triangulation.vertex(back).position();
                 let front_point = Point2::new(front_point.x, front_point.y);
                 let back_point = Point2::new(back_point.x, back_point.y);
-                let mut chain = split_vertices
-                    .iter()
-                    .filter_map(|(handle, point)| {
-                        if *handle == front || *handle == back {
-                            None
-                        } else {
-                            boundary_segment_parameter(*point, front_point, back_point)
-                                .map(|parameter| (parameter, *handle))
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                chain.sort_by(|lhs, rhs| lhs.0.total_cmp(&rhs.0));
                 let handles = iter::once(front)
-                    .chain(chain.into_iter().map(|(_, handle)| handle))
-                    .chain(iter::once(back))
-                    .collect::<Vec<_>>();
+                    .chain(split_vertices.ordered_handles((front, front_point), (back, back_point)))
+                    .chain(iter::once(back));
                 let mut handled = false;
-                handles.windows(2).for_each(|window| {
-                    if window[0] != window[1] {
+                handles.tuple_windows().for_each(|(front, back)| {
+                    if front != back {
                         handled = true;
                         add_direct_cdt_constraint(
                             triangulation,
                             &mut added_constraints,
                             &mut skipped_constraints,
-                            window[0],
-                            window[1],
+                            front,
+                            back,
                         );
                     }
                 });
                 handled
             }
         };
-        self.loops.iter().map(Vec::len).for_each(|len| {
-            let range = counter..counter + len;
-            counter += len;
-            let mut prev: Option<usize> = None;
-            range.circular_tuple_windows().for_each(|(i, j)| {
-                let Some(vj) = poly2tri[j] else { return };
-                if let Some(p) = prev {
-                    let Some(v) = poly2tri[p] else { return };
-                    if add_constraint(v, vj) {
-                        prev = None;
+        self.loops
+            .iter()
+            .map(|boundary| boundary.len())
+            .for_each(|len| {
+                let range = counter..counter + len;
+                counter += len;
+                let mut prev: Option<usize> = None;
+                range.circular_tuple_windows().for_each(|(i, j)| {
+                    let Some(vj) = poly2tri[j] else { return };
+                    if let Some(p) = prev {
+                        let Some(v) = poly2tri[p] else { return };
+                        if add_constraint(v, vj) {
+                            prev = None;
+                        }
+                    } else {
+                        let Some(vi) = poly2tri[i] else { return };
+                        if !add_constraint(vi, vj) {
+                            prev = Some(i);
+                        }
                     }
-                } else {
-                    let Some(vi) = poly2tri[i] else { return };
-                    if !add_constraint(vi, vj) {
-                        prev = Some(i);
-                    }
-                }
+                });
             });
-        });
         (boundary_map.len(), added_constraints, skipped_constraints)
+    }
+}
+
+#[cfg(test)]
+mod spiling_trim_bounds_tests {
+    use super::*;
+
+    fn rectangle(min: f64, max: f64, hole: bool) -> BoundaryLoop {
+        let mut points = [
+            Point2::new(min, min),
+            Point2::new(max, min),
+            Point2::new(max, max),
+            Point2::new(min, max),
+        ];
+        if hole {
+            points.reverse();
+        }
+        points
+            .into_iter()
+            .map(|uv| SurfacePoint::from((uv, Point3::new(uv.x, uv.y, 0.0))))
+            .collect()
+    }
+
+    #[test]
+    fn cached_loop_bounds_preserve_disjoint_hole_winding_and_edges() {
+        let boundary = PolyBoundary {
+            loops: vec![
+                rectangle(0.0, 100.0, false),
+                rectangle(10.0, 30.0, true),
+                rectangle(60.0, 80.0, true),
+            ],
+            uv_min: Point2::new(0.0, 0.0),
+            uv_max: Point2::new(100.0, 100.0),
+        };
+        for x in 0..100 {
+            for y in 0..100 {
+                let point = Point2::new(x as f64 + 0.37, y as f64 + 0.61);
+                let in_hole = [(10.0, 30.0), (60.0, 80.0)].into_iter().any(|(min, max)| {
+                    point.x > min && point.x < max && point.y > min && point.y < max
+                });
+                assert_eq!(boundary.include(point), !in_hole, "trim point {point:?}");
+            }
+        }
+        for (point, inside) in [
+            (Point2::new(10.0 - 2.0 * TOLERANCE, 20.0), true),
+            (Point2::new(10.0, 20.0), false),
+            (Point2::new(10.0 + 2.0 * TOLERANCE, 20.0), false),
+            (Point2::new(-2.0 * TOLERANCE, 20.0), false),
+            (Point2::new(50.0, 50.0), true),
+        ] {
+            assert_eq!(boundary.include(point), inside, "trim edge {point:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod spiling_constraint_index_tests {
+    use super::*;
+
+    #[test]
+    fn indexed_boundary_constraints_preserve_existing_collinear_vertices() {
+        let mut triangulation = Cdt::new();
+        let bottom_mid = triangulation.insert(SPoint2::new(5.0, 0.0)).unwrap();
+        let right_mid = triangulation.insert(SPoint2::new(10.0, 5.0)).unwrap();
+        let interior = triangulation.insert(SPoint2::new(5.0, 3.0)).unwrap();
+        let bottom_left = triangulation.insert(SPoint2::new(0.0, 0.0)).unwrap();
+        let bottom_right = triangulation.insert(SPoint2::new(10.0, 0.0)).unwrap();
+        let top_right = triangulation.insert(SPoint2::new(10.0, 10.0)).unwrap();
+        let top_left = triangulation.insert(SPoint2::new(0.0, 10.0)).unwrap();
+        let boundary = PolyBoundary {
+            loops: vec![
+                [
+                    Point2::new(0.0, 0.0),
+                    Point2::new(10.0, 0.0),
+                    Point2::new(10.0, 10.0),
+                    Point2::new(0.0, 10.0),
+                ]
+                .into_iter()
+                .map(|uv| SurfacePoint::from((uv, Point3::new(uv.x, uv.y, 0.0))))
+                .collect(),
+            ],
+            uv_min: Point2::new(0.0, 0.0),
+            uv_max: Point2::new(10.0, 10.0),
+        };
+        boundary.insert_to(&mut triangulation, &mut HashMap::default());
+        for (front, back) in [
+            (bottom_left, bottom_mid),
+            (bottom_mid, bottom_right),
+            (bottom_right, right_mid),
+            (right_mid, top_right),
+            (top_right, top_left),
+            (top_left, bottom_left),
+        ] {
+            assert!(triangulation.exists_constraint(front, back));
+        }
+        assert!(!triangulation.exists_constraint(bottom_left, interior));
+        assert!(!triangulation.exists_constraint(interior, bottom_right));
     }
 }

@@ -14,20 +14,23 @@
 //! - `altshell_to_shell` converts that arm back to `C` via
 //!   `SurfaceCurve::with_boundaries(..).into()` (the conversion the current
 //!   `ShapeOpsCurve` bound provides), not `IntersectionCurve::new(..).into()`.
-//! - Failures map onto the current `ShapeOpsError` (`EmptyOutputShell` for a
-//!   `None` pipeline result, `InvalidOutputShell` for a rejected solid), since
-//!   the current error enum has no single `Internal` variant.
+//! - Failures retain the stage-specific `ShapeOpsError` rather than treating
+//!   a failed intermediate operation as an empty geometric result.
 
 mod divide_face;
 mod faces_classification;
 mod intersection_curve;
 mod loops_store;
 
-use super::integrate::{ShapeOpsCurve, ShapeOpsError, ShapeOpsSurface};
+use super::integrate::{
+    InvalidOutputEdgeIncidenceData, InvalidOutputShellConditionData, ShapeOpsCurve, ShapeOpsError,
+    ShapeOpsSurface,
+};
 use crate::alternative::Alternative;
 use monstertruck_geometry::prelude::*;
 use monstertruck_meshing::prelude::*;
 use monstertruck_topology::*;
+use rustc_hash::FxHashMap as HashMap;
 use std::iter;
 
 type ClassicResult<T> = std::result::Result<T, ShapeOpsError>;
@@ -76,16 +79,17 @@ fn altshell_to_shell<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     )
 }
 
-/// Split one pair of shells into `[and_shell, or_shell]` (0.3.2 verbatim): build
-/// intersection loops, divide faces, classify each divided face as `and`/`or`,
-/// then ray-cast the remaining `unknown` faces against the other shell.
+/// Split one pair of shells into `[and_shell, or_shell]`: build intersection
+/// loops, divide faces, classify each divided face as `and`/`or`, then ray-cast
+/// the remaining `unknown` faces against the other shell. Retain failed stage
+/// identity instead of conflating intermediate failure with an empty result.
 fn process_one_pair_of_shells<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     shell0: &Shell<Point3, C, S>,
     shell1: &Shell<Point3, C, S>,
     tol: f64,
-) -> Option<[Shell<Point3, C, S>; 2]> {
+) -> ClassicResult<[Shell<Point3, C, S>; 2]> {
     if tol <= 0.0 {
-        return None;
+        return Err(ShapeOpsError::InvalidTolerance);
     }
     let poly_shell0 = shell0.triangulation(tol);
     let poly_shell1 = shell1.triangulation(tol);
@@ -98,43 +102,54 @@ fn process_one_pair_of_shells<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
         geom_loops_store1: loops_store1,
         ..
     } = loops_store::create_loops_stores(&altshell0, &poly_shell0, &altshell1, &poly_shell1)?;
-    let mut cls0 = divide_face::divide_faces(&altshell0, &loops_store0, tol)?;
+    let mut cls0 = divide_face::divide_faces(&altshell0, &loops_store0, tol, 0)?;
     cls0.integrate_by_component();
-    let mut cls1 = divide_face::divide_faces(&altshell1, &loops_store1, tol)?;
+    let mut cls1 = divide_face::divide_faces(&altshell1, &loops_store1, tol, 1)?;
     cls1.integrate_by_component();
     let [mut and0, mut or0, unknown0] = cls0.and_or_unknown();
-    unknown0.into_iter().try_for_each(|face| {
-        let pt = face.boundaries()[0].vertex_iter().next().unwrap().point();
-        let dir = hash::take_one_unit(pt);
-        let count = poly_shell1.iter().try_fold(0, |count, face| {
-            let poly = face.surface()?;
-            Some(count + poly.signed_crossing_faces(pt, dir))
-        })?;
-        if count >= 1 {
-            and0.push(face);
-        } else {
-            or0.push(face);
-        }
-        Some(())
-    })?;
+    unknown0
+        .into_iter()
+        .try_for_each(|face| {
+            let pt = face.boundaries()[0].vertex_iter().next().unwrap().point();
+            let dir = hash::take_one_unit(pt);
+            let count = poly_shell1.iter().try_fold(0, |count, face| {
+                let poly = face.surface()?;
+                Some(count + poly.signed_crossing_faces(pt, dir))
+            })?;
+            if count >= 1 {
+                and0.push(face);
+            } else {
+                or0.push(face);
+            }
+            Some(())
+        })
+        .ok_or(ShapeOpsError::UnknownClassificationFailed { shell_index: 0 })?;
     let [mut and1, mut or1, unknown1] = cls1.and_or_unknown();
-    unknown1.into_iter().try_for_each(|face| {
-        let pt = face.boundaries()[0].vertex_iter().next().unwrap().point();
-        let dir = hash::take_one_unit(pt);
-        let count = poly_shell0.iter().try_fold(0, |count, face| {
-            let poly = face.surface()?;
-            Some(count + poly.signed_crossing_faces(pt, dir))
-        })?;
-        if count >= 1 {
-            and1.push(face);
-        } else {
-            or1.push(face);
-        }
-        Some(())
-    })?;
+    unknown1
+        .into_iter()
+        .try_for_each(|face| {
+            let pt = face.boundaries()[0].vertex_iter().next().unwrap().point();
+            let dir = hash::take_one_unit(pt);
+            let count = poly_shell0.iter().try_fold(0, |count, face| {
+                let poly = face.surface()?;
+                Some(count + poly.signed_crossing_faces(pt, dir))
+            })?;
+            if count >= 1 {
+                and1.push(face);
+            } else {
+                or1.push(face);
+            }
+            Some(())
+        })
+        .ok_or(ShapeOpsError::UnknownClassificationFailed { shell_index: 1 })?;
     and0.append(&mut and1);
     or0.append(&mut or1);
-    Some([altshell_to_shell(&and0)?, altshell_to_shell(&or0)?])
+    Ok([
+        altshell_to_shell(&and0)
+            .ok_or(ShapeOpsError::AltShellConversionFailed { operation: "and" })?,
+        altshell_to_shell(&or0)
+            .ok_or(ShapeOpsError::AltShellConversionFailed { operation: "or" })?,
+    ])
 }
 
 fn finalize<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
@@ -142,8 +157,74 @@ fn finalize<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     shell: Shell<Point3, C, S>,
 ) -> ClassicResult<Solid<Point3, C, S>> {
     let boundaries = shell.connected_components();
-    Solid::try_new(boundaries)
-        .map_err(|source| ShapeOpsError::InvalidOutputShell { operation, source })
+    boundaries
+        .iter()
+        .enumerate()
+        .try_for_each(|(shell_index, shell)| {
+            shell.check_solid_boundary().map_err(|source| {
+                let mut incidences =
+                    HashMap::<EdgeId<C>, InvalidOutputEdgeIncidenceData>::default();
+                shell.iter().enumerate().for_each(|(face_index, face)| {
+                    face.edge_iter().for_each(|edge| {
+                        let data = incidences.entry(edge.id()).or_insert_with(|| {
+                            InvalidOutputEdgeIncidenceData {
+                                endpoints: [
+                                    edge.absolute_front().point(),
+                                    edge.absolute_back().point(),
+                                ],
+                                counts: [0; 2],
+                                uses: [None; 2],
+                            }
+                        });
+                        let count = data.counts[0] + data.counts[1];
+                        if count < data.uses.len() {
+                            data.uses[count] =
+                                Some((face_index, face.orientation(), edge.orientation()));
+                        }
+                        data.counts[usize::from(!edge.orientation())] += 1;
+                    });
+                });
+                let (bad_edge_count, first_bad_edge) = incidences
+                    .values()
+                    .filter(|data| data.counts != [1, 1])
+                    .fold((0, None), |(count, mut first), data| {
+                        if first.is_none() {
+                            first = Some(*data);
+                        }
+                        (count + 1, first)
+                    });
+                let boundary = shell.extract_boundaries();
+                let singular = shell.singular_vertices();
+                ShapeOpsError::InvalidOutputShellCondition(Box::new(
+                    InvalidOutputShellConditionData {
+                        operation,
+                        shell_index,
+                        source,
+                        bad_edge_count,
+                        first_bad_edge,
+                        empty: shell.is_empty(),
+                        connected: shell.is_connected(),
+                        condition: shell.shell_condition(),
+                        boundary_loops: boundary.len(),
+                        first_boundary_len: boundary.first().map(|wire| wire.len()),
+                        first_boundary_front: boundary
+                            .first()
+                            .and_then(Wire::front_vertex)
+                            .map(Vertex::point),
+                        first_boundary_back: boundary
+                            .first()
+                            .and_then(Wire::back_vertex)
+                            .map(Vertex::point),
+                        singular_vertices: singular.len(),
+                        first_singular: singular.first().map(Vertex::point),
+                    },
+                ))
+            })
+        })?;
+    // These are exactly `Solid::try_new`'s release-active boundary checks.
+    // Certifying borrowed shells retains failure evidence without cloning
+    // successful topology or validating the same boundaries twice.
+    Ok(Solid::new_unchecked(boundaries))
 }
 
 /// AND operation between two solids (classic backend).
@@ -153,9 +234,8 @@ pub(crate) fn and<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     tol: f64,
 ) -> ClassicResult<Solid<Point3, C, S>> {
     let operation = "and";
-    let pair = |a: &Shell<Point3, C, S>, b: &Shell<Point3, C, S>| {
-        process_one_pair_of_shells(a, b, tol).ok_or(ShapeOpsError::EmptyOutputShell { operation })
-    };
+    let pair =
+        |a: &Shell<Point3, C, S>, b: &Shell<Point3, C, S>| process_one_pair_of_shells(a, b, tol);
     let mut iter0 = solid0.boundaries().iter();
     let mut iter1 = solid1.boundaries().iter();
     let shell0 = iter0.next().unwrap();
@@ -179,9 +259,8 @@ pub(crate) fn or<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     tol: f64,
 ) -> ClassicResult<Solid<Point3, C, S>> {
     let operation = "or";
-    let pair = |a: &Shell<Point3, C, S>, b: &Shell<Point3, C, S>| {
-        process_one_pair_of_shells(a, b, tol).ok_or(ShapeOpsError::EmptyOutputShell { operation })
-    };
+    let pair =
+        |a: &Shell<Point3, C, S>, b: &Shell<Point3, C, S>| process_one_pair_of_shells(a, b, tol);
     let mut iter0 = solid0.boundaries().iter();
     let mut iter1 = solid1.boundaries().iter();
     let shell0 = iter0.next().unwrap();

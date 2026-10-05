@@ -1,13 +1,14 @@
 //! Classic (0.3.2) boolean loops store.
 //!
-//! Ported verbatim from the published 0.3.2 crate's `transversal::loops_store`,
-//! adjusted only for the graft: the marching intersection-curve backend now
-//! yields a raw [`IntersectionCurve`] leader (the 0.3.2 parameter wrapper was
-//! dropped), so the `.into()` that unwrapped the wrapper is gone.
+//! Ported from the published 0.3.2 crate's `transversal::loops_store`.
+//! The marching backend yields a raw [`IntersectionCurve`] leader rather
+//! than the former parameter wrapper. Numerical failures retain face-pair
+//! and projection-stage identity instead of collapsing into `None`.
 
 #![allow(clippy::many_single_char_names)]
 
 use super::intersection_curve;
+use super::{ClassicResult, ShapeOpsError};
 use monstertruck_core::cgmath64::*;
 use monstertruck_geometry::prelude::*;
 use monstertruck_meshing::prelude::*;
@@ -348,7 +349,7 @@ impl<C> LoopsStore<Point3, C> {
         kind: ParameterKind,
         another_surface: &S,
         emap: &mut HashMap<EdgeId<C>, Edge<Point3, C>>,
-    ) -> Option<()>
+    ) -> std::result::Result<(), &'static str>
     where
         C: Cut<Point = Point3, Vector = Vector3>
             + SearchNearestParameter<CurveParameter, Point = Point3>,
@@ -376,12 +377,18 @@ impl<C> LoopsStore<Point3, C> {
                 v.set_point(pt);
                 let edge = self[loops_index][wire_index][edge_index].absolute_clone();
                 let edge_id = edge.id();
-                let (edge0, edge1) = edge.cut_with_parameter(v, t)?;
+                let (edge0, edge1) = edge.cut_with_parameter(v, t).ok_or_else(|| {
+                    if curve.evaluate(t).near(&v.point()) {
+                        "curve_cut_endpoint"
+                    } else {
+                        "curve_cut_residual"
+                    }
+                })?;
                 let new_wire: Wire<_, _> = vec![edge0, edge1].into();
                 self.swap_edge_into_wire(edge_id, &new_wire);
             }
         }
-        Some(())
+        Ok(())
     }
 }
 
@@ -392,24 +399,36 @@ fn curve_surface_projection<C, S>(
     surface_hint: Option<(f64, f64)>,
     point: Point3,
     trials: usize,
-) -> Option<(Point3, f64, Point2)>
+) -> std::result::Result<(Point3, f64, Point2), &'static str>
 where
     C: ParametricCurve3D + SearchNearestParameter<CurveParameter, Point = Point3>,
     S: ParametricSurface3D + SearchNearestParameter<SurfaceParameter, Point = Point3>,
 {
     if trials == 0 {
-        return None;
+        return Err("curve_surface_projection_trials");
     }
-    let t = curve.search_nearest_parameter(point, curve_hint, 10)?;
+    let t = curve
+        .search_nearest_parameter(point, curve_hint, 10)
+        .ok_or("curve_surface_projection_curve_parameter")?;
     let pt0 = curve.evaluate(t);
-    let (u, v) = surface.search_nearest_parameter(point, surface_hint, 10)?;
+    let (u, v) = surface
+        .search_nearest_parameter(pt0, surface_hint, 10)
+        .ok_or("curve_surface_projection_surface_parameter")?;
     let pt1 = surface.evaluate(u, v);
-    if point.near(&pt0) && point.near(&pt1) && pt0.near(&pt1) {
-        Some((point, t, Point2::new(u, v)))
+    // The mesh seed need not lie on the native curve. Project the curve
+    // point onto the surface and test their residual, not the seed residual.
+    // This also handles a boundary curve already contained in the surface
+    // without a singular tangent-plane Newton step.
+    if pt0.near(&pt1) {
+        Ok((pt0, t, Point2::new(u, v)))
     } else {
         let l = curve.derivative(t);
         let n = surface.normal(u, v);
-        let t0 = (pt1 - pt0).dot(n) / l.dot(n);
+        let denominator = l.dot(n);
+        if denominator == 0.0 || !denominator.is_finite() {
+            return Err("curve_surface_projection_nontransversal");
+        }
+        let t0 = (pt1 - pt0).dot(n) / denominator;
         curve_surface_projection(
             curve,
             Some(t),
@@ -448,7 +467,7 @@ pub(super) fn create_loops_stores<C, S>(
     poly_shell0: &Shell<Point3, PolylineCurve, Option<PolygonMesh>>,
     geom_shell1: &Shell<Point3, C, S>,
     poly_shell1: &Shell<Point3, PolylineCurve, Option<PolygonMesh>>,
-) -> Option<LoopsStoreQuadruple<C>>
+) -> ClassicResult<LoopsStoreQuadruple<C>>
 where
     C: SearchNearestParameter<CurveParameter, Point = Point3>
         + SearchParameter<CurveParameter, Point = Point3>
@@ -468,21 +487,39 @@ where
     (0..store0_len)
         .flat_map(move |i| (0..store1_len).map(move |j| (i, j)))
         .try_for_each(|(face_index0, face_index1)| {
+            let failure = |stage, detail| ShapeOpsError::IntersectionLoopsFailed {
+                face_index0,
+                face_index1,
+                stage,
+                detail,
+            };
             let ori0 = geom_shell0[face_index0].orientation();
             let ori1 = geom_shell1[face_index1].orientation();
             let surface0 = geom_shell0[face_index0].surface();
             let surface1 = geom_shell1[face_index1].surface();
-            let polygon0 = poly_shell0[face_index0].surface()?;
-            let polygon1 = poly_shell1[face_index1].surface()?;
+            let polygon0 = poly_shell0[face_index0].surface().ok_or(
+                ShapeOpsError::InputTessellationFailed {
+                    shell_index: 0,
+                    face_index: face_index0,
+                },
+            )?;
+            let polygon1 = poly_shell1[face_index1].surface().ok_or(
+                ShapeOpsError::InputTessellationFailed {
+                    shell_index: 1,
+                    face_index: face_index1,
+                },
+            )?;
             intersection_curve::intersection_curves(
                 surface0.clone(),
                 &polygon0,
                 surface1.clone(),
                 &polygon1,
-            )?
+            )
+            .ok_or_else(|| failure("intersection_curve_projection", "native_projection"))?
             .into_iter()
             .try_for_each(|(polyline, mut intersection_curve)| {
-                let status = ShapesOpStatus::from_is_curve(&intersection_curve)?;
+                let status = ShapesOpStatus::from_is_curve(&intersection_curve)
+                    .ok_or_else(|| failure("intersection_curve_status", "native_projection"))?;
                 let (status0, status1) = match (ori0, ori1) {
                     (true, true) => (status, status.not()),
                     (true, false) => (status.not(), status.not()),
@@ -512,52 +549,60 @@ where
                     let idx00 =
                         poly_loops_store0.add_polygon_vertex(face_index0, &pv0, &mut pemap0);
                     if let Some((wire_index, edge_index, kind)) = idx00 {
-                        geom_loops_store0.add_geom_vertex(
-                            (face_index0, wire_index, edge_index),
-                            &gv0,
-                            kind,
-                            &surface1,
-                            &mut gemap0,
-                        )?;
+                        geom_loops_store0
+                            .add_geom_vertex(
+                                (face_index0, wire_index, edge_index),
+                                &gv0,
+                                kind,
+                                &surface1,
+                                &mut gemap0,
+                            )
+                            .map_err(|detail| failure("boundary_vertex0_front", detail))?;
                         let polyline = intersection_curve.leader_mut();
                         *polyline.first_mut().unwrap() = gv0.point();
                     }
                     let idx01 =
                         poly_loops_store0.add_polygon_vertex(face_index0, &pv1, &mut pemap1);
                     if let Some((wire_index, edge_index, kind)) = idx01 {
-                        geom_loops_store0.add_geom_vertex(
-                            (face_index0, wire_index, edge_index),
-                            &gv1,
-                            kind,
-                            &surface1,
-                            &mut gemap1,
-                        )?;
+                        geom_loops_store0
+                            .add_geom_vertex(
+                                (face_index0, wire_index, edge_index),
+                                &gv1,
+                                kind,
+                                &surface1,
+                                &mut gemap1,
+                            )
+                            .map_err(|detail| failure("boundary_vertex0_back", detail))?;
                         let polyline = intersection_curve.leader_mut();
                         *polyline.last_mut().unwrap() = gv1.point();
                     }
                     let idx10 =
                         poly_loops_store1.add_polygon_vertex(face_index1, &pv0, &mut pemap0);
                     if let Some((wire_index, edge_index, kind)) = idx10 {
-                        geom_loops_store1.add_geom_vertex(
-                            (face_index1, wire_index, edge_index),
-                            &gv0,
-                            kind,
-                            &surface0,
-                            &mut gemap0,
-                        )?;
+                        geom_loops_store1
+                            .add_geom_vertex(
+                                (face_index1, wire_index, edge_index),
+                                &gv0,
+                                kind,
+                                &surface0,
+                                &mut gemap0,
+                            )
+                            .map_err(|detail| failure("boundary_vertex1_front", detail))?;
                         let polyline = intersection_curve.leader_mut();
                         *polyline.first_mut().unwrap() = gv0.point();
                     }
                     let idx11 =
                         poly_loops_store1.add_polygon_vertex(face_index1, &pv1, &mut pemap1);
                     if let Some((wire_index, edge_index, kind)) = idx11 {
-                        geom_loops_store1.add_geom_vertex(
-                            (face_index1, wire_index, edge_index),
-                            &gv1,
-                            kind,
-                            &surface0,
-                            &mut gemap1,
-                        )?;
+                        geom_loops_store1
+                            .add_geom_vertex(
+                                (face_index1, wire_index, edge_index),
+                                &gv1,
+                                kind,
+                                &surface0,
+                                &mut gemap1,
+                            )
+                            .map_err(|detail| failure("boundary_vertex1_back", detail))?;
                         let polyline = intersection_curve.leader_mut();
                         *polyline.last_mut().unwrap() = gv1.point();
                     }
@@ -568,13 +613,82 @@ where
                     poly_loops_store1[face_index1].add_edge(pedge, status1);
                     geom_loops_store1[face_index1].add_edge(gedge, status1);
                 }
-                Some(())
+                Ok::<(), ShapeOpsError>(())
             })
         })?;
-    Some(LoopsStoreQuadruple {
+    Ok(LoopsStoreQuadruple {
         geom_loops_store0,
         poly_loops_store0,
         geom_loops_store1,
         poly_loops_store1,
     })
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    fn xy_plane() -> Plane {
+        Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        )
+    }
+
+    #[test]
+    fn contained_native_boundary_projects_an_off_curve_mesh_seed() {
+        let curve = BsplineCurve::new(
+            KnotVector::bezier_knot(1),
+            vec![Point3::new(-1.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)],
+        );
+        let surface = xy_plane();
+        let (point, t, uv) = curve_surface_projection(
+            &curve,
+            None,
+            &surface,
+            None,
+            Point3::new(0.25, 0.01, 0.0),
+            100,
+        )
+        .expect("native boundary contained in the clipping plane");
+        assert!(point.near(&Point3::new(0.25, 0.0, 0.0)));
+        assert!(point.near(&curve.evaluate(t)));
+        assert!(point.near(&surface.evaluate(uv.x, uv.y)));
+    }
+
+    #[test]
+    fn transversal_boundary_projects_but_disjoint_parallel_boundary_fails() {
+        let surface = xy_plane();
+        let crossing = BsplineCurve::new(
+            KnotVector::bezier_knot(1),
+            vec![Point3::new(0.0, 0.0, -1.0), Point3::new(0.0, 0.0, 1.0)],
+        );
+        let (point, _, _) = curve_surface_projection(
+            &crossing,
+            None,
+            &surface,
+            None,
+            Point3::new(0.01, 0.0, 0.25),
+            100,
+        )
+        .expect("transversal boundary intersects the clipping plane");
+        assert!(point.near(&Point3::origin()));
+        let disjoint = BsplineCurve::new(
+            KnotVector::bezier_knot(1),
+            vec![Point3::new(-1.0, 0.0, 1.0), Point3::new(1.0, 0.0, 1.0)],
+        );
+        assert_eq!(
+            curve_surface_projection(
+                &disjoint,
+                None,
+                &surface,
+                None,
+                Point3::new(0.25, 0.0, 0.0),
+                100,
+            )
+            .unwrap_err(),
+            "curve_surface_projection_nontransversal",
+        );
+    }
 }

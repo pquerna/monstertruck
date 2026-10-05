@@ -147,11 +147,44 @@ pub enum ShapeOpsError {
         "no boolean backend available: enable `marching-ssi` (default) or link an external SSI backend."
     )]
     NoBackend,
+    /// Tessellation omitted a native face needed for intersection discovery.
+    #[error("failed to tessellate boolean input shell {shell_index}, face {face_index}.")]
+    InputTessellationFailed {
+        /// 0 for the first shell, 1 for the second shell.
+        shell_index: usize,
+        /// Positional native face ordinal in the input shell.
+        face_index: usize,
+    },
+    /// Intersections could not be assembled into consistent face-local loops.
+    #[error(
+        "failed to construct boolean intersection loops for faces ({face_index0}, {face_index1}) at {stage}: {detail}."
+    )]
+    IntersectionLoopsFailed {
+        /// Face ordinal in the first shell.
+        face_index0: usize,
+        /// Face ordinal in the second shell.
+        face_index1: usize,
+        /// Failed numerical stage.
+        stage: &'static str,
+        /// Failed operation within the numerical stage.
+        detail: &'static str,
+    },
     /// Face division failed for one shell.
-    #[error("failed to divide faces for shell {shell_index}.")]
+    #[error(
+        "failed to divide faces for shell {shell_index}, face {face_index} at {stage}: {source:?}, boundary={boundary:?}."
+    )]
     DivideFacesFailed {
         /// 0 for the first shell, 1 for the second shell.
         shell_index: usize,
+        /// Positional input face ordinal.
+        face_index: usize,
+        /// Failed projection or topology operation.
+        stage: &'static str,
+        /// Native topology construction error, when projection succeeded.
+        #[source]
+        source: Option<TopologyError>,
+        /// Bounded endpoint/orientation trace for an invalid boundary.
+        boundary: Option<DivideFaceBoundaryData>,
     },
     /// Unknown face classification failed for one shell.
     #[error("failed to classify unknown faces for shell {shell_index}.")]
@@ -185,16 +218,41 @@ pub enum ShapeOpsError {
     },
 }
 
+/// Bounded topology evidence from a failed divided face.
+#[derive(Debug)]
+pub struct DivideFaceBoundaryData {
+    /// Number of boundaries assigned to this divided face.
+    pub wire_count: usize,
+    /// Ordinal of the first individually invalid boundary, or zero for a
+    /// cross-boundary disjointness failure.
+    pub wire_index: usize,
+    /// Full number of edges in that boundary.
+    pub wire_len: usize,
+    /// Whether its topological vertices form a closed wire.
+    pub closed: bool,
+    /// Whether its vertices form a simple wire.
+    pub simple: bool,
+    /// First twelve oriented endpoint pairs and absolute edge orientations.
+    pub edges: Vec<(Point3, Point3, bool)>,
+}
+
 /// Diagnostic data for invalid output shell conditions.
 #[derive(Debug, Error)]
 #[error(
-    "invalid output shell for `{operation}` at index {shell_index}: empty={empty}, connected={connected}, condition={condition:?}, boundary_loops={boundary_loops}, first_boundary_len={first_boundary_len:?}, first_boundary_front={first_boundary_front:?}, first_boundary_back={first_boundary_back:?}, singular_vertices={singular_vertices}, first_singular={first_singular:?}."
+    "invalid output shell for `{operation}` at index {shell_index}: source={source}, condition={condition:?}, bad_edge_count={bad_edge_count}, first_bad_edge={first_bad_edge:?}, empty={empty}, connected={connected}, boundary_loops={boundary_loops}, first_boundary_len={first_boundary_len:?}, first_boundary_front={first_boundary_front:?}, first_boundary_back={first_boundary_back:?}, singular_vertices={singular_vertices}, first_singular={first_singular:?}."
 )]
 pub struct InvalidOutputShellConditionData {
     /// Boolean operation name.
     pub operation: &'static str,
     /// Boundary shell index.
     pub shell_index: usize,
+    /// Native release-active boundary validation error.
+    #[source]
+    pub source: TopologyError,
+    /// Number of edge identities without one forward and one reverse use.
+    pub bad_edge_count: usize,
+    /// Bounded orientation/incidence evidence for the first such edge.
+    pub first_bad_edge: Option<InvalidOutputEdgeIncidenceData>,
     /// Whether shell has no faces.
     pub empty: bool,
     /// Whether shell is topologically connected.
@@ -213,6 +271,17 @@ pub struct InvalidOutputShellConditionData {
     pub singular_vertices: usize,
     /// First singular vertex point if present.
     pub first_singular: Option<Point3>,
+}
+
+/// Orientation/incidence evidence from an invalid output shell edge.
+#[derive(Clone, Copy, Debug)]
+pub struct InvalidOutputEdgeIncidenceData {
+    /// Endpoints in the edge's absolute orientation.
+    pub endpoints: [Point3; 2],
+    /// Counts of forward and reverse effective face-boundary uses.
+    pub counts: [usize; 2],
+    /// First two `(face ordinal, face orientation, effective edge orientation)` uses.
+    pub uses: [Option<(usize, bool, bool)>; 2],
 }
 
 type ShapeOpsResult<T> = std::result::Result<T, ShapeOpsError>;

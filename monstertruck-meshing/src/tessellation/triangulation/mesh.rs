@@ -1,7 +1,7 @@
 use std::iter;
 
 use super::*;
-use boundary::{PolyBoundary, UvKey, boundary_segment_parameter, uv_key};
+use boundary::{PolyBoundary, SplitVertices, UvKey, uv_key};
 
 const MAX_SURFACE_SPAN_INTERVALS: usize = 32;
 const SURFACE_SPAN_TOLERANCE_FACTOR: f64 = 8.0;
@@ -69,32 +69,19 @@ pub(super) fn spade_round(x: f64) -> f64 {
 
 fn add_constraint_through_existing_vertices(
     triangulation: &mut Cdt,
-    split_vertices: &[(FixedVertexHandle, Point2)],
+    split_vertices: &SplitVertices,
     front: (FixedVertexHandle, Point2),
     back: (FixedVertexHandle, Point2),
 ) {
     if front.0 == back.0 {
         return;
     }
-    let mut chain = split_vertices
-        .iter()
-        .filter_map(|(handle, point)| {
-            if *handle == front.0 || *handle == back.0 {
-                None
-            } else {
-                boundary_segment_parameter(*point, front.1, back.1)
-                    .map(|parameter| (parameter, *handle))
-            }
-        })
-        .collect::<Vec<_>>();
-    chain.sort_by(|lhs, rhs| lhs.0.total_cmp(&rhs.0));
     let handles = iter::once(front.0)
-        .chain(chain.into_iter().map(|(_, handle)| handle))
-        .chain(iter::once(back.0))
-        .collect::<Vec<_>>();
-    handles.windows(2).for_each(|window| {
-        if window[0] != window[1] && triangulation.can_add_constraint(window[0], window[1]) {
-            triangulation.add_constraint(window[0], window[1]);
+        .chain(split_vertices.ordered_handles(front, back))
+        .chain(iter::once(back.0));
+    handles.tuple_windows().for_each(|(front, back)| {
+        if front != back && triangulation.can_add_constraint(front, back) {
+            triangulation.add_constraint(front, back);
         }
     });
 }
@@ -827,6 +814,43 @@ fn densify_divisions(
     divisions
 }
 
+fn desired_axis_intervals<S: ParametricSurface3D>(
+    surface: &S,
+    range: ((f64, f64), (f64, f64)),
+    divisions: &[f64],
+    axis: usize,
+    tolerance: f64,
+) -> usize {
+    let umid = (range.0.0 + range.0.1) * 0.5;
+    let vmid = (range.1.0 + range.1.1) * 0.5;
+    let derivative = |u, v| {
+        if axis == 0 {
+            surface.derivative_u(u, v)
+        } else {
+            surface.derivative_v(u, v)
+        }
+    };
+    let tangent = derivative(umid, vmid);
+    let tangent_norm_squared = tangent.magnitude2();
+    // Preserve native subdivisions; span alone does not imply curvature.
+    // An exactly constant sampled tangent needs only an interior surface row.
+    if tangent_norm_squared.is_finite()
+        && tangent_norm_squared > 0.0
+        && [range.0.0, umid, range.0.1].into_iter().all(|u| {
+            [range.1.0, vmid, range.1.1]
+                .into_iter()
+                .all(|v| (u == umid && v == vmid) || derivative(u, v) == tangent)
+        })
+    {
+        return 2;
+    }
+    let other_mid = if axis == 0 { vmid } else { umid };
+    desired_span_intervals(
+        division_axis_length(surface, divisions, axis, other_mid),
+        tolerance,
+    )
+}
+
 fn densify_surface_divisions<S: ParametricSurface3D>(
     surface: &S,
     range: ((f64, f64), (f64, f64)),
@@ -834,13 +858,11 @@ fn densify_surface_divisions<S: ParametricSurface3D>(
     tolerance: f64,
 ) -> (Vec<f64>, Vec<f64>) {
     let (udiv, vdiv) = divisions;
-    let vmid = (range.1.0 + range.1.1) * 0.5;
-    let umid = (range.0.0 + range.0.1) * 0.5;
-    let u_length = division_axis_length(surface, &udiv, 0, vmid);
-    let v_length = division_axis_length(surface, &vdiv, 1, umid);
+    let u_intervals = desired_axis_intervals(surface, range, &udiv, 0, tolerance);
+    let v_intervals = desired_axis_intervals(surface, range, &vdiv, 1, tolerance);
     (
-        densify_divisions(udiv, range.0, desired_span_intervals(u_length, tolerance)),
-        densify_divisions(vdiv, range.1, desired_span_intervals(v_length, tolerance)),
+        densify_divisions(udiv, range.0, u_intervals),
+        densify_divisions(vdiv, range.1, v_intervals),
     )
 }
 
@@ -896,13 +918,7 @@ fn insert_surface(
         division_start,
     );
     let insert_start = Instant::now();
-    let split_vertices = triangulation
-        .vertices()
-        .map(|vertex| {
-            let point = *vertex.as_ref();
-            (vertex.fix(), Point2::new(point.x, point.y))
-        })
-        .collect::<Vec<_>>();
+    let split_vertices = SplitVertices::new(triangulation);
     let insert_res: Vec<Vec<Option<_>>> = udiv
         .into_iter()
         .map(|u| {
