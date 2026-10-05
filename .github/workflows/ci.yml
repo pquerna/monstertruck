@@ -19,9 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # CI cannot clone the `.blueprints` submodule (agent tooling), so do
-          # not recurse. Jobs that compile or run code fetch the public
-          # `resources` submodule explicitly below.
+          # Jobs that compile or run code fetch the public `resources`
+          # submodule explicitly below.
           submodules: false
       # `rustfmt.toml` opts into unstable options (`fn_single_line`,
       # `where_single_line`, `brace_style = "PreferSameLine"`); stable
@@ -38,9 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # CI cannot clone the `.blueprints` submodule (agent tooling), so do
-          # not recurse. Jobs that compile or run code fetch the public
-          # `resources` submodule explicitly below.
+          # Jobs that compile or run code fetch the public `resources`
+          # submodule explicitly below.
           submodules: false
       - run: git submodule update --init resources
       - uses: dtolnay/rust-toolchain@nightly
@@ -56,9 +54,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # CI cannot clone the `.blueprints` submodule (agent tooling), so do
-          # not recurse. Jobs that compile or run code fetch the public
-          # `resources` submodule explicitly below.
+          # Jobs that compile or run code fetch the public `resources`
+          # submodule explicitly below.
           submodules: false
       - run: git submodule update --init resources
       - uses: dtolnay/rust-toolchain@nightly
@@ -80,9 +77,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # CI cannot clone the `.blueprints` submodule (agent tooling), so do
-          # not recurse. Jobs that compile or run code fetch the public
-          # `resources` submodule explicitly below.
+          # Jobs that compile or run code fetch the public `resources`
+          # submodule explicitly below.
           submodules: false
       - run: git submodule update --init resources
       - uses: dtolnay/rust-toolchain@nightly
@@ -96,9 +92,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # CI cannot clone the `.blueprints` submodule (agent tooling), so do
-          # not recurse. Jobs that compile or run code fetch the public
-          # `resources` submodule explicitly below.
+          # Jobs that compile or run code fetch the public `resources`
+          # submodule explicitly below.
           submodules: false
       - run: git submodule update --init resources
       - uses: dtolnay/rust-toolchain@nightly

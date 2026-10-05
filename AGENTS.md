@@ -1,24 +1,14 @@
 # Repository Guidelines
 
-## Blueprint Baseline
+## Spiling Fork
 
-This repo adopts the shared [`blueprints`](https://github.com/virtualritz/blueprints)
-baseline via the `.blueprints/` git submodule. Those files are the cross-project
-default for agent behavior, code quality, and microtypography; the
-project-specific rules in this file take precedence wherever they conflict.
+Spiling integration changes live on `pquerna/monstertruck` branch `spiling-dev`,
+based on the public upstream `virtualritz/monstertruck` default branch `master`.
+Keep local patches focused and preserve upstream licensing and attribution.
+Spiling consumers pin an exact commit, not the moving branch.
 
-Core rules (read first):
-
-- [Agent behavior](.blueprints/base/AGENTS.md)
-- [Rust agent rules](.blueprints/lang/rust/AGENTS.md) and [Rust testing](.blueprints/lang/rust/testing.md)
-- [Git safety](.blueprints/base/git-safety.md) and [test ownership](.blueprints/base/test-ownership.md)
-
-Reference:
-
-- [Microtypography](.blueprints/base/microtypography.md) -- slashes, dashes, quotes, ellipses, spacing.
-- [Documentation standards](.blueprints/base/documentation.md)
-- [Commit messages](.blueprints/base/commit-messages.md)
-- [API change protocol](.blueprints/base/api-changes.md)
+This fork uses the public project-specific rules below. The private `.blueprints`
+agent-guidance submodule is not required to clone or build the public source.
 
 ## Build, Test, and Development Commands
 
