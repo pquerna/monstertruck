@@ -269,3 +269,97 @@ fn periodic_hole_and_preserves_inward_wall_horizontal_and_oblique() {
         assert_upper_material(&source, 0.6, true, oblique);
     }
 }
+
+#[test]
+fn placed_low_layer_periodic_and_retains_transverse_caps_and_inward_hole_wall() {
+    for hole in [false, true] {
+        let radius = if hole { 0.6 } else { 2.0 };
+        let source = if hole {
+            through_hole(radius)
+        } else {
+            let (shell, _, _) = cylinder_shell(radius);
+            Solid::try_new(vec![shell]).unwrap()
+        };
+        let translation = if hole {
+            Vector3::new(80.0, 0.0, 0.0)
+        } else {
+            Vector3::new(40.0, 20.0, 0.0)
+        };
+        let source = builder::translated(&source, translation);
+        let before = source_snapshot(&source);
+        for height in [0.1, 0.3] {
+            let clip: Solid = primitive::cuboid(BoundingBox::from_iter([
+                Point3::new(-3.0, -3.0, height) + translation,
+                Point3::new(3.0, 3.0, HEIGHT + 1.0) + translation,
+            ]));
+            let result = monstertruck_solid::and(&source, &clip, BOOLEAN_TOLERANCE)
+                .expect("placed low layer is a transverse native periodic intersection");
+            assert!(
+                result.is_geometric_consistent(),
+                "{}",
+                consistency_witness(&result)
+            );
+            assert_eq!(result.boundaries().len(), 1);
+            let shell = &result.boundaries()[0];
+            shell.check_solid_boundary().unwrap();
+            let caps: Vec<_> = shell
+                .iter()
+                .filter(|face| {
+                    matches!(face.surface(), Surface::Plane(_))
+                        && face
+                            .edge_iter()
+                            .all(|edge| (edge.front().point().z - height).abs() < BOOLEAN_TOLERANCE)
+                })
+                .collect();
+            assert_eq!(caps.len(), 1);
+            assert_eq!(
+                caps[0].absolute_boundaries().len(),
+                if hole { 2 } else { 1 }
+            );
+            assert!(
+                caps[0]
+                    .oriented_surface()
+                    .normal(0.0, 0.0)
+                    .dot(Vector3::unit_z())
+                    < -0.999
+            );
+            let circles: Vec<_> = caps[0]
+                .absolute_boundaries()
+                .iter()
+                .filter(|wire| {
+                    wire.iter().all(|edge| {
+                        let point = edge.front().point() - translation;
+                        (point.x.hypot(point.y) - radius).abs() < BOOLEAN_TOLERANCE
+                    })
+                })
+                .collect();
+            assert_eq!(circles.len(), 1);
+            assert!(circles[0].is_closed());
+            for edge in circles[0].iter() {
+                edge.with_curve(|curve| {
+                    let (start, end) = curve.range_tuple();
+                    for index in 0..=8 {
+                        let point = curve.evaluate(start + (end - start) * index as f64 / 8.0)
+                            - translation;
+                        assert!((point.x.hypot(point.y) - radius).abs() < BOOLEAN_TOLERANCE);
+                        assert!((point.z - height).abs() < BOOLEAN_TOLERANCE);
+                    }
+                });
+            }
+            let lateral = shell
+                .iter()
+                .find(|face| matches!(face.surface(), Surface::RevolutionSurface(_)))
+                .unwrap()
+                .oriented_surface();
+            let point = Point3::new(radius, 0.0, HEIGHT - 0.5) + translation;
+            let (u, v) = lateral.search_parameter(point, None, 100).unwrap();
+            let radial = lateral.normal(u, v).dot(Vector3::unit_x());
+            assert!(if hole {
+                radial < -0.999
+            } else {
+                radial > 0.999
+            });
+            assert_eq!(source_snapshot(&source), before);
+        }
+    }
+}

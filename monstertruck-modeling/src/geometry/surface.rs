@@ -87,7 +87,7 @@ const INCLUDE_CURVE_TRIALS: usize = 100;
 /// used -- interior points of each knot span, `2 * degree` of them -- rather
 /// than the control polygon, whose points are not on a rational curve at all.
 fn sampled_surface_includes_curve<S>(surface: &S, curve: &Curve) -> bool
-where S: SearchParameter<SurfaceParameter, Point = Point3> {
+where S: ParametricSurface3D + SearchParameter<SurfaceParameter, Point = Point3> {
     let include_span = |start: f64, end: f64, density: usize| {
         start.is_finite()
             && end.is_finite()
@@ -100,7 +100,7 @@ where S: SearchParameter<SurfaceParameter, Point = Point3> {
                     && point.z.is_finite()
                     && surface
                         .search_parameter(point, None, INCLUDE_CURVE_TRIALS)
-                        .is_some()
+                        .is_some_and(|(u, v)| surface.evaluate(u, v).near(&point))
             })
     };
     let include_knots = |knots: &KnotVector, degree: usize| {
@@ -204,114 +204,11 @@ impl IncludeCurve<Curve> for Surface {
                     sampled_surface_includes_curve(surface, curve)
                 }
                 Surface::ToroidalSurface(surface) => sampled_surface_includes_curve(surface, curve),
-                Surface::RevolutionSurface(surface) => match surface.entity_curve() {
-                    &Curve::Line(entity_line) => {
-                        let entity_bsp = BsplineCurve::from(entity_line);
-                        let surface = RevolutionSurface::by_revolution(
-                            &entity_bsp,
-                            surface.origin(),
-                            surface.axis(),
-                        );
-                        match curve {
-                            &Curve::Line(curve) => surface.include(&BsplineCurve::from(curve)),
-                            Curve::BsplineCurve(curve) => surface.include(curve),
-                            Curve::NurbsCurve(curve) => surface.include(curve),
-                            Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => {
-                                unreachable!()
-                            }
-                        }
-                    }
-                    Curve::BsplineCurve(entity_curve) => {
-                        let surface = RevolutionSurface::by_revolution(
-                            entity_curve,
-                            surface.origin(),
-                            surface.axis(),
-                        );
-                        match curve {
-                            &Curve::Line(curve) => surface.include(&BsplineCurve::from(curve)),
-                            Curve::BsplineCurve(curve) => surface.include(curve),
-                            Curve::NurbsCurve(curve) => surface.include(curve),
-                            Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => {
-                                unreachable!()
-                            }
-                        }
-                    }
-                    Curve::NurbsCurve(entity_curve) => {
-                        let surface = RevolutionSurface::by_revolution(
-                            entity_curve,
-                            surface.origin(),
-                            surface.axis(),
-                        );
-                        match curve {
-                            &Curve::Line(curve) => surface.include(&BsplineCurve::from(curve)),
-                            Curve::BsplineCurve(curve) => surface.include(curve),
-                            Curve::NurbsCurve(curve) => surface.include(curve),
-                            Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => {
-                                unreachable!()
-                            }
-                        }
-                    }
-                    Curve::IntersectionCurve(entity_curve) => {
-                        let leader = entity_curve.leader().as_ref();
-                        match leader {
-                            Curve::Line(entity_line) => {
-                                let entity_bsp = BsplineCurve::from(*entity_line);
-                                let surface = RevolutionSurface::by_revolution(
-                                    &entity_bsp,
-                                    surface.origin(),
-                                    surface.axis(),
-                                );
-                                match curve {
-                                    &Curve::Line(curve) => {
-                                        surface.include(&BsplineCurve::from(curve))
-                                    }
-                                    Curve::BsplineCurve(curve) => surface.include(curve),
-                                    Curve::NurbsCurve(curve) => surface.include(curve),
-                                    Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => {
-                                        unreachable!()
-                                    }
-                                }
-                            }
-                            Curve::BsplineCurve(entity_curve) => {
-                                let surface = RevolutionSurface::by_revolution(
-                                    entity_curve,
-                                    surface.origin(),
-                                    surface.axis(),
-                                );
-                                match curve {
-                                    &Curve::Line(curve) => {
-                                        surface.include(&BsplineCurve::from(curve))
-                                    }
-                                    Curve::BsplineCurve(curve) => surface.include(curve),
-                                    Curve::NurbsCurve(curve) => surface.include(curve),
-                                    Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => {
-                                        unreachable!()
-                                    }
-                                }
-                            }
-                            Curve::NurbsCurve(entity_curve) => {
-                                let surface = RevolutionSurface::by_revolution(
-                                    entity_curve,
-                                    surface.origin(),
-                                    surface.axis(),
-                                );
-                                match curve {
-                                    &Curve::Line(curve) => {
-                                        surface.include(&BsplineCurve::from(curve))
-                                    }
-                                    Curve::BsplineCurve(curve) => surface.include(curve),
-                                    Curve::NurbsCurve(curve) => surface.include(curve),
-                                    Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => {
-                                        unreachable!()
-                                    }
-                                }
-                            }
-                            Curve::ParameterCurve(_) => false,
-                            Curve::IntersectionCurve(_) => false,
-                        }
-                    }
-                    Curve::ParameterCurve(_) => false,
-                },
+                // Preserve the posed original carrier. Reconstructing from its
+                // entity curve drops the Processor's transform and inversion.
+                Surface::RevolutionSurface(surface) => {
+                    sampled_surface_includes_curve(surface, curve)
+                }
             }
         }
     }

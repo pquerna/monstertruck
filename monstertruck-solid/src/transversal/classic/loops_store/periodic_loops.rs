@@ -42,6 +42,38 @@ fn tangent<C: ParametricCurve3D + BoundedCurve>(edge: &Edge<Point3, C>, front: b
     })
 }
 
+fn intersection_direction<S>(
+    surfaces: [&S; 2],
+    point: Point3,
+    orientation: ShapesOpStatus,
+) -> std::result::Result<Vector3, &'static str>
+where
+    S: ParametricSurface3D + SearchParameter<SurfaceParameter, Point = Point3>,
+{
+    let normal = |surface: &S| {
+        let (u, v) = surface
+            .search_parameter(point, None, 100)
+            .ok_or("intersection_chart_contact_carrier")?;
+        if !surface.evaluate(u, v).near(&point) {
+            return Err("intersection_chart_contact_carrier");
+        }
+        Ok(surface.normal(u, v))
+    };
+    let direction = normal(surfaces[0])?.cross(normal(surfaces[1])?);
+    if !direction.magnitude2().is_finite() || direction.magnitude2() <= 0.0 {
+        return Err("intersection_chart_tangent");
+    }
+    // The pre-cut certificate describes curve orientation relative to these
+    // original carriers, before either face's boundary orientation is applied.
+    // A regular physical intersection need not have nonzero parameter speed at
+    // a bounded guide endpoint; its transverse carrier tangent is authoritative.
+    match orientation {
+        ShapesOpStatus::And => Ok(direction),
+        ShapesOpStatus::Or => Ok(-direction),
+        ShapesOpStatus::Unknown => Err("intersection_chart_orientation"),
+    }
+}
+
 fn chart_corner<C, S>(
     loops: &Loops<Point3, C>,
     surface: &S,
@@ -247,6 +279,7 @@ struct LoopPoint {
     polygon: Vertex<Point3>,
     native: Vertex<Point3>,
     on_boundary: [bool; 2],
+    direction: Option<Vector3>,
 }
 
 pub(super) fn add_closed_intersection<C, S>(
@@ -255,6 +288,7 @@ pub(super) fn add_closed_intersection<C, S>(
     native: [&mut LoopsStore<Point3, C>; 2],
     polygon: [&mut LoopsStore<Point3, PolylineCurve>; 2],
     sides: [(usize, &S, ShapesOpStatus); 2],
+    orientation: ShapesOpStatus,
     tolerance: f64,
 ) -> std::result::Result<(), &'static str>
 where
@@ -331,6 +365,7 @@ where
                                 polygon: Vertex::new(polygon_point),
                                 native: Vertex::new(point),
                                 on_boundary,
+                                direction: None,
                             });
                         }
                     }
@@ -361,6 +396,7 @@ where
                 polygon: Vertex::new(polyline.front()),
                 native: Vertex::new(curve.front()),
                 on_boundary: [false; 2],
+                direction: None,
             },
         );
     }
@@ -373,6 +409,7 @@ where
             polygon: Vertex::new(polyline.evaluate(parameter)),
             native: Vertex::new(curve.evaluate(parameter)),
             on_boundary: [false; 2],
+            direction: None,
         });
     }
     if points.windows(2).any(|pair| {
@@ -383,7 +420,7 @@ where
     }
     let mut polygon_maps = [HashMap::default(), HashMap::default()];
     let mut native_maps = [HashMap::default(), HashMap::default()];
-    for point in &points {
+    for point in &mut points {
         for side in 0..2 {
             if !point.on_boundary[side] {
                 continue;
@@ -399,12 +436,20 @@ where
                 &mut native_maps[side],
             )?;
         }
-        for surface in surfaces {
-            let (u, v) = surface
-                .search_parameter(point.native.point(), None, 100)
-                .ok_or("intersection_chart_contact_carrier")?;
-            if !surface.evaluate(u, v).near(&point.native.point()) {
-                return Err("intersection_chart_contact_carrier");
+        if point.on_boundary.iter().any(|&contact| contact) {
+            point.direction = Some(intersection_direction(
+                surfaces,
+                point.native.point(),
+                orientation,
+            )?);
+        } else {
+            for surface in surfaces {
+                let (u, v) = surface
+                    .search_parameter(point.native.point(), None, 100)
+                    .ok_or("intersection_chart_contact_carrier")?;
+                if !surface.evaluate(u, v).near(&point.native.point()) {
+                    return Err("intersection_chart_contact_carrier");
+                }
             }
         }
         if point.native_parameter == 0.0 {
@@ -492,13 +537,17 @@ where
                 &native[side][faces[side]],
                 surfaces[side],
                 native_path.front_vertex().unwrap(),
-                tangent(native_path.front().unwrap(), true),
+                points[start]
+                    .direction
+                    .ok_or("intersection_chart_orientation")?,
             )?;
             let end_corner = chart_corner(
                 &native[side][faces[side]],
                 surfaces[side],
                 native_path.back_vertex().unwrap(),
-                -tangent(native_path.back().unwrap(), false),
+                -points[end]
+                    .direction
+                    .ok_or("intersection_chart_orientation")?,
             )?;
             splice_wire(
                 &mut native[side][faces[side]],
@@ -595,6 +644,64 @@ mod tests {
         );
         let false_identity = Vertex::new(midpoint.point());
         assert!(chart_corner(&loops, &surface, &false_identity, Vector3::unit_y()).is_err());
+    }
+
+    #[test]
+    fn physical_corner_direction_survives_zero_guide_speed_but_refuses_tangent_carriers() {
+        let wall =
+            modeling::Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+                modeling::Curve::Line(Line(Point3::new(1.0, 0.0, 3.0), Point3::new(1.0, 0.0, 0.0))),
+                Point3::origin(),
+                Vector3::unit_z(),
+            )));
+        let cap = modeling::Surface::Plane(Plane::new(
+            Point3::new(0.0, 0.0, 0.1),
+            Point3::new(1.0, 0.0, 0.1),
+            Point3::new(0.0, 1.0, 0.1),
+        ));
+        let point = Point3::new(1.0, 0.0, 0.1);
+        for reversed in [false, true] {
+            let wall = if reversed {
+                wall.inverse()
+            } else {
+                wall.clone()
+            };
+            let curve = IntersectionCurve::new(
+                wall.clone(),
+                cap.clone(),
+                PolylineCurve(vec![
+                    point,
+                    point,
+                    Point3::new(0.0, 1.0, 0.1),
+                    Point3::new(-1.0, 0.0, 0.1),
+                    Point3::new(0.0, -1.0, 0.1),
+                    point,
+                ]),
+            );
+            let derivative = curve.derivative(0.0).magnitude2();
+            assert!(!derivative.is_finite() || derivative == 0.0);
+            let orientation = ShapesOpStatus::from_is_curve(&curve).unwrap();
+            let direction = intersection_direction([&wall, &cap], point, orientation).unwrap();
+            assert!(direction.normalize().near(&Vector3::unit_y()));
+            assert!(
+                intersection_direction([&wall, &cap], point, orientation.not(),)
+                    .unwrap()
+                    .normalize()
+                    .near(&-Vector3::unit_y())
+            );
+            assert_eq!(
+                intersection_direction([&wall, &wall], point, orientation,),
+                Err("intersection_chart_tangent")
+            );
+            assert_eq!(
+                intersection_direction([&wall, &cap], point, ShapesOpStatus::Unknown,),
+                Err("intersection_chart_orientation")
+            );
+            assert_eq!(
+                intersection_direction([&wall, &cap], Point3::new(0.75, 0.0, 0.1), orientation,),
+                Err("intersection_chart_contact_carrier")
+            );
+        }
     }
 
     #[test]

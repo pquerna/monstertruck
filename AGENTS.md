@@ -28,6 +28,9 @@ zero-area loop in its open covering chart. Material ray counts respect face
 orientation; Unknown faces retain propagated shared boundary replacements.
 Open intersection attachment uses an endpoint without chart selection only when
 that endpoint has a unique boundary occurrence.
+Closed-chart departure follows the physical transverse tangent of both original
+carriers and the pre-cut orientation certificate, not guide parameter speed.
+Zero/nonfinite transversality, unresolved orientation and invalid wedges refuse.
 Require the correct retained halfspace and inward hole walls as well as closed
 manifold output in the native AND gates. Certified bounds are conservative
 enclosures, not assertions of exact physical cylinder dimensions.
@@ -36,6 +39,9 @@ original carrier, including bounded endpoints. Marching leaders provide a
 parameter partition, not geometric containment witnesses; their inscribed
 chords need not lie on a curved carrier. Retain kernel parameter-search residual
 requirements and negative unrelated-carrier/invalid-endpoint regressions.
+Ordinary curve containment preserves the carrier's complete Processor transform
+and inversion and checks residuals in world coordinates. Qualify posed, inverted
+and affine carriers and centered/placed first-layer sections, not midplanes alone.
 
 This fork uses the public project-specific rules below. The private `.blueprints`
 agent-guidance submodule is not required to clone or build the public source.
