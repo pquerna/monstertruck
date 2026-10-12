@@ -242,7 +242,37 @@ where
                 .iter()
                 .all(|wire| wire.status() == ShapesOpStatus::Unknown)
             {
-                res.push(face.clone(), ShapesOpStatus::Unknown);
+                let unchanged = face.absolute_boundaries().len() == loops.len()
+                    && face
+                        .absolute_boundaries()
+                        .iter()
+                        .zip(loops.iter())
+                        .all(|(old, new)| {
+                            old.len() == new.len()
+                                && old.iter().zip(new.iter()).all(|(a, b)| {
+                                    a.id() == b.id() && a.orientation() == b.orientation()
+                                })
+                        });
+                let updated = if unchanged {
+                    face.clone()
+                } else {
+                    let wires = loops.iter().map(|wire| wire.deref().clone()).collect();
+                    let mut updated = Face::try_new(wires, face.surface()).map_err(|source| {
+                        ShapeOpsError::DivideFacesFailed {
+                            shell_index,
+                            face_index,
+                            stage: "propagated_face_topology",
+                            source: Some(source),
+                            boundary: None,
+                        }
+                    })?;
+                    if !face.orientation() {
+                        updated.invert();
+                    }
+                    updated.set_stable_id(face.stable_id());
+                    updated
+                };
+                res.push(updated, ShapesOpStatus::Unknown);
             } else {
                 let vec = divide_one_face(face, loops, tol).map_err(|failure| {
                     ShapeOpsError::DivideFacesFailed {
@@ -356,5 +386,44 @@ mod ownership_tests {
             }],
         ];
         assert_eq!(enclosing_pre_face(&faces, &negative), Some(1));
+    }
+
+    #[test]
+    fn unknown_faces_keep_propagated_subedges_carrier_orientation_and_identity() {
+        let wire = boundary(&rectangle([0.0, 0.0], [2.0, 2.0])).deref().clone();
+        let surface = monstertruck_geometry::prelude::Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
+        let mut face = Face::new(vec![wire.clone()], surface).inverse();
+        face.set_stable_id(StableId::new(42));
+        let original = wire[0].absolute_clone();
+        let midpoint = Vertex::new(original.with_curve(|curve| curve.evaluate(0.5)));
+        let (first, second) = original.cut_with_parameter(&midpoint, 0.5).unwrap();
+        let mut updated = wire;
+        updated[0] = first.clone();
+        updated.insert(1, second.clone());
+        let mut store: LoopsStore<_, _> = std::iter::once(&face).collect();
+        store[0][0] = BoundaryWire::new(updated, ShapesOpStatus::Unknown);
+        let shell = vec![face.clone()].into();
+        let classification = divide_faces(&shell, &store, 1.0e-5, 0).unwrap();
+        let [and, or, unknown] = classification.and_or_unknown();
+        assert!(and.is_empty() && or.is_empty());
+        assert_eq!(unknown.len(), 1);
+        let updated = &unknown[0];
+        assert_eq!(updated.stable_id(), face.stable_id());
+        assert_eq!(updated.orientation(), face.orientation());
+        assert_eq!(updated.surface(), face.surface());
+        assert_eq!(updated.absolute_boundaries()[0].len(), 5);
+        assert!(updated.edge_iter().any(|edge| edge.id() == first.id()));
+        assert!(updated.edge_iter().any(|edge| edge.id() == second.id()));
+        assert!(!updated.edge_iter().any(|edge| edge.id() == original.id()));
+        assert!(updated.is_geometric_consistent());
+        assert_eq!(
+            face.absolute_boundaries()[0].len(),
+            4,
+            "input remains unchanged"
+        );
     }
 }

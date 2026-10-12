@@ -383,11 +383,10 @@ impl<P, C, S> Shell<P, C, S> {
     /// Extracts the serialized compressed shell into the shell.
     ///
     /// # Errors
-    /// Returns [`Error::NotSimpleWire`](crate::errors::Error::NotSimpleWire) if any boundary wire has repeated vertices.
-    /// STEP files from other CAD systems often produce such wires. To handle this,
-    /// apply `SplitClosedEdgesAndFaces` or `SplitClosedEdgesAndFaces`
-    /// (from `monstertruck-healing`) to the `CompressedShell` before calling `extract`.
-    /// The convenience function `monstertruck_healing::extract_healed` does both steps.
+    /// Returns [`Error::NotSimpleWire`](crate::errors::Error::NotSimpleWire) for
+    /// vertex repetitions not explained by opposite paired seam uses.
+    /// Closed periodic STEP edges are represented by shared exact subedges by
+    /// the STEP loader; extraction never heals or changes the face set.
     pub fn extract(cshell: CompressedShell<P, C, S>) -> Result<Self> {
         let CompressedShell {
             vertices,

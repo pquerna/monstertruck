@@ -729,6 +729,8 @@ impl<P, C, S> Shell<P, C, S> {
     ///
     /// # Returns
     /// Returns the tuple of new edges created by cutting the edge.
+    /// Every occurrence, including both uses of a seam in one wire, shares
+    /// those new edges with its original orientation.
     ///
     /// # Failures
     /// Returns `None` and not edit `self` if:
@@ -747,32 +749,31 @@ impl<P, C, S> Shell<P, C, S> {
         if self.vertex_iter().any(|v| &v == vertex) {
             return None;
         }
-        let mut edges = None;
+        let edges = self
+            .edge_iter()
+            .find(|edge| edge.id() == edge_id)?
+            .absolute_clone()
+            .cut(vertex)?;
         self.iter_mut()
             .flat_map(|face| face.boundaries.iter_mut())
-            .try_for_each(|wire| {
-                let find_res = wire
-                    .iter()
-                    .enumerate()
-                    .find(|(_, edge)| edge.id() == edge_id);
-                let (idx, edge) = match find_res {
-                    Some(got) => got,
-                    None => return Some(()),
-                };
-                if edges.is_none() {
-                    edges = Some(edge.absolute_clone().cut(vertex)?);
+            .for_each(|wire| {
+                let mut index = 0;
+                while index < wire.len() {
+                    if wire[index].id() == edge_id {
+                        let (first, second) = if wire[index].orientation() {
+                            (edges.0.clone(), edges.1.clone())
+                        } else {
+                            (edges.1.inverse(), edges.0.inverse())
+                        };
+                        wire[index] = first;
+                        wire.insert(index + 1, second);
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
                 }
-                // SAFETY: edges was set to Some on line 718 if it was None.
-                let edges = edges.as_ref().unwrap();
-                let new_wire = match edge.orientation() {
-                    true => Wire::from(vec![edges.0.clone(), edges.1.clone()]),
-                    false => Wire::from(vec![edges.1.inverse(), edges.0.inverse()]),
-                };
-                let flag = wire.swap_edge_into_wire(idx, new_wire);
-                debug_assert!(flag);
-                Some(())
             });
-        edges
+        Some(edges)
     }
     /// Removes `vertex` from `self` by concat two edges on both sides.
     ///
@@ -780,49 +781,75 @@ impl<P, C, S> Shell<P, C, S> {
     /// Returns the new created edge.
     ///
     /// # Failures
-    /// Returns `None` if:
-    /// - there are no vertex corresponding to `vertex_id` in the shell,
-    /// - the vertex is included more than 2 face boundaries,
-    /// - the vertex is included more than 2 edges, or
-    /// - concatenating edges is failed.
+    /// Returns `None` without editing if:
+    /// - there is no vertex corresponding to `vertex_id` in the shell,
+    /// - the vertex is included in more than two boundary uses,
+    /// - the uses do not share exactly two oppositely oriented edges, or
+    /// - concatenating the edges fails.
     pub fn remove_vertex_by_concat_edges(&mut self, vertex_id: VertexId<P>) -> Option<Edge<P, C>>
     where
         P: Debug,
         C: Concat<C, Point = P, Output = C> + Invertible + ParameterTransform, {
-        let mut vec: Vec<(&mut Wire<P, C>, usize)> = self
-            .face_iter_mut()
-            .flat_map(|face| &mut face.boundaries)
-            .filter_map(|wire| {
-                let idx = wire
-                    .edge_iter()
-                    .enumerate()
-                    .find(|(_, e)| e.back().id() == vertex_id)?
-                    .0;
-                Some((wire, idx))
-            })
-            .collect();
-        if vec.len() > 2 || vec.is_empty() {
-            None
-        } else if vec.len() == 1 {
-            // SAFETY: vec.len() == 1, so pop succeeds.
-            let (wire, idx) = vec.pop().unwrap();
-            let edge = wire[idx].concat(&wire[(idx + 1) % wire.len()]).ok()?;
-            wire.swap_subwire_into_edges(idx, edge.clone());
-            Some(edge)
-        } else {
-            // SAFETY: vec.len() == 2 (not 0, not 1, not >2), so both pops succeed.
-            let (wire0, idx0) = vec.pop().unwrap();
-            let (wire1, idx1) = vec.pop().unwrap();
-            if !wire0[idx0].is_same(&wire1[(idx1 + 1) % wire1.len()])
-                || !wire0[(idx0 + 1) % wire0.len()].is_same(&wire1[idx1])
+        let mut occurrences = [None, None];
+        let mut count = 0;
+        for (face_index, face) in self.iter().enumerate() {
+            for (wire_index, wire) in face.boundaries.iter().enumerate() {
+                for (index, edge) in wire.iter().enumerate() {
+                    if edge.back().id() == vertex_id {
+                        if count == occurrences.len() {
+                            return None;
+                        }
+                        occurrences[count] = Some((face_index, wire_index, index));
+                        count += 1;
+                    }
+                }
+            }
+        }
+        let (face, wire, index) = occurrences[0]?;
+        let boundary = &self[face].boundaries[wire];
+        let incoming = &boundary[index];
+        let outgoing = &boundary[(index + 1) % boundary.len()];
+        if let Some((face, wire, index)) = occurrences[1] {
+            let boundary = &self[face].boundaries[wire];
+            let other_incoming = &boundary[index];
+            let other_outgoing = &boundary[(index + 1) % boundary.len()];
+            if !incoming.is_same(other_outgoing)
+                || !outgoing.is_same(other_incoming)
+                || incoming.orientation() == other_outgoing.orientation()
+                || outgoing.orientation() == other_incoming.orientation()
             {
                 return None;
             }
-            let edge = wire0[idx0].concat(&wire0[(idx0 + 1) % wire0.len()]).ok()?;
-            wire1.swap_subwire_into_edges(idx1, edge.inverse());
-            wire0.swap_subwire_into_edges(idx0, edge.clone());
-            Some(edge)
         }
+        let edge = incoming.concat(outgoing).ok()?;
+        let incoming_id = incoming.id();
+        let incoming_orientation = incoming.orientation();
+        self.iter_mut()
+            .flat_map(|face| face.boundaries.iter_mut())
+            .filter(|wire| wire.iter().any(|edge| edge.back().id() == vertex_id))
+            .for_each(|wire| {
+                *wire = wire
+                    .iter()
+                    .filter_map(|original| {
+                        if original.back().id() == vertex_id {
+                            Some(
+                                if original.id() == incoming_id
+                                    && original.orientation() == incoming_orientation
+                                {
+                                    edge.clone()
+                                } else {
+                                    edge.inverse()
+                                },
+                            )
+                        } else if original.front().id() == vertex_id {
+                            None
+                        } else {
+                            Some(original.clone())
+                        }
+                    })
+                    .collect();
+            });
+        Some(edge)
     }
 
     /// Creates display struct for debugging the shell.

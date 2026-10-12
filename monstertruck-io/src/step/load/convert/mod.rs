@@ -8,6 +8,8 @@ use super::*;
 use monstertruck_topology::compress::*;
 use std::collections::HashSet;
 
+mod periodic_edges;
+
 /// A compressed shell in the STEP loader's concrete geometry types.
 ///
 /// The `*_reported` conversions (spec 011 T7) return the value paired with a
@@ -1389,17 +1391,16 @@ impl StepShell for ShellHolder {
         let (vertices, vidx_map) = table.shell_vertices(self, &sink);
         let (edges, eidx_map) = table.shell_edges(self, &vidx_map, &sink);
         let faces = table.shell_faces(self, &eidx_map, &sink);
-        Ok((
-            CompressedShell {
-                vertices,
-                edges,
-                faces,
-                vertex_stable_ids: None,
-                edge_stable_ids: None,
-                face_stable_ids: None,
-            },
-            sink.into_report(),
-        ))
+        let mut shell = CompressedShell {
+            vertices,
+            edges,
+            faces,
+            vertex_stable_ids: None,
+            edge_stable_ids: None,
+            face_stable_ids: None,
+        };
+        periodic_edges::plain(&mut shell)?;
+        Ok((shell, sink.into_report()))
     }
 
     fn to_compressed_trimmed_shell_reported(
@@ -1416,14 +1417,13 @@ impl StepShell for ShellHolder {
         let (vertices, vidx_map) = table.shell_vertices(self, &sink);
         let (edges, eidx_map) = table.shell_edges(self, &vidx_map, &sink);
         let faces = table.shell_trimmed_faces(self, &eidx_map, &sink);
-        Ok((
-            CompressedTrimmedShell {
-                vertices,
-                edges,
-                faces,
-            },
-            sink.into_report(),
-        ))
+        let mut shell = CompressedTrimmedShell {
+            vertices,
+            edges,
+            faces,
+        };
+        periodic_edges::trimmed(&mut shell)?;
+        Ok((shell, sink.into_report()))
     }
 }
 

@@ -79,27 +79,75 @@ impl ParametricSurface3D for Surface {
 /// `INCLUDE_CURVE_TRIALS` in `monstertruck-geometry`'s `NurbsSurface` impl --
 /// the one [`Surface::SphericalSurface`] and [`Surface::ToroidalSurface`]
 /// faces reached before spec 012 U1.2 gave them analytic variants.
-const ANALYTIC_INCLUDE_CURVE_TRIALS: usize = 100;
+const INCLUDE_CURVE_TRIALS: usize = 100;
 
 /// Whether every sample of `curve` recovers a parameter on `surface`.
 ///
 /// Samples the CURVE at the same density the `NurbsSurface` impl this replaces
 /// used -- interior points of each knot span, `2 * degree` of them -- rather
 /// than the control polygon, whose points are not on a rational curve at all.
-fn analytic_surface_includes_curve<S>(surface: &S, curve: &Curve) -> bool
+fn sampled_surface_includes_curve<S>(surface: &S, curve: &Curve) -> bool
 where S: SearchParameter<SurfaceParameter, Point = Point3> {
-    let lifted = NurbsCurve::new(curve.lift_up());
-    let (knots, _) = lifted.knot_vector().to_single_multi();
-    let degree = usize::max(lifted.degree() * 2, 2);
-    knots.windows(2).all(|window| {
-        (0..=degree).all(|index| {
-            let ratio = index as f64 / degree as f64;
-            let parameter = window[0] * (1.0 - ratio) + window[1] * ratio;
-            surface
-                .search_parameter(lifted.subs(parameter), None, ANALYTIC_INCLUDE_CURVE_TRIALS)
-                .is_some()
-        })
-    })
+    let include_span = |start: f64, end: f64, density: usize| {
+        start.is_finite()
+            && end.is_finite()
+            && start < end
+            && (0..=density).all(|index| {
+                let ratio = index as f64 / density as f64;
+                let point = curve.evaluate(start * (1.0 - ratio) + end * ratio);
+                point.x.is_finite()
+                    && point.y.is_finite()
+                    && point.z.is_finite()
+                    && surface
+                        .search_parameter(point, None, INCLUDE_CURVE_TRIALS)
+                        .is_some()
+            })
+    };
+    let include_knots = |knots: &KnotVector, degree: usize| {
+        let mut found_span = false;
+        for span in knots.windows(2) {
+            if span[0] == span[1] {
+                continue;
+            }
+            found_span = true;
+            if !include_span(span[0], span[1], usize::max(degree * 2, 2)) {
+                return false;
+            }
+        }
+        found_span
+    };
+    // The leader supplies only the parameter partition. Its chord geometry is
+    // not the projected intersection curve and must never be the witness.
+    let mut partition = curve;
+    while let Curve::IntersectionCurve(intersection) = partition {
+        partition = intersection.leader().as_ref();
+    }
+    match partition {
+        Curve::Line(line) => {
+            let (start, end) = line.range_tuple();
+            include_span(start, end, 2)
+        }
+        Curve::BsplineCurve(spline) => include_knots(spline.knot_vector(), spline.degree()),
+        Curve::NurbsCurve(spline) => include_knots(spline.knot_vector(), spline.degree()),
+        Curve::ParameterCurve(parameter) => match parameter.curve() {
+            Curve2D::Line(line) => {
+                let (start, end) = line.range_tuple();
+                include_span(start, end, 2)
+            }
+            Curve2D::Polyline(polyline) => {
+                polyline.len() > 1
+                    && (0..polyline.len() - 1)
+                        .all(|index| include_span(index as f64, (index + 1) as f64, 2))
+            }
+            Curve2D::Conic(conic) => {
+                let (start, end) = conic.range_tuple();
+                include_span(start, end, 4)
+            }
+            Curve2D::BsplineCurve(spline) => include_knots(spline.knot_vector(), spline.degree()),
+            Curve2D::NurbsCurve(spline) => include_knots(spline.knot_vector(), spline.degree()),
+        },
+        Curve::IntersectionCurve(_) => unreachable!(),
+    }
 }
 
 impl Transformed<Matrix4> for Surface {
@@ -116,46 +164,27 @@ impl IncludeCurve<Curve> for Surface {
     fn include(&self, curve: &Curve) -> bool {
         if let Curve::ParameterCurve(curve) = curve {
             same_surface(curve.surface().as_ref(), self)
+        } else if matches!(curve, Curve::IntersectionCurve(_)) {
+            sampled_surface_includes_curve(self, curve)
         } else {
             match self {
                 Surface::BsplineSurface(surface) => match curve {
                     &Curve::Line(curve) => surface.include(&BsplineCurve::from(curve)),
                     Curve::BsplineCurve(curve) => surface.include(curve),
                     Curve::NurbsCurve(curve) => surface.include(curve),
-                    Curve::IntersectionCurve(curve) => match curve.leader().as_ref() {
-                        Curve::Line(curve) => surface.include(&BsplineCurve::from(*curve)),
-                        Curve::BsplineCurve(curve) => surface.include(curve),
-                        Curve::NurbsCurve(curve) => surface.include(curve),
-                        Curve::ParameterCurve(_) => false,
-                        Curve::IntersectionCurve(_) => false,
-                    },
-                    Curve::ParameterCurve(_) => unreachable!(),
+                    Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => unreachable!(),
                 },
                 Surface::NurbsSurface(surface) => match curve {
                     &Curve::Line(curve) => surface.include(&BsplineCurve::from(curve)),
                     Curve::BsplineCurve(curve) => surface.include(curve),
                     Curve::NurbsCurve(curve) => surface.include(curve),
-                    Curve::IntersectionCurve(curve) => match curve.leader().as_ref() {
-                        Curve::Line(curve) => surface.include(&BsplineCurve::from(*curve)),
-                        Curve::BsplineCurve(curve) => surface.include(curve),
-                        Curve::NurbsCurve(curve) => surface.include(curve),
-                        Curve::ParameterCurve(_) => false,
-                        Curve::IntersectionCurve(_) => false,
-                    },
-                    Curve::ParameterCurve(_) => unreachable!(),
+                    Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => unreachable!(),
                 },
                 Surface::Plane(surface) => match curve {
                     &Curve::Line(curve) => surface.include(&BsplineCurve::from(curve)),
                     Curve::BsplineCurve(curve) => surface.include(curve),
                     Curve::NurbsCurve(curve) => surface.include(curve),
-                    Curve::IntersectionCurve(curve) => match curve.leader().as_ref() {
-                        Curve::Line(curve) => surface.include(&BsplineCurve::from(*curve)),
-                        Curve::BsplineCurve(curve) => surface.include(curve),
-                        Curve::NurbsCurve(curve) => surface.include(curve),
-                        Curve::ParameterCurve(_) => false,
-                        Curve::IntersectionCurve(_) => false,
-                    },
-                    Curve::ParameterCurve(_) => unreachable!(),
+                    Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => unreachable!(),
                 },
                 Surface::TsplineSurface(surface) => {
                     curve.lift_up().control_points().iter().all(|v| {
@@ -172,11 +201,9 @@ impl IncludeCurve<Curve> for Surface {
                 // testing them would have been strictly more conservative than
                 // what this replaces.
                 Surface::SphericalSurface(surface) => {
-                    analytic_surface_includes_curve(surface, curve)
+                    sampled_surface_includes_curve(surface, curve)
                 }
-                Surface::ToroidalSurface(surface) => {
-                    analytic_surface_includes_curve(surface, curve)
-                }
+                Surface::ToroidalSurface(surface) => sampled_surface_includes_curve(surface, curve),
                 Surface::RevolutionSurface(surface) => match surface.entity_curve() {
                     &Curve::Line(entity_line) => {
                         let entity_bsp = BsplineCurve::from(entity_line);
@@ -189,14 +216,9 @@ impl IncludeCurve<Curve> for Surface {
                             &Curve::Line(curve) => surface.include(&BsplineCurve::from(curve)),
                             Curve::BsplineCurve(curve) => surface.include(curve),
                             Curve::NurbsCurve(curve) => surface.include(curve),
-                            Curve::IntersectionCurve(curve) => match curve.leader().as_ref() {
-                                Curve::Line(curve) => surface.include(&BsplineCurve::from(*curve)),
-                                Curve::BsplineCurve(curve) => surface.include(curve),
-                                Curve::NurbsCurve(curve) => surface.include(curve),
-                                Curve::ParameterCurve(_) => false,
-                                Curve::IntersectionCurve(_) => false,
-                            },
-                            Curve::ParameterCurve(_) => unreachable!(),
+                            Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => {
+                                unreachable!()
+                            }
                         }
                     }
                     Curve::BsplineCurve(entity_curve) => {
@@ -209,14 +231,9 @@ impl IncludeCurve<Curve> for Surface {
                             &Curve::Line(curve) => surface.include(&BsplineCurve::from(curve)),
                             Curve::BsplineCurve(curve) => surface.include(curve),
                             Curve::NurbsCurve(curve) => surface.include(curve),
-                            Curve::IntersectionCurve(curve) => match curve.leader().as_ref() {
-                                Curve::Line(curve) => surface.include(&BsplineCurve::from(*curve)),
-                                Curve::BsplineCurve(curve) => surface.include(curve),
-                                Curve::NurbsCurve(curve) => surface.include(curve),
-                                Curve::ParameterCurve(_) => false,
-                                Curve::IntersectionCurve(_) => false,
-                            },
-                            Curve::ParameterCurve(_) => unreachable!(),
+                            Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => {
+                                unreachable!()
+                            }
                         }
                     }
                     Curve::NurbsCurve(entity_curve) => {
@@ -229,14 +246,9 @@ impl IncludeCurve<Curve> for Surface {
                             &Curve::Line(curve) => surface.include(&BsplineCurve::from(curve)),
                             Curve::BsplineCurve(curve) => surface.include(curve),
                             Curve::NurbsCurve(curve) => surface.include(curve),
-                            Curve::IntersectionCurve(curve) => match curve.leader().as_ref() {
-                                Curve::Line(curve) => surface.include(&BsplineCurve::from(*curve)),
-                                Curve::BsplineCurve(curve) => surface.include(curve),
-                                Curve::NurbsCurve(curve) => surface.include(curve),
-                                Curve::ParameterCurve(_) => false,
-                                Curve::IntersectionCurve(_) => false,
-                            },
-                            Curve::ParameterCurve(_) => unreachable!(),
+                            Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => {
+                                unreachable!()
+                            }
                         }
                     }
                     Curve::IntersectionCurve(entity_curve) => {
@@ -255,18 +267,9 @@ impl IncludeCurve<Curve> for Surface {
                                     }
                                     Curve::BsplineCurve(curve) => surface.include(curve),
                                     Curve::NurbsCurve(curve) => surface.include(curve),
-                                    Curve::IntersectionCurve(curve) => {
-                                        match curve.leader().as_ref() {
-                                            Curve::Line(curve) => {
-                                                surface.include(&BsplineCurve::from(*curve))
-                                            }
-                                            Curve::BsplineCurve(curve) => surface.include(curve),
-                                            Curve::NurbsCurve(curve) => surface.include(curve),
-                                            Curve::ParameterCurve(_) => false,
-                                            Curve::IntersectionCurve(_) => false,
-                                        }
+                                    Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => {
+                                        unreachable!()
                                     }
-                                    Curve::ParameterCurve(_) => unreachable!(),
                                 }
                             }
                             Curve::BsplineCurve(entity_curve) => {
@@ -281,18 +284,9 @@ impl IncludeCurve<Curve> for Surface {
                                     }
                                     Curve::BsplineCurve(curve) => surface.include(curve),
                                     Curve::NurbsCurve(curve) => surface.include(curve),
-                                    Curve::IntersectionCurve(curve) => {
-                                        match curve.leader().as_ref() {
-                                            Curve::Line(curve) => {
-                                                surface.include(&BsplineCurve::from(*curve))
-                                            }
-                                            Curve::BsplineCurve(curve) => surface.include(curve),
-                                            Curve::NurbsCurve(curve) => surface.include(curve),
-                                            Curve::ParameterCurve(_) => false,
-                                            Curve::IntersectionCurve(_) => false,
-                                        }
+                                    Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => {
+                                        unreachable!()
                                     }
-                                    Curve::ParameterCurve(_) => unreachable!(),
                                 }
                             }
                             Curve::NurbsCurve(entity_curve) => {
@@ -307,18 +301,9 @@ impl IncludeCurve<Curve> for Surface {
                                     }
                                     Curve::BsplineCurve(curve) => surface.include(curve),
                                     Curve::NurbsCurve(curve) => surface.include(curve),
-                                    Curve::IntersectionCurve(curve) => {
-                                        match curve.leader().as_ref() {
-                                            Curve::Line(curve) => {
-                                                surface.include(&BsplineCurve::from(*curve))
-                                            }
-                                            Curve::BsplineCurve(curve) => surface.include(curve),
-                                            Curve::NurbsCurve(curve) => surface.include(curve),
-                                            Curve::ParameterCurve(_) => false,
-                                            Curve::IntersectionCurve(_) => false,
-                                        }
+                                    Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => {
+                                        unreachable!()
                                     }
-                                    Curve::ParameterCurve(_) => unreachable!(),
                                 }
                             }
                             Curve::ParameterCurve(_) => false,
@@ -334,6 +319,9 @@ impl IncludeCurve<Curve> for Surface {
 
 impl IncludeCurve<Curve> for Plane {
     fn include(&self, curve: &Curve) -> bool {
+        if matches!(curve, Curve::IntersectionCurve(_)) {
+            return sampled_surface_includes_curve(self, curve);
+        }
         curve.lift_up().control_points().iter().all(|v| {
             let p = v.to_point();
             self.search_parameter(p, None, 1).is_some()

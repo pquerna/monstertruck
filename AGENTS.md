@@ -7,6 +7,36 @@ based on the public upstream `virtualritz/monstertruck` default branch `master`.
 Keep local patches focused and preserve upstream licensing and attribution.
 Spiling consumers pin an exact commit, not the moving branch.
 
+The STEP loader represents a one-period closed source edge by two shared exact
+subedges in every oriented use. It does not heal geometry, rewrite STEP bytes or
+split source faces. Native face boundaries may identify opposite paired seam
+uses, but reject unexplained vertex repetitions and seam spikes. Solid admission
+still requires connected, oriented, closed manifold incidence and consistent
+geometry. Qualify this representation with producer-independent periodic-edge
+and malformed-topology regressions plus consumers' frozen independent exporter
+section, tessellation and source-face mapping gates before pinning a revision.
+Native mutation consumers preserve every oriented edge occurrence: seam cutting
+and concatenation share replacement edges. Gluing follows coedge successors:
+empty selection cancels shared opposite pairs; callers explicitly select any
+shared chart connectors to retain. Do not infer original chart intent from edge
+order or retain hidden history. Face cutting returns only two regular separating
+boundaries; nonseparating or pinched cuts without that pair refuse mutation.
+Closed boolean intersections that cross paired chart coedges must attach to
+their distinct material corners, with shared native/polygon subdivision and
+the same ordered incidence rewrite. A spatially closed winding loop is not a
+zero-area loop in its open covering chart. Material ray counts respect face
+orientation; Unknown faces retain propagated shared boundary replacements.
+Open intersection attachment uses an endpoint without chart selection only when
+that endpoint has a unique boundary occurrence.
+Require the correct retained halfspace and inward hole walls as well as closed
+manifold output in the native AND gates. Certified bounds are conservative
+enclosures, not assertions of exact physical cylinder dimensions.
+Native intersection containment validates the actual projected curve on the
+original carrier, including bounded endpoints. Marching leaders provide a
+parameter partition, not geometric containment witnesses; their inscribed
+chords need not lie on a curved carrier. Retain kernel parameter-search residual
+requirements and negative unrelated-carrier/invalid-endpoint regressions.
+
 This fork uses the public project-specific rules below. The private `.blueprints`
 agent-guidance submodule is not required to clone or build the public source.
 

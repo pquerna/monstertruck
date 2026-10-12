@@ -15,6 +15,8 @@ use monstertruck_meshing::prelude::*;
 use monstertruck_topology::{Vertex, *};
 use rustc_hash::FxHashMap as HashMap;
 
+mod periodic_loops;
+
 type PolylineCurve = monstertruck_meshing::prelude::PolylineCurve<Point3>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,14 +210,19 @@ impl<P: Copy, C: Clone> Loops<P, C> {
             })
     }
 
-    fn swap_edge_into_wire(&mut self, edge_id: EdgeId<C>, new_wire: &Wire<P, C>) {
+    fn swap_edge_into_pair(&mut self, edge_id: EdgeId<C>, pair: &[Edge<P, C>; 2]) {
         self.iter_mut().for_each(|wire| {
-            let mut iter = wire.iter().enumerate();
-            if let Some((idx, edge)) = iter.find(|(_, edge)| edge.id() == edge_id) {
-                if edge.orientation() {
-                    wire.swap_edge_into_wire(idx, new_wire.clone());
-                } else {
-                    wire.swap_edge_into_wire(idx, new_wire.inverse());
+            // Traverse original occurrence indices backwards: insertion cannot
+            // shift a not-yet-visited use, including the opposite seam coedge.
+            for index in (0..wire.len()).rev() {
+                if wire[index].id() == edge_id {
+                    let [first, second] = if wire[index].orientation() {
+                        [pair[0].clone(), pair[1].clone()]
+                    } else {
+                        [pair[1].inverse(), pair[0].inverse()]
+                    };
+                    wire[index] = first;
+                    wire.insert(index + 1, second);
                 }
             }
         });
@@ -231,25 +238,8 @@ impl<P: Copy, C: Clone> Loops<P, C> {
         &mut self,
         edge0: Edge<P, C>,
         status: ShapesOpStatus,
-    ) -> [Option<(usize, usize)>; 2] {
-        let a = self.iter().enumerate().find_map(|(i, wire)| {
-            wire.iter().enumerate().find_map(|(j, edge)| {
-                if edge.front() == edge0.back() {
-                    Some((i, j))
-                } else {
-                    None
-                }
-            })
-        });
-        let b = self.iter().enumerate().find_map(|(i, wire)| {
-            wire.iter().enumerate().find_map(|(j, edge)| {
-                if edge.front() == edge0.front() {
-                    Some((i, j))
-                } else {
-                    None
-                }
-            })
-        });
+        [a, b]: [Option<(usize, usize)>; 2],
+    ) {
         if let Some((wire_index0, edge_index0)) = a {
             self[wire_index0].rotate_left(edge_index0);
             self[wire_index0].push_front(edge0.clone());
@@ -283,7 +273,6 @@ impl<P: Copy, C: Clone> Loops<P, C> {
             )),
             _ => {}
         }
-        [a, b]
     }
 }
 
@@ -300,9 +289,9 @@ impl<P: Copy + Tolerance, C: Clone> LoopsStore<P, C> {
     }
 
     #[inline(always)]
-    fn swap_edge_into_wire(&mut self, edge_id: EdgeId<C>, new_wire: &Wire<P, C>) {
+    fn swap_edge_into_pair(&mut self, edge_id: EdgeId<C>, pair: &[Edge<P, C>; 2]) {
         self.iter_mut()
-            .for_each(|loops| loops.swap_edge_into_wire(edge_id, new_wire))
+            .for_each(|loops| loops.swap_edge_into_pair(edge_id, pair))
     }
 
     fn add_polygon_vertex(
@@ -333,8 +322,7 @@ impl<P: Copy + Tolerance, C: Clone> LoopsStore<P, C> {
                 let edge = self[loops_index][wire_index][edge_index].absolute_clone();
                 let edge_id = edge.id();
                 let (edge0, edge1) = edge.cut_with_parameter(v, t)?;
-                let new_wire: Wire<_, _> = vec![edge0, edge1].into();
-                self.swap_edge_into_wire(edge_id, &new_wire);
+                self.swap_edge_into_pair(edge_id, &[edge0, edge1]);
             }
         }
         Some((wire_index, edge_index, kind))
@@ -384,8 +372,7 @@ impl<C> LoopsStore<Point3, C> {
                         "curve_cut_residual"
                     }
                 })?;
-                let new_wire: Wire<_, _> = vec![edge0, edge1].into();
-                self.swap_edge_into_wire(edge_id, &new_wire);
+                self.swap_edge_into_pair(edge_id, &[edge0, edge1]);
             }
         }
         Ok(())
@@ -467,6 +454,7 @@ pub(super) fn create_loops_stores<C, S>(
     poly_shell0: &Shell<Point3, PolylineCurve, Option<PolygonMesh>>,
     geom_shell1: &Shell<Point3, C, S>,
     poly_shell1: &Shell<Point3, PolylineCurve, Option<PolygonMesh>>,
+    tolerance: f64,
 ) -> ClassicResult<LoopsStoreQuadruple<C>>
 where
     C: SearchNearestParameter<CurveParameter, Point = Point3>
@@ -527,16 +515,18 @@ where
                     (false, false) => (status.not(), status),
                 };
                 if polyline.front().near(&polyline.back()) {
-                    let poly_wire = create_independent_loop(polyline);
-                    poly_loops_store0[face_index0]
-                        .add_independent_loop(BoundaryWire::new(poly_wire.clone(), status0));
-                    poly_loops_store1[face_index1]
-                        .add_independent_loop(BoundaryWire::new(poly_wire, status1));
-                    let geom_wire = create_independent_loop(intersection_curve);
-                    geom_loops_store0[face_index0]
-                        .add_independent_loop(BoundaryWire::new(geom_wire.clone(), status0));
-                    geom_loops_store1[face_index1]
-                        .add_independent_loop(BoundaryWire::new(geom_wire, status1));
+                    periodic_loops::add_closed_intersection(
+                        polyline,
+                        intersection_curve,
+                        [&mut geom_loops_store0, &mut geom_loops_store1],
+                        [&mut poly_loops_store0, &mut poly_loops_store1],
+                        [
+                            (face_index0, &surface0, status0),
+                            (face_index1, &surface1, status1),
+                        ],
+                        tolerance,
+                    )
+                    .map_err(|detail| failure("closed_intersection_chart", detail))?;
                 } else {
                     let pv0 = Vertex::new(polyline.front());
                     let pv1 = Vertex::new(polyline.back());
@@ -608,10 +598,22 @@ where
                     }
                     let pedge = Edge::new(&pv0, &pv1, polyline);
                     let gedge = Edge::new(&gv0, &gv1, intersection_curve.into());
-                    poly_loops_store0[face_index0].add_edge(pedge.clone(), status0);
-                    geom_loops_store0[face_index0].add_edge(gedge.clone(), status0);
-                    poly_loops_store1[face_index1].add_edge(pedge, status1);
-                    geom_loops_store1[face_index1].add_edge(gedge, status1);
+                    let corners0 = periodic_loops::endpoint_corners(
+                        &geom_loops_store0[face_index0],
+                        &surface0,
+                        &gedge,
+                    )
+                    .map_err(|detail| failure("intersection_chart_corner0", detail))?;
+                    let corners1 = periodic_loops::endpoint_corners(
+                        &geom_loops_store1[face_index1],
+                        &surface1,
+                        &gedge,
+                    )
+                    .map_err(|detail| failure("intersection_chart_corner1", detail))?;
+                    poly_loops_store0[face_index0].add_edge(pedge.clone(), status0, corners0);
+                    geom_loops_store0[face_index0].add_edge(gedge.clone(), status0, corners0);
+                    poly_loops_store1[face_index1].add_edge(pedge, status1, corners1);
+                    geom_loops_store1[face_index1].add_edge(gedge, status1, corners1);
                 }
                 Ok::<(), ShapeOpsError>(())
             })
@@ -690,5 +692,82 @@ mod projection_tests {
             .unwrap_err(),
             "curve_surface_projection_nontransversal",
         );
+    }
+
+    #[test]
+    fn shared_boundary_subdivision_replaces_every_opposite_seam_occurrence() {
+        let ring = |z: f64| {
+            let vertices: Vec<_> = (0..3)
+                .map(|index| {
+                    let angle = std::f64::consts::TAU * index as f64 / 3.0;
+                    Vertex::new(Point3::new(angle.cos(), angle.sin(), z))
+                })
+                .collect();
+            (0..3)
+                .map(|index| {
+                    let next = (index + 1) % 3;
+                    Edge::new(
+                        &vertices[index],
+                        &vertices[next],
+                        PolylineCurve(vec![vertices[index].point(), vertices[next].point()]),
+                    )
+                })
+                .collect::<Wire<_, _>>()
+        };
+        let top = ring(3.0);
+        let bottom = ring(0.0);
+        let seam = Edge::new(
+            bottom.front_vertex().unwrap(),
+            top.front_vertex().unwrap(),
+            PolylineCurve(vec![Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 0.0, 3.0)]),
+        );
+        let mut lateral = top.inverse();
+        lateral.push_back(seam.inverse());
+        lateral.extend(bottom.iter().cloned());
+        lateral.push_back(seam.clone());
+        let mut store = LoopsStore(vec![
+            std::iter::once(BoundaryWire::new(lateral, ShapesOpStatus::Unknown)).collect(),
+            std::iter::once(BoundaryWire::new(top, ShapesOpStatus::Unknown)).collect(),
+            std::iter::once(BoundaryWire::new(bottom.inverse(), ShapesOpStatus::Unknown)).collect(),
+        ]);
+        let mut replacements = HashMap::default();
+        for (cut, length) in [(1.5, 10), (0.75, 12)] {
+            let vertex = Vertex::new(Point3::new(1.0, 0.0, cut));
+            assert!(
+                store
+                    .add_polygon_vertex(0, &vertex, &mut replacements)
+                    .is_some()
+            );
+            assert_eq!(store[0][0].len(), length);
+            assert!(
+                !store
+                    .iter()
+                    .flat_map(|loops| loops.iter())
+                    .flat_map(|wire| wire.iter())
+                    .any(|edge| edge.id() == seam.id())
+            );
+            let mut uses = HashMap::<_, [usize; 2]>::default();
+            for loops in &store {
+                for wire in loops.iter() {
+                    assert!(wire.is_closed());
+                    assert!(wire.iter().all(Edge::is_geometric_consistent));
+                    for edge in wire.iter() {
+                        let counts = uses.entry(edge.id()).or_default();
+                        counts[usize::from(edge.orientation())] += 1;
+                    }
+                }
+                assert!(
+                    loops
+                        .iter()
+                        .all(|wire| wire.status() == ShapesOpStatus::Unknown)
+                );
+            }
+            assert!(
+                uses.values().all(|counts| *counts == [1, 1]),
+                "each shared child retains exactly two opposite incidences"
+            );
+        }
+        assert_eq!(store[1][0].len(), 3);
+        assert_eq!(store[2][0].len(), 3);
     }
 }

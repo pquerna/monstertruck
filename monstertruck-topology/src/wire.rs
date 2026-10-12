@@ -1,7 +1,7 @@
 use crate::*;
 use monstertruck_core::entry_map::FxEntryMap as EntryMap;
 use rayon::prelude::*;
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::{VecDeque, vec_deque};
 use std::iter::Peekable;
 
@@ -277,6 +277,66 @@ impl<P, C> Wire<P, C> {
             .all(move |vertex| set.insert(vertex.id()))
     }
 
+    /// Check a face boundary in a chart whose opposite seam uses are identified.
+    ///
+    /// Repeated vertices must be explained by those identifications, not by an
+    /// arbitrary touching loop. Each seam occurs exactly twice, oppositely, and
+    /// its uses cannot be adjacent spikes.
+    pub(crate) fn is_regular_boundary(&self) -> bool {
+        let mut vertices = HashMap::default();
+        let mut simple = true;
+        self.iter().enumerate().for_each(|(index, edge)| {
+            if vertices.insert(edge.front().id(), index).is_some() {
+                simple = false;
+            }
+        });
+        if simple {
+            return true;
+        }
+        fn root(parents: &mut [(usize, usize)], mut index: usize) -> usize {
+            while parents[index].0 != index {
+                let next = parents[index].0;
+                parents[index].0 = parents[next].0;
+                index = next;
+            }
+            index
+        }
+        fn join(parents: &mut [(usize, usize)], first: usize, second: usize) {
+            let mut first = root(parents, first);
+            let mut second = root(parents, second);
+            if first != second {
+                if parents[first].1 < parents[second].1 {
+                    std::mem::swap(&mut first, &mut second);
+                }
+                parents[second].0 = first;
+                parents[first].1 += parents[second].1;
+            }
+        }
+        let count = self.len();
+        let mut parents: Vec<_> = (0..count).map(|index| (index, 1)).collect();
+        let mut uses = HashMap::default();
+        for (index, edge) in self.iter().enumerate() {
+            if let Some((first, orientation, paired)) = uses.get_mut(&edge.id()) {
+                if *paired
+                    || *orientation == edge.orientation()
+                    || (*first + 1) % count == index
+                    || (index + 1) % count == *first
+                {
+                    return false;
+                }
+                *paired = true;
+                join(&mut parents, *first, (index + 1) % count);
+                join(&mut parents, (*first + 1) % count, index);
+            } else {
+                uses.insert(edge.id(), (index, edge.orientation(), false));
+            }
+        }
+        self.iter().enumerate().all(|(index, edge)| {
+            let first = vertices[&edge.front().id()];
+            root(&mut parents, index) == root(&mut parents, first)
+        })
+    }
+
     /// Determines whether all the wires in `wires` has no same vertices.
     /// # Examples
     /// ```
@@ -368,19 +428,6 @@ impl<P, C> Wire<P, C> {
         new_wire.extend(self.drain(..));
         *self = new_wire.into();
         true
-    }
-    /// Concat edges
-    pub(super) fn swap_subwire_into_edges(&mut self, mut idx: usize, edge: Edge<P, C>) {
-        if idx + 1 == self.len() {
-            self.rotate_left(1);
-            idx -= 1;
-        }
-        let mut new_wire: Vec<_> = self.drain(0..idx).collect();
-        new_wire.push(edge);
-        self.pop_front();
-        self.pop_front();
-        new_wire.extend(self.drain(..));
-        *self = new_wire.into();
     }
 
     pub(super) fn sub_try_mapped<'a, Q, D, KF, KV>(

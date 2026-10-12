@@ -4,10 +4,11 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 impl<P, C, S> Face<P, C, S> {
     /// Creates a new face by a wire.
     /// # Failure
-    /// All wires in `boundaries` must be non-empty, simple and closed. If not, returns the following errors:
+    /// All wires in `boundaries` must be non-empty, closed and regular after
+    /// identifying oppositely paired seam uses.
     /// * If a wire is empty, then returns [`Error::EmptyWire`].
     /// * If a wire is not closed, then returns [`Error::NotClosedWire`].
-    /// * If a wire is closed but not simple, then returns [`Error::NotSimpleWire`].
+    /// * If vertex repetitions are not seam identifications, returns [`Error::NotSimpleWire`].
     ///
     /// [`Error::EmptyWire`]: errors/enum.Error.html#variant.EmptyWire
     /// [`Error::NotClosedWire`]: errors/enum.Error.html#variant.NotClosedWire
@@ -32,7 +33,7 @@ impl<P, C, S> Face<P, C, S> {
                 return Err(Error::EmptyWire);
             } else if !wire.is_closed() {
                 return Err(Error::NotClosedWire);
-            } else if !wire.is_simple() {
+            } else if !wire.is_regular_boundary() {
                 return Err(Error::NotSimpleWire);
             }
         }
@@ -44,7 +45,7 @@ impl<P, C, S> Face<P, C, S> {
     }
 
     /// Creates a new face by a wire.
-    /// All wires in `boundaries` must be non-empty, simple and closed.
+    /// All wires must be non-empty, closed and regular after seam identification.
     #[inline(always)]
     pub fn new(boundaries: Vec<Wire<P, C>>, surface: S) -> Face<P, C, S> {
         Self::try_new(boundaries, surface).unwrap_or_else(|error| panic!("Face::new: {error}"))
@@ -325,7 +326,7 @@ impl<P, C, S> Face<P, C, S> {
             return Err(Error::EmptyWire);
         } else if !wire.is_closed() {
             return Err(Error::NotClosedWire);
-        } else if !wire.is_simple() {
+        } else if !wire.is_regular_boundary() {
             return Err(Error::NotSimpleWire);
         }
         if !self.orientation {
@@ -821,8 +822,9 @@ impl<P, C, S> Face<P, C, S> {
     /// ```
     /// # Failures
     /// Returns `None` if:
-    /// - `self` has several boundaries, or
-    /// - `self` does not include vertices of the end vertices of `edge`.
+    /// - `self` has several boundaries,
+    /// - an endpoint is absent from the boundary, or
+    /// - the cut does not separate the boundary into two regular faces.
     /// ```
     /// use monstertruck_topology::*;
     /// let v = Vertex::from_points(&[(); 6]);
@@ -855,7 +857,7 @@ impl<P, C, S> Face<P, C, S> {
         self.cut_by_wire([edge].into())
     }
 
-    /// Cuts a face with only one boundary by an edge.
+    /// Cuts a face with only one boundary by a wire.
     /// # Examples
     /// ```
     /// use monstertruck_topology::*;
@@ -882,8 +884,10 @@ impl<P, C, S> Face<P, C, S> {
     /// ```
     /// # Failures
     /// Returns `None` if:
-    /// - `self` has several boundaries, or
-    /// - `self` does not include vertices of the end vertices of `wire`.
+    /// - `self` has several boundaries,
+    /// - an endpoint is absent from the boundary, or
+    /// - no endpoint-occurrence routing yields two regular faces (including
+    ///   nonseparating or pinched cuts).
     ///
     /// See also [`Face::cut_by_edge`].
     pub fn cut_by_wire(&self, wire: Wire<P, C>) -> Option<(Self, Self)>
@@ -891,37 +895,48 @@ impl<P, C, S> Face<P, C, S> {
         if self.boundaries.len() != 1 {
             return None;
         }
-        let mut face0 = Face {
-            boundaries: self.boundaries.clone(),
-            orientation: self.orientation,
-            surface: Arc::new(Mutex::new(self.surface())),
-            stable_id: StableId::UNASSIGNED,
-        };
-        let boundary = &mut face0.boundaries[0];
-        let i = boundary
-            .edge_iter()
-            .enumerate()
-            .find(|(_, e)| Some(e.front()) == wire.back_vertex())
-            .map(|(i, _)| i)?;
-        let j = boundary
-            .edge_iter()
-            .enumerate()
-            .find(|(_, e)| Some(e.back()) == wire.front_vertex())
-            .map(|(i, _)| i)?;
-        boundary.rotate_left(i);
-        let j = (j + boundary.len() - i) % boundary.len();
-        let mut new_wire = boundary.split_off(j + 1);
-        new_wire.extend(wire.iter().rev().map(|e| e.inverse()));
-        boundary.extend(wire);
-        debug_assert!(Face::try_new(self.boundaries.clone(), ()).is_ok());
-        debug_assert!(Face::try_new(vec![new_wire.clone()], ()).is_ok());
-        let face1 = Face {
-            boundaries: vec![new_wire],
-            orientation: self.orientation,
-            surface: Arc::new(Mutex::new(self.surface())),
-            stable_id: StableId::UNASSIGNED,
-        };
-        Some((face0, face1))
+        if wire.is_empty()
+            || !wire.is_continuous()
+            || !wire.is_simple()
+            || wire.front_vertex() == wire.back_vertex()
+        {
+            return None;
+        }
+        let boundary = &self.boundaries[0];
+        let count = boundary.len();
+        for i in 0..count {
+            if Some(boundary[i].front()) != wire.back_vertex() {
+                continue;
+            }
+            for j in 0..count {
+                if Some(boundary[j].back()) != wire.front_vertex() {
+                    continue;
+                }
+                let length = (j + count - i) % count + 1;
+                let mut first: Wire<_, _> = (0..length)
+                    .map(|offset| boundary[(i + offset) % count].clone())
+                    .collect();
+                let mut second: Wire<_, _> = (length..count)
+                    .map(|offset| boundary[(i + offset) % count].clone())
+                    .collect();
+                first.extend(wire.iter().cloned());
+                second.extend(wire.iter().rev().map(Edge::inverse));
+                if !first.is_closed()
+                    || !first.is_regular_boundary()
+                    || !second.is_closed()
+                    || !second.is_regular_boundary()
+                {
+                    continue;
+                }
+                let surface = self.surface();
+                let mut face0 = Face::new_unchecked(vec![first], surface.clone());
+                let mut face1 = Face::new_unchecked(vec![second], surface);
+                face0.orientation = self.orientation;
+                face1.orientation = self.orientation;
+                return Some((face0, face1));
+            }
+        }
+        None
     }
 
     /// Glue two faces at boundaries.
@@ -963,66 +978,108 @@ impl<P, C, S> Face<P, C, S> {
     /// ]);
     /// let face0 = Face::new(vec![wire0, wire1], ());
     /// let face1 = Face::new(vec![wire2, wire3], ());
-    /// let face = face0.glue_at_boundaries(&face1).unwrap();
+    /// let face = face0.glue_at_boundaries(&face1, &[]).unwrap();
     /// let boundaries = face.boundary_iters();
     /// assert_eq!(boundaries.len(), 2);
     /// assert_eq!(boundaries[0].len(), 4);
     /// assert_eq!(boundaries[1].len(), 4);
     /// ```
-    pub fn glue_at_boundaries(&self, other: &Self) -> Option<Self>
+    /// An empty `retained_chart_connectors` selection cancels every shared
+    /// opposite pair, producing the canonical boundary cycles of the union.
+    /// A caller may explicitly retain selected shared opposite pairs as native
+    /// chart seams. This preserves their oriented uses, not extra material.
+    /// Original chart identity is caller intent, not inferable from the inputs.
+    ///
+    /// # Failures
+    /// Returns `None` without mutating either input for unequal surfaces or
+    /// face directions, nonmanifold shared-edge incidence, duplicate, unknown
+    /// or unshared selected identifiers, or an empty or irregular result.
+    /// Ordered edge-use successors preserve all unshared seam uses.
+    pub fn glue_at_boundaries(
+        &self,
+        other: &Self,
+        retained_chart_connectors: &[EdgeId<C>],
+    ) -> Option<Self>
     where
         S: Clone + PartialEq,
-        Wire<P, C>: Debug, {
+        Wire<P, C>: Debug,
+    {
         let surface = self.surface();
         if surface != other.surface() || self.orientation() != other.orientation() {
             return None;
         }
-        let mut vemap: HashMap<VertexId<P>, &Edge<P, C>> = self
-            .absolute_boundaries()
-            .iter()
-            .flatten()
-            .map(|edge| (edge.front().id(), edge))
-            .collect();
-        other
-            .absolute_boundaries()
-            .iter()
-            .flatten()
-            .try_for_each(|edge| {
-                if let Some(edge0) = vemap.get(&edge.back().id())
-                    && edge.front() == edge0.back()
-                {
-                    if edge.is_same(edge0) {
-                        vemap.remove(&edge.back().id());
-                        return Some(());
-                    } else {
+        let mut uses = Vec::new();
+        for (face, from_other) in [(self, false), (other, true)] {
+            for wire in face.absolute_boundaries() {
+                let offset = uses.len();
+                uses.extend(
+                    wire.iter()
+                        .enumerate()
+                        .map(|(index, edge)| (edge, offset + (index + 1) % wire.len(), from_other)),
+                );
+            }
+        }
+        let mut identities: HashMap<EdgeId<C>, (usize, bool)> = HashMap::default();
+        let mut mates = vec![None; uses.len()];
+        for (index, &(edge, _, from_other)) in uses.iter().enumerate() {
+            if let Some((first, repeated)) = identities.get_mut(&edge.id()) {
+                if *repeated {
+                    return None;
+                }
+                *repeated = true;
+                let (previous, _, previous_from_other) = uses[*first];
+                if previous.orientation() == edge.orientation() {
+                    return None;
+                }
+                if previous_from_other != from_other {
+                    mates[index] = Some(*first);
+                    mates[*first] = Some(index);
+                }
+            } else {
+                identities.insert(edge.id(), (index, false));
+            }
+        }
+        for connector in retained_chart_connectors {
+            let &(first, _) = identities.get(connector)?;
+            let second = mates[first]?;
+            mates[first] = None;
+            mates[second] = None;
+        }
+        let mut visited = vec![false; uses.len()];
+        let mut boundaries = Vec::new();
+        for start in 0..uses.len() {
+            if mates[start].is_some() || visited[start] {
+                continue;
+            }
+            let mut wire = Wire::new();
+            let mut cursor = start;
+            loop {
+                if visited[cursor] {
+                    if cursor != start {
+                        return None;
+                    }
+                    break;
+                }
+                visited[cursor] = true;
+                wire.push_back(uses[cursor].0.clone());
+                cursor = uses[cursor].1;
+                let mut crossed = 0;
+                while let Some(mate) = mates[cursor] {
+                    cursor = uses[mate].1;
+                    crossed += 1;
+                    if crossed > uses.len() {
                         return None;
                     }
                 }
-                vemap.insert(edge.front().id(), edge);
-                Some(())
-            })?;
-        if vemap.is_empty() {
-            return None;
-        }
-        let mut boundaries = Vec::new();
-        while !vemap.is_empty() {
-            let mut wire = Wire::new();
-            let v = *vemap.iter().next().unwrap().0;
-            let mut edge = vemap.remove(&v).unwrap();
-            wire.push_back(edge.clone());
-            while let Some(edge0) = vemap.remove(&edge.back().id()) {
-                wire.push_back(edge0.clone());
-                edge = edge0;
             }
             boundaries.push(wire);
         }
-        debug_assert!(Face::try_new(boundaries.clone(), ()).is_ok());
-        Some(Face {
-            boundaries,
-            orientation: self.orientation(),
-            surface: Arc::new(Mutex::new(surface)),
-            stable_id: StableId::UNASSIGNED,
-        })
+        if boundaries.is_empty() {
+            return None;
+        }
+        let mut face = Face::try_new(boundaries, surface).ok()?;
+        face.orientation = self.orientation;
+        Some(face)
     }
 
     /// Creates display struct for debugging the face.

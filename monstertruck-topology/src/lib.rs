@@ -141,7 +141,7 @@ pub struct Wire<P, C> {
     edge_list: VecDeque<Edge<P, C>>,
 }
 
-/// Face, attached to a simple and closed wire.
+/// Face, attached to closed wires regular after opposite seam identification.
 ///
 /// The constructors `Face::new()`, `Face::try_new()`, and `Face::new_unchecked()`
 /// create a different faces each time, even if the boundary wires are the same one.

@@ -38,6 +38,25 @@ type ClassicResult<T> = std::result::Result<T, ShapeOpsError>;
 type AltCurve<C, S> = Alternative<C, IntersectionCurve<PolylineCurve<Point3>, S, S>>;
 type AltCurveShell<C, S> = Shell<Point3, AltCurve<C, S>, S>;
 
+fn oriented_shell_crossings(
+    shell: &Shell<Point3, PolylineCurve<Point3>, Option<PolygonMesh>>,
+    point: Point3,
+    direction: Vector3,
+) -> Option<isize> {
+    shell.iter().try_fold(0, |count, face| {
+        let polygon = face.surface()?;
+        let crossings = polygon.signed_crossing_faces(point, direction);
+        Some(
+            count
+                + if face.orientation() {
+                    crossings
+                } else {
+                    -crossings
+                },
+        )
+    })
+}
+
 /// Convert an Alternative-curve shell back to a target-curve shell, approximating
 /// each intersection-curve arm with a polyline B-spline wrapped in a
 /// `SurfaceCurve` (uses the `From<SurfaceCurve<BsplineCurve<Point3>, ..>>`
@@ -101,21 +120,22 @@ fn process_one_pair_of_shells<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
         geom_loops_store0: loops_store0,
         geom_loops_store1: loops_store1,
         ..
-    } = loops_store::create_loops_stores(&altshell0, &poly_shell0, &altshell1, &poly_shell1)?;
+    } = loops_store::create_loops_stores(&altshell0, &poly_shell0, &altshell1, &poly_shell1, tol)?;
     let mut cls0 = divide_face::divide_faces(&altshell0, &loops_store0, tol, 0)?;
-    cls0.integrate_by_component();
+    if !cls0.integrate_by_component() {
+        return Err(ShapeOpsError::UnknownClassificationFailed { shell_index: 0 });
+    }
     let mut cls1 = divide_face::divide_faces(&altshell1, &loops_store1, tol, 1)?;
-    cls1.integrate_by_component();
+    if !cls1.integrate_by_component() {
+        return Err(ShapeOpsError::UnknownClassificationFailed { shell_index: 1 });
+    }
     let [mut and0, mut or0, unknown0] = cls0.and_or_unknown();
     unknown0
         .into_iter()
         .try_for_each(|face| {
             let pt = face.boundaries()[0].vertex_iter().next().unwrap().point();
             let dir = hash::take_one_unit(pt);
-            let count = poly_shell1.iter().try_fold(0, |count, face| {
-                let poly = face.surface()?;
-                Some(count + poly.signed_crossing_faces(pt, dir))
-            })?;
+            let count = oriented_shell_crossings(&poly_shell1, pt, dir)?;
             if count >= 1 {
                 and0.push(face);
             } else {
@@ -130,10 +150,7 @@ fn process_one_pair_of_shells<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
         .try_for_each(|face| {
             let pt = face.boundaries()[0].vertex_iter().next().unwrap().point();
             let dir = hash::take_one_unit(pt);
-            let count = poly_shell0.iter().try_fold(0, |count, face| {
-                let poly = face.surface()?;
-                Some(count + poly.signed_crossing_faces(pt, dir))
-            })?;
+            let count = oriented_shell_crossings(&poly_shell0, pt, dir)?;
             if count >= 1 {
                 and1.push(face);
             } else {
@@ -297,4 +314,47 @@ pub(crate) fn symmetric_difference<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     let d0 = difference(solid0, solid1, tol)?;
     let d1 = difference(solid1, solid0, tol)?;
     or(&d0, &d1, tol)
+}
+
+#[cfg(test)]
+mod oriented_ray_tests {
+    use super::*;
+    use monstertruck_modeling as modeling;
+
+    #[test]
+    fn material_winding_is_independent_of_carrier_and_face_orientation_representation() {
+        let original: modeling::Solid = modeling::primitive::cuboid(BoundingBox::from_iter([
+            Point3::origin(),
+            Point3::new(1.0, 1.0, 1.0),
+        ]));
+        let mut alternative = original.boundaries()[0].clone();
+        let bottom = alternative
+            .iter()
+            .position(|face| face.edge_iter().all(|edge| edge.front().point().z == 0.0))
+            .unwrap();
+        let face = &alternative[bottom];
+        let boundaries = face.boundaries().iter().map(Wire::inverse).collect();
+        alternative[bottom] = Face::new(boundaries, face.oriented_surface().inverse()).inverse();
+        alternative.check_solid_boundary().unwrap();
+        assert!(alternative.is_geometric_consistent());
+        assert!(!alternative[bottom].orientation());
+        let original = original.boundaries()[0].triangulation(0.01);
+        let alternative = alternative.triangulation(0.01);
+        let direction = Vector3::new(0.137, 0.223, -0.91).normalize();
+        for (point, expected) in [
+            (Point3::new(0.2, 0.3, 0.4), 1),
+            (Point3::new(0.2, 0.3, 1.5), 0),
+            (Point3::new(0.2, 0.3, -0.5), 0),
+            (Point3::new(-1.0, 0.3, 0.4), 0),
+        ] {
+            assert_eq!(
+                oriented_shell_crossings(&original, point, direction),
+                Some(expected)
+            );
+            assert_eq!(
+                oriented_shell_crossings(&alternative, point, direction),
+                Some(expected)
+            );
+        }
+    }
 }
