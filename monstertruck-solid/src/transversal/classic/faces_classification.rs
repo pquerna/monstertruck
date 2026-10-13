@@ -43,6 +43,21 @@ impl<P, C, S> FacesClassification<P, C, S> {
         [and, or, unknown]
     }
 
+    pub(super) fn into_and_or_unknown(self, retain_or: bool) -> [Shell<P, C, S>; 3] {
+        self.shell
+            .into_iter()
+            .fold(<[Shell<P, C, S>; 3]>::default(), |mut shells, face| {
+                // SAFETY: `push` inserts every face identifier into `status`.
+                match self.status.get(&face.id()).unwrap() {
+                    ShapesOpStatus::And => shells[0].push(face),
+                    ShapesOpStatus::Or if retain_or => shells[1].push(face),
+                    ShapesOpStatus::Or => {}
+                    ShapesOpStatus::Unknown => shells[2].push(face),
+                }
+                shells
+            })
+    }
+
     pub(super) fn integrate_by_component(&mut self) -> bool {
         let [and, or, unknown] = self.and_or_unknown();
         let and_boundary = and.extract_boundaries();

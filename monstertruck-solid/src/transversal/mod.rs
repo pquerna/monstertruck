@@ -5,6 +5,10 @@
 #[cfg(feature = "marching-ssi")]
 mod classic;
 mod integrate;
+mod prepared;
+pub use prepared::{
+    BooleanWorkLimits, PreparedBooleanSource, and_prepared, prepare_boolean_source,
+};
 // Marching-SSI polyline chaining support consumed by the classic backend.
 #[cfg(feature = "marching-ssi")]
 mod polyline_construction;

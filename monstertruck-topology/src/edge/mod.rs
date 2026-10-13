@@ -476,21 +476,39 @@ impl<P, C> Edge<P, C> {
         Some(self.pre_cut(vertex, curve0, t))
     }
 
-    /// Cuts the edge at `vertex` with parameter `t`.
+    /// Cuts the edge at `vertex` with native parameter `t`.
+    ///
+    /// Endpoint identity is certified in geometry space, not by an unscaled
+    /// parameter tolerance: a fast curve can have a genuine interior contact
+    /// arbitrarily close to an endpoint parameter.
+    ///
     /// # Failure
-    /// Returns `None` if `!edge.curve().subs(t).near(&vertex.point())`.
+    /// Returns `None` for a nonfinite or non-interior parameter, an existing
+    /// endpoint vertex, a world-near native endpoint, or a vertex not on the
+    /// native curve within the unchanged geometric tolerance.
     pub fn cut_with_parameter(&self, vertex: &Vertex<P>, t: f64) -> Option<(Self, Self)>
     where
         P: Clone + Tolerance,
         C: Cut<Point = P>, {
-        let curve0 = self.curve();
-        if !curve0.subs(t).near(&vertex.point()) {
+        if vertex == self.absolute_front() || vertex == self.absolute_back() {
             return None;
         }
-        let (t0, t1) = curve0.range_tuple();
-        if t < t0 + TOLERANCE || t1 - TOLERANCE < t {
-            return None;
-        }
+        let point = vertex.point();
+        let curve0 = self.with_curve(|curve| {
+            let (t0, t1) = curve.range_tuple();
+            if !t.is_finite()
+                || !t0.is_finite()
+                || !t1.is_finite()
+                || !(t0 < t && t < t1)
+                || !curve.evaluate(t).near(&point)
+                || curve.front().near(&point)
+                || curve.back().near(&point)
+            {
+                None
+            } else {
+                Some(curve.clone())
+            }
+        })?;
         Some(self.pre_cut(vertex, curve0, t))
     }
 

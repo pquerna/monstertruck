@@ -17,13 +17,14 @@ pub fn construct_polylines(lines: &[(Point3, Point3)]) -> Vec<PolylineCurve<Poin
     let mut graph: Graph = lines.iter().collect();
     let mut res = Vec::new();
     while !graph.is_empty() {
-        let (mut idx, node) = graph.first_node();
+        let (start, node) = graph.first_node();
+        let mut idx = start;
         let mut wire: VecDeque<_> = vec![node.coord].into();
         while let Some((idx0, pt)) = graph.next_node(idx) {
             idx = idx0;
             wire.push_back(pt);
         }
-        let mut idx = PointIndex::from(wire[0]);
+        let mut idx = start;
         while let Some((idx0, pt)) = graph.next_node(idx) {
             idx = idx0;
             wire.push_front(pt);
@@ -47,14 +48,14 @@ impl From<Point3> for PointIndex {
 
 struct Node {
     coord: Point3,
-    adjacency: HashSet<PointIndex>,
+    adjacency: HashSet<usize>,
 }
 
 impl Node {
     #[inline(always)]
-    fn new(coord: Point3, adjacency: HashSet<PointIndex>) -> Node { Node { coord, adjacency } }
+    fn new(coord: Point3, adjacency: HashSet<usize>) -> Node { Node { coord, adjacency } }
 
-    fn pop_one_adjacency(&mut self) -> PointIndex {
+    fn pop_one_adjacency(&mut self) -> usize {
         // SAFETY: nodes are removed from the graph when their adjacency set becomes empty.
         let idx = *self.adjacency.iter().next().unwrap();
         self.adjacency.remove(&idx);
@@ -62,10 +63,10 @@ impl Node {
     }
 }
 
-struct Graph(HashMap<PointIndex, Node>);
+struct Graph(HashMap<usize, Node>);
 
 impl std::ops::Deref for Graph {
-    type Target = HashMap<PointIndex, Node>;
+    type Target = HashMap<usize, Node>;
     #[inline(always)]
     fn deref(&self) -> &Self::Target { &self.0 }
 }
@@ -76,31 +77,61 @@ impl std::ops::DerefMut for Graph {
 }
 
 impl Graph {
-    fn add_half_edge(&mut self, pt0: Point3, pt1: Point3) {
-        let idx0 = pt0.into();
-        let idx1 = pt1.into();
-        if let Some(node) = self.get_mut(&idx0) {
-            node.adjacency.insert(idx1);
+    fn intern(
+        &mut self,
+        buckets: &mut HashMap<PointIndex, Vec<usize>>,
+        point: Point3,
+        exclude: Option<usize>,
+    ) -> usize {
+        let bucket = PointIndex::from(point);
+        // A spatial bucket narrows candidates; it is not a geometric identity.
+        // Search neighboring buckets and certify every shared vertex with the
+        // existing kernel residual, including points straddling a bucket edge.
+        let found = (-1..=1)
+            .flat_map(|x| {
+                (-1..=1).flat_map(move |y| {
+                    (-1..=1).map(move |z| {
+                        PointIndex([
+                            bucket.0[0].saturating_add(x),
+                            bucket.0[1].saturating_add(y),
+                            bucket.0[2].saturating_add(z),
+                        ])
+                    })
+                })
+            })
+            .filter_map(|key| buckets.get(&key))
+            .flatten()
+            .filter(|&&index| Some(index) != exclude && self[&index].coord.near(&point))
+            .min()
+            .copied();
+        if let Some(index) = found {
+            index
         } else {
-            self.insert(idx0, Node::new(pt0, HashSet::from_iter([idx1])));
+            let index = self.len();
+            self.insert(index, Node::new(point, HashSet::default()));
+            buckets.entry(bucket).or_default().push(index);
+            index
         }
     }
 
-    fn add_edge(&mut self, line: (Point3, Point3)) {
+    fn add_edge(&mut self, buckets: &mut HashMap<PointIndex, Vec<usize>>, line: (Point3, Point3)) {
         if !line.0.near(&line.1) {
-            self.add_half_edge(line.0, line.1);
-            self.add_half_edge(line.1, line.0);
+            let first = self.intern(buckets, line.0, None);
+            let second = self.intern(buckets, line.1, Some(first));
+            // SAFETY: `intern` inserted distinct nodes and construction never removes them.
+            self.get_mut(&first).unwrap().adjacency.insert(second);
+            self.get_mut(&second).unwrap().adjacency.insert(first);
         }
     }
 
     #[inline(always)]
-    fn first_node(&self) -> (PointIndex, &Node) {
+    fn first_node(&self) -> (usize, &Node) {
         // SAFETY: only called inside `while !graph.is_empty()`.
         let (idx, node) = self.iter().next().unwrap();
         (*idx, node)
     }
 
-    fn next_node(&mut self, idx: PointIndex) -> Option<(PointIndex, Point3)> {
+    fn next_node(&mut self, idx: usize) -> Option<(usize, Point3)> {
         let node = self.get_mut(&idx)?;
         let idx0 = node.pop_one_adjacency();
         if node.adjacency.is_empty() {
@@ -121,13 +152,19 @@ impl Graph {
 impl<'a> FromIterator<&'a (Point3, Point3)> for Graph {
     fn from_iter<I: IntoIterator<Item = &'a (Point3, Point3)>>(iter: I) -> Graph {
         let mut res = Graph(HashMap::default());
-        iter.into_iter().for_each(|line| res.add_edge(*line));
+        let mut buckets = HashMap::default();
+        iter.into_iter()
+            .for_each(|line| res.add_edge(&mut buckets, *line));
+        res.retain(|_, node| !node.adjacency.is_empty());
         res
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod metric_regressions;
 
 #[cfg(test)]
 mod shared_edge_tests {

@@ -17,17 +17,24 @@ use monstertruck_topology::{errors::Error as TopologyError, *};
 use rustc_hash::FxHashMap as HashMap;
 use std::ops::Deref;
 
+use crate::transversal::prepared::BooleanWork;
+mod curve_divisions;
+pub(super) use curve_divisions::CurveDivisionCache;
+
 type DivisionResult<T> = std::result::Result<T, DivisionFailure>;
 
-struct DivisionFailure {
-    stage: &'static str,
-    source: Option<TopologyError>,
-    boundary: Option<DivideFaceBoundaryData>,
+enum DivisionFailure {
+    Geometry {
+        stage: &'static str,
+        source: Option<TopologyError>,
+        boundary: Option<DivideFaceBoundaryData>,
+    },
+    Work(ShapeOpsError),
 }
 
 impl From<&'static str> for DivisionFailure {
     fn from(stage: &'static str) -> Self {
-        Self {
+        Self::Geometry {
             stage,
             source: None,
             boundary: None,
@@ -35,35 +42,37 @@ impl From<&'static str> for DivisionFailure {
     }
 }
 
+impl From<ShapeOpsError> for DivisionFailure {
+    fn from(work: ShapeOpsError) -> Self { Self::Work(work) }
+}
+
 fn create_parameter_boundary<P, C, S>(
     face: &Face<P, C, S>,
     wire: &Wire<P, C>,
-    polys: &mut HashMap<EdgeId<C>, PolylineCurve<P>>,
-    tol: f64,
+    polys: &mut CurveDivisionCache<P, C>,
+    work: Option<&BooleanWork<'_>>,
 ) -> DivisionResult<PolylineCurve<Point2>>
 where
     P: Copy,
     C: BoundedCurve<Point = P> + ParameterDivision1D<Point = P>,
     S: Clone + ParametricSurface + SearchParameter<SurfaceParameter, Point = P>,
 {
+    if let Some(work) = work {
+        work.check()?;
+    }
     let surface = face.surface();
     let pt = wire.front_vertex().unwrap().point();
-    let p: Point2 = surface
-        .search_parameter(pt, None, 100)
-        .ok_or("boundary_front_parameter")?
-        .into();
+    let parameter = surface.search_parameter(pt, None, 100);
+    let p: Point2 = parameter.ok_or("boundary_front_parameter")?.into();
     let vec = wire.edge_iter().try_fold(vec![p], |mut vec, edge| {
-        let poly = polys.entry(edge.id()).or_insert_with(|| {
-            let curve = edge.curve();
-            let div = curve.parameter_division(curve.range_tuple(), tol).1;
-            PolylineCurve(div)
-        });
+        let poly = polys.get(edge, work)?;
         let mut p = *vec.last().unwrap();
         let closure = |q: &P| -> DivisionResult<Point2> {
-            let next: Point2 = surface
-                .search_parameter(*q, Some(p.into()), 100)
-                .ok_or("boundary_sample_parameter")?
-                .into();
+            if let Some(work) = work {
+                work.check()?;
+            }
+            let parameter = surface.search_parameter(*q, Some(p.into()), 100);
+            let next: Point2 = parameter.ok_or("boundary_sample_parameter")?.into();
             // Inverse maps can return a canonical representative even when
             // given a hint. Lift periodic coordinates to the previous sheet
             // before measuring signed area or testing loop containment.
@@ -136,15 +145,16 @@ fn divide_one_face<C, S>(
     face: &Face<Point3, C, S>,
     loops: &Loops<Point3, C>,
     tol: f64,
+    polys: &mut CurveDivisionCache<Point3, C>,
+    work: Option<&BooleanWork<'_>>,
 ) -> DivisionResult<Vec<FaceWithShapesOpStatus<C, S>>>
 where
     C: BoundedCurve<Point = Point3> + ParameterDivision1D<Point = Point3>,
     S: Clone + ParametricSurface + SearchParameter<SurfaceParameter, Point = Point3>,
 {
     let (mut pre_faces, mut negative_wires) = (Vec::new(), Vec::new());
-    let mut map = HashMap::default();
     loops.iter().try_for_each(|wire| {
-        let poly = create_parameter_boundary(face, wire, &mut map, tol)?;
+        let poly = create_parameter_boundary(face, wire, polys, work)?;
         let area = poly.area();
         if area.abs() < tol {
             return Ok(());
@@ -190,7 +200,7 @@ where
                     .position(|chunk| !chunk.wire.is_closed() || !chunk.wire.is_simple())
                     .unwrap_or(0);
                 let wire = pre_face[wire_index].wire;
-                DivisionFailure {
+                DivisionFailure::Geometry {
                     stage: "divided_face_topology",
                     source: Some(source),
                     boundary: Some(DivideFaceBoundaryData {
@@ -227,6 +237,8 @@ pub(super) fn divide_faces<C, S>(
     loops_store: &LoopsStore<Point3, C>,
     tol: f64,
     shell_index: usize,
+    polys: &mut CurveDivisionCache<Point3, C>,
+    work: Option<&BooleanWork<'_>>,
 ) -> ClassicResult<FacesClassification<Point3, C, S>>
 where
     C: BoundedCurve<Point = Point3> + ParameterDivision1D<Point = Point3>,
@@ -238,6 +250,9 @@ where
         .zip(loops_store)
         .enumerate()
         .try_for_each(|(face_index, (face, loops))| {
+            if let Some(work) = work {
+                work.check()?;
+            }
             if loops
                 .iter()
                 .all(|wire| wire.status() == ShapesOpStatus::Unknown)
@@ -263,7 +278,28 @@ where
                             face_index,
                             stage: "propagated_face_topology",
                             source: Some(source),
-                            boundary: None,
+                            boundary: loops
+                                .iter()
+                                .enumerate()
+                                .find(|(_, wire)| !wire.is_closed() || !wire.is_simple())
+                                .map(|(wire_index, wire)| DivideFaceBoundaryData {
+                                    wire_count: loops.len(),
+                                    wire_index,
+                                    wire_len: wire.len(),
+                                    closed: wire.is_closed(),
+                                    simple: wire.is_simple(),
+                                    edges: wire
+                                        .iter()
+                                        .take(12)
+                                        .map(|edge| {
+                                            (
+                                                edge.front().point(),
+                                                edge.back().point(),
+                                                edge.orientation(),
+                                            )
+                                        })
+                                        .collect(),
+                                }),
                         }
                     })?;
                     if !face.orientation() {
@@ -274,15 +310,23 @@ where
                 };
                 res.push(updated, ShapesOpStatus::Unknown);
             } else {
-                let vec = divide_one_face(face, loops, tol).map_err(|failure| {
-                    ShapeOpsError::DivideFacesFailed {
-                        shell_index,
-                        face_index,
-                        stage: failure.stage,
-                        source: failure.source,
-                        boundary: failure.boundary,
-                    }
-                })?;
+                let vec =
+                    divide_one_face(face, loops, tol, polys, work).map_err(
+                        |failure| match failure {
+                            DivisionFailure::Work(work) => work,
+                            DivisionFailure::Geometry {
+                                stage,
+                                source,
+                                boundary,
+                            } => ShapeOpsError::DivideFacesFailed {
+                                shell_index,
+                                face_index,
+                                stage,
+                                source,
+                                boundary,
+                            },
+                        },
+                    )?;
                 vec.into_iter()
                     .for_each(|(face, status)| res.push(face, status));
             }
@@ -407,7 +451,8 @@ mod ownership_tests {
         let mut store: LoopsStore<_, _> = std::iter::once(&face).collect();
         store[0][0] = BoundaryWire::new(updated, ShapesOpStatus::Unknown);
         let shell = vec![face.clone()].into();
-        let classification = divide_faces(&shell, &store, 1.0e-5, 0).unwrap();
+        let mut divisions = CurveDivisionCache::new(1.0e-5);
+        let classification = divide_faces(&shell, &store, 1.0e-5, 0, &mut divisions, None).unwrap();
         let [and, or, unknown] = classification.and_or_unknown();
         assert!(and.is_empty() && or.is_empty());
         assert_eq!(unknown.len(), 1);
@@ -427,3 +472,6 @@ mod ownership_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod curve_division_regressions;

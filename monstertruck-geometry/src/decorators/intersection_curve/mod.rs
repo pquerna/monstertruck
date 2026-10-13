@@ -293,11 +293,7 @@ where
         hint1: Option<(f64, f64)>,
         trials: usize,
     ) -> Option<(Point3, Point2, Point2)> {
-        let intersection = IntersectionCurve::new(
-            self.surface0.clone(),
-            self.surface1.clone(),
-            self.leader.clone(),
-        );
+        let intersection = IntersectionCurve::new(&self.surface0, &self.surface1, &self.leader);
         intersection.search_nearest_point(point, hint0, hint1, trials)
     }
 }
@@ -579,44 +575,19 @@ where
     type Point = Point3;
     type Vector = Vector3;
     fn evaluate(&self, t: f64) -> Point3 {
-        IntersectionCurve::new(
-            self.surface0.clone(),
-            self.surface1.clone(),
-            self.leader.clone(),
-        )
-        .evaluate(t)
+        IntersectionCurve::new(&self.surface0, &self.surface1, &self.leader).evaluate(t)
     }
     fn derivative(&self, t: f64) -> Vector3 {
-        IntersectionCurve::new(
-            self.surface0.clone(),
-            self.surface1.clone(),
-            self.leader.clone(),
-        )
-        .derivative(t)
+        IntersectionCurve::new(&self.surface0, &self.surface1, &self.leader).derivative(t)
     }
     fn derivative_2(&self, t: f64) -> Vector3 {
-        IntersectionCurve::new(
-            self.surface0.clone(),
-            self.surface1.clone(),
-            self.leader.clone(),
-        )
-        .derivative_2(t)
+        IntersectionCurve::new(&self.surface0, &self.surface1, &self.leader).derivative_2(t)
     }
     fn derivative_n(&self, n: usize, t: f64) -> Vector3 {
-        IntersectionCurve::new(
-            self.surface0.clone(),
-            self.surface1.clone(),
-            self.leader.clone(),
-        )
-        .derivative_n(n, t)
+        IntersectionCurve::new(&self.surface0, &self.surface1, &self.leader).derivative_n(n, t)
     }
     fn derivatives(&self, n: usize, t: f64) -> CurveDerivatives<Vector3> {
-        IntersectionCurve::new(
-            self.surface0.clone(),
-            self.surface1.clone(),
-            self.leader.clone(),
-        )
-        .derivatives(n, t)
+        IntersectionCurve::new(&self.surface0, &self.surface1, &self.leader).derivatives(n, t)
     }
     #[inline(always)]
     fn parameter_range(&self) -> ParameterRange { self.leader.parameter_range() }

@@ -147,6 +147,19 @@ pub enum ShapeOpsError {
         "no boolean backend available: enable `marching-ssi` (default) or link an external SSI backend."
     )]
     NoBackend,
+    /// Cooperative native Boolean work was cancelled.
+    #[error("native Boolean work was cancelled.")]
+    Cancelled,
+    /// A prepared source or query exceeded its explicit work admission.
+    #[error("native Boolean resource `{resource}` exceeded {limit}: {actual}.")]
+    WorkLimitExceeded {
+        /// Bounded resource name.
+        resource: &'static str,
+        /// Observed or conservatively admitted work.
+        actual: usize,
+        /// Caller-supplied maximum.
+        limit: usize,
+    },
     /// Tessellation omitted a native face needed for intersection discovery.
     #[error("failed to tessellate boolean input shell {shell_index}, face {face_index}.")]
     InputTessellationFailed {

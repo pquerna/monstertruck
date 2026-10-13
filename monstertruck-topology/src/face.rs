@@ -528,6 +528,15 @@ impl<P, C, S> Face<P, C, S> {
         self.surface.lock().clone()
     }
 
+    /// Inspects the surface without cloning it.
+    ///
+    /// The callback holds this face's surface lock and must not access or mutate
+    /// the surface through another handle to the same face.
+    #[inline(always)]
+    pub fn with_surface<T>(&self, inspect: impl FnOnce(&S) -> T) -> T {
+        inspect(&self.surface.lock())
+    }
+
     /// Sets the surface of face.
     /// # Examples
     /// ```

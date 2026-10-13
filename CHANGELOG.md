@@ -12,6 +12,58 @@ the two do not line up -- upstream `truck v0.4` has nothing to do with
 monstertruck 0.4.0.
 
 
+## Unreleased -- Spiling public fork
+
+### Fixed
+
+- Marching interference graphs certify nearby shared endpoints across spatial
+  buckets without collapsing distinct regular segments into one-point branches.
+  Native reconstruction rejects unrelated-carrier midpoint recovery and
+  nontransverse leaders at the unchanged kernel residual.
+- Open intersection endpoints start on the certified native leader. Joint
+  boundary recovery searches both immutable input faces' bounded native coedges and attaches
+  only trims containing the same closest contact certified on both carriers,
+  without treating mesh-distance proximity as native trim membership. Ambiguous,
+  conflicting, or wholly unattached contacts refuse assembly instead of
+  admitting raw seed vertices or malformed wire spikes.
+- Shallow boundary crossings refine Newton roots using world-space displacement.
+  Native endpoint classification uses corner distance rather than unscaled
+  parameter proximity, and subdivision replays the certified native parameter
+  separately from its polygon-guide parameter.
+- Redundant mesh-chain cuts require certified native component interval coverage,
+  ordered coordinates (including periodic seams), original trim provenance and
+  terminal material-crossing checks. Generated cuts are not original boundary
+  authorities; distinct non-covered native intervals remain in the result.
+  Affine fibre certificates cover native recovery beyond finite patch endpoints,
+  and bounded pre-splice admission removes raw-chain encounter-order dependence.
+- Native surface-curve evaluation borrows carriers and leaders instead of
+  copying complete geometry per sample. Boolean mesh inspection borrows face
+  surfaces, and AND skips unused OR reconstruction.
+- Native face division reuses one canonical, unchanged edge subdivision across
+  both source and clipping shells, with bounded query-local sample buffers,
+  conservative table admission and typed cancellation/resource refusals.
+- Native parameter-guided edge cuts certify strict finite parameter bounds and
+  world-distance endpoint identity rather than unscaled parameter nearness,
+  preserving genuinely interior high-speed curve contacts.
+- Propagated native face-topology errors retain bounded invalid-wire evidence.
+
+### Added
+
+- Opaque borrowed `PreparedBooleanSource`, explicit `BooleanWorkLimits`,
+  `prepare_boolean_source` and `and_prepared` for repeated native intersections
+  through the common AND backend, with typed cancellation/resource refusals,
+  owned seed-buffer accounting and release-active manifold checks.
+  Separate source-cache, derived-input, combined and intermediate byte
+  admissions preserve query headroom and bound cumulative retention before
+  admitting each completed query seed shell.
+- New original analytic STEP regressions cover the operator's frozen one-degree
+  partial-bottom, middle and top planes, equivalent plane representations, the
+  actual quaternion/bed pose, source-face preservation, original-carrier
+  residuals, retained material halfspaces and inward hole orientation.
+  Focused new regressions cover metric adjacency, projection certificates,
+  immutable trim recovery, disjoint non-covered native intervals and
+  prepared-source resource admissions.
+
 ## 0.4.1 -- 2026-09-19
 
 ### Added

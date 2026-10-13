@@ -43,8 +43,9 @@
 
 mod transversal;
 pub use transversal::{
-    PlaneCut, ShapeOpsCurve, ShapeOpsError, ShapeOpsSurface, ShellOrientationHints,
-    SnapCurveEndpoints, and, and_with_orientation_hints, clip_half_space_z, difference, or,
-    plane_cut, symmetric_difference,
+    BooleanWorkLimits, PlaneCut, PreparedBooleanSource, ShapeOpsCurve, ShapeOpsError,
+    ShapeOpsSurface, ShellOrientationHints, SnapCurveEndpoints, and, and_prepared,
+    and_with_orientation_hints, clip_half_space_z, difference, or, plane_cut,
+    prepare_boolean_source, symmetric_difference,
 };
 mod alternative;

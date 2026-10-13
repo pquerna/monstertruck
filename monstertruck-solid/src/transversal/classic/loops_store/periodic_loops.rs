@@ -425,14 +425,32 @@ where
             if !point.on_boundary[side] {
                 continue;
             }
-            let (wire, edge, kind) = polygon[side]
-                .add_polygon_vertex(faces[side], &point.polygon, &mut polygon_maps[side])
+            let BoundaryAttachment {
+                wire_index,
+                edge_index,
+                native_kind,
+                polygon_kind,
+            } = boundary_attachment(
+                native[side],
+                polygon[side],
+                faces[side],
+                &point.polygon,
+                &point.native,
+                [surfaces[side], surfaces[1 - side]],
+            )?
+            .ok_or("intersection_chart_native_contact")?;
+            polygon[side]
+                .add_polygon_vertex_at(
+                    faces[side],
+                    &point.polygon,
+                    (wire_index, edge_index, polygon_kind),
+                    &mut polygon_maps[side],
+                )
                 .ok_or("intersection_chart_polygon_contact")?;
             native[side].add_geom_vertex(
-                (faces[side], wire, edge),
+                (faces[side], wire_index, edge_index),
                 &point.native,
-                kind,
-                surfaces[1 - side],
+                native_kind,
                 &mut native_maps[side],
             )?;
         }
