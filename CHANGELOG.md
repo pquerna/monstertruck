@@ -42,6 +42,12 @@ monstertruck 0.4.0.
 - Native face division reuses one canonical, unchanged edge subdivision across
   both source and clipping shells, with bounded query-local sample buffers,
   conservative table admission and typed cancellation/resource refusals.
+- Adaptive curve subdivision appends to one output pair instead of allocating
+  leaf vectors and recopying subtrees, preserving the exact published probe
+  sequence, stopping rules, evaluation order and sample values.
+- Coupled native intersection projection uses compact order-one surface jets
+  instead of initializing 32-by-32 derivative tensors. Custom batch overrides
+  retain their existing arithmetic through the default jet implementation.
 - Native parameter-guided edge cuts certify strict finite parameter bounds and
   world-distance endpoint identity rather than unscaled parameter nearness,
   preserving genuinely interior high-speed curve contacts.

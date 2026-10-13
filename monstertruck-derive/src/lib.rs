@@ -653,6 +653,7 @@ pub fn derive_parametric_surface(input: TokenStream) -> TokenStream {
                 fn derivative_vv(&self, s: f64, t: f64) -> Self::Vector,
                 fn derivative_mn(&self, m: usize, n: usize, s: f64, t: f64) -> Self::Vector,
                 fn derivatives(&self, max_order: usize, u: f64, v: f64) -> SurfaceDerivatives<Self::Vector>,
+                fn first_derivatives(&self, u: f64, v: f64) -> [Self::Vector; 3],
                 fn parameter_range(&self,) -> (monstertruck_traits::ParameterRange, monstertruck_traits::ParameterRange),
                 fn period_u(&self,) -> Option<f64>,
                 fn period_v(&self,) -> Option<f64>,
@@ -702,6 +703,10 @@ pub fn derive_parametric_surface(input: TokenStream) -> TokenStream {
                         self.0.derivatives(max_order, s, t)
                     }
                     #[inline(always)]
+                    fn first_derivatives(&self, s: f64, t: f64) -> [Self::Vector; 3] {
+                        self.0.first_derivatives(s, t)
+                    }
+                    #[inline(always)]
                     fn parameter_range(&self,) -> ((std::ops::Bound<f64>, std::ops::Bound<f64>), (std::ops::Bound<f64>, std::ops::Bound<f64>)) {
                         self.0.parameter_range()
                     }
@@ -746,6 +751,7 @@ pub fn derive_parametric_surface3d(input: TokenStream) -> TokenStream {
                 fn derivative_vv(&self, s: f64, t: f64) -> Self::Vector,
                 fn derivative_mn(&self, m: usize, n: usize, s: f64, t: f64) -> Self::Vector,
                 fn derivatives(&self, max_order: usize, u: f64, v: f64) -> SurfaceDerivatives<Self::Vector>,
+                fn first_derivatives(&self, u: f64, v: f64) -> [Self::Vector; 3],
                 fn parameter_range(&self,) -> (monstertruck_traits::ParameterRange, monstertruck_traits::ParameterRange),
                 fn period_u(&self,) -> Option<f64>,
                 fn period_v(&self,) -> Option<f64>,
@@ -798,6 +804,9 @@ pub fn derive_parametric_surface3d(input: TokenStream) -> TokenStream {
                     fn derivative_mn(&self, m: usize, n: usize, s: f64, t: f64) -> Self::Vector { self.0.derivative_mn(m, n, s, t) }
                     fn derivatives(&self, max_order: usize, u: f64, v: f64) -> SurfaceDerivatives<Self::Vector> {
                         self.0.derivatives(max_order, u, v)
+                    }
+                    fn first_derivatives(&self, u: f64, v: f64) -> [Self::Vector; 3] {
+                        self.0.first_derivatives(u, v)
                     }
                     fn parameter_range(&self,) -> (monstertruck_traits::ParameterRange, monstertruck_traits::ParameterRange) {
                         self.0.parameter_range()

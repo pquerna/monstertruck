@@ -35,6 +35,17 @@ pub trait ParametricSurface: Clone {
         });
         derivs
     }
+    /// Returns `[position_vector, u_derivative, v_derivative]` at `(u, v)`.
+    ///
+    /// The default extracts the existing order-one derivative batch, preserving
+    /// custom batching and arithmetic. Implementations may use compact storage
+    /// only when it produces those same three entries with the same arithmetic.
+    /// The position vector is the `(0, 0)` derivative, not an arbitrary origin.
+    #[inline]
+    fn first_derivatives(&self, u: f64, v: f64) -> [Self::Vector; 3] {
+        let derivatives = self.derivatives(1, u, v);
+        [derivatives[0][0], derivatives[1][0], derivatives[0][1]]
+    }
     /// Deprecated: use [`evaluate`](ParametricSurface::evaluate).
     #[inline(always)]
     fn subs(&self, u: f64, v: f64) -> Self::Point { self.evaluate(u, v) }
@@ -125,6 +136,10 @@ impl<S: ParametricSurface> ParametricSurface for &S {
         (*self).derivatives(max_order, u, v)
     }
     #[inline(always)]
+    fn first_derivatives(&self, u: f64, v: f64) -> [Self::Vector; 3] {
+        (*self).first_derivatives(u, v)
+    }
+    #[inline(always)]
     fn parameter_range(&self) -> (ParameterRange, ParameterRange) { (*self).parameter_range() }
     #[inline(always)]
     fn period_u(&self) -> Option<f64> { (*self).period_u() }
@@ -154,6 +169,10 @@ impl<S: ParametricSurface> ParametricSurface for Box<S> {
     #[inline(always)]
     fn derivatives(&self, max_order: usize, u: f64, v: f64) -> SurfaceDerivatives<Self::Vector> {
         (**self).derivatives(max_order, u, v)
+    }
+    #[inline(always)]
+    fn first_derivatives(&self, u: f64, v: f64) -> [Self::Vector; 3] {
+        (**self).first_derivatives(u, v)
     }
     #[inline(always)]
     fn parameter_range(&self) -> (ParameterRange, ParameterRange) { (**self).parameter_range() }

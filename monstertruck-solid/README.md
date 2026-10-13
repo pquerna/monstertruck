@@ -78,6 +78,17 @@ growth are admitted against intermediate scratch bytes, and sample counts are
 bounded by the mesh-position limit. Cancellation is checked on cache hits,
 before/after indivisible generic subdivision and during native UV projection.
 The cache does not retain source BREP or survive the shell-pair query.
+The adaptive sampler's output assembly uses one append-only vector pair.
+It retains the same hashed probes, midpoint evaluations, recursion decisions,
+depth cap and ordered sample values; it does not rescale guide parameters or
+change the curve's coupled native projection. Admission continues to count
+the resulting vector capacities, not an assumed sample-size allocation.
+Coupled projection consumes `ParametricSurface::first_derivatives(u, v)`,
+returning `[position_vector, u_derivative, v_derivative]`. Its default extracts
+the real existing order-one batch, preserving arbitrary custom batch arithmetic.
+Plane, B-spline, NURBS and posed Processor carriers use the same ordered native
+mixed-derivative evaluations without initializing an order-31 tensor. References,
+boxes and generated enum/tuple dispatch retain that carrier's jet authority.
 
 Interference stitching certifies shared vertices with the unchanged native
 residual rather than equating spatial buckets with vertex identity. Reconstructed

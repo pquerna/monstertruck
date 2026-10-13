@@ -178,6 +178,14 @@ where
 {
     type Point = S::Point;
     type Vector = S::Vector;
+    #[inline]
+    fn first_derivatives(&self, u: f64, v: f64) -> [Self::Vector; 3] {
+        // Retain the existing transformed/inverted mixed-derivative order.
+        let point = self.derivative_mn(0, 0, u, v);
+        let vder = self.derivative_mn(0, 1, u, v);
+        let uder = self.derivative_mn(1, 0, u, v);
+        [point, uder, vder]
+    }
     #[inline(always)]
     fn derivative_mn(&self, m: usize, n: usize, u: f64, v: f64) -> Self::Vector {
         if (m, n) == (0, 0) {

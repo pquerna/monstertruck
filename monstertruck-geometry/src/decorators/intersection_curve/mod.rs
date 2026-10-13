@@ -43,10 +43,8 @@ where
     S1: ParametricSurface3D + SearchNearestParameter<SurfaceParameter, Point = Point3>,
 {
     let function = move |Vector4 { x, y, z, w }| {
-        let ders0 = surface0.derivatives(1, x, y);
-        let (pt0, uder0, vder0) = (ders0[0][0], ders0[1][0], ders0[0][1]);
-        let ders1 = surface1.derivatives(1, z, w);
-        let (pt1, uder1, vder1) = (ders1[0][0], ders1[1][0], ders1[0][1]);
+        let [pt0, uder0, vder0] = surface0.first_derivatives(x, y);
+        let [pt1, uder1, vder1] = surface1.first_derivatives(z, w);
         CalcOutput {
             value: (pt0 - pt1).extend(plane_normal.dot((pt0 + pt1) / 2.0 - plane_point.to_vec())),
             derivation: Matrix4::from_cols(
@@ -726,3 +724,6 @@ where
 
 #[cfg(test)]
 mod double_projection_tests;
+
+#[cfg(test)]
+mod compact_projection_regressions;

@@ -106,6 +106,13 @@ impl Plane {
 impl ParametricSurface for Plane {
     type Point = Point3;
     type Vector = Vector3;
+    #[inline]
+    fn first_derivatives(&self, u: f64, v: f64) -> [Self::Vector; 3] {
+        let point = self.derivative_mn(0, 0, u, v);
+        let vder = self.derivative_mn(0, 1, u, v);
+        let uder = self.derivative_mn(1, 0, u, v);
+        [point, uder, vder]
+    }
     #[inline(always)]
     fn derivative_mn(&self, m: usize, n: usize, u: f64, v: f64) -> Self::Vector {
         match (m, n) {

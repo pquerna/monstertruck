@@ -78,13 +78,10 @@ where
     C: ParametricCurve,
     C::Point: EuclideanSpace<Scalar = f64> + MetricSpace<Metric = f64> + HashGen<f64>, {
     nonpositive_tolerance!(tol);
-    sub_parameter_division(
-        curve,
-        range,
-        (curve.evaluate(range.0), curve.evaluate(range.1)),
-        tol,
-        100,
-    )
+    let ends = (curve.evaluate(range.0), curve.evaluate(range.1));
+    let mut division = (vec![range.0], vec![ends.0]);
+    sub_parameter_division(curve, range, ends, tol, 100, &mut division);
+    division
 }
 
 fn sub_parameter_division<C>(
@@ -93,8 +90,8 @@ fn sub_parameter_division<C>(
     ends: (C::Point, C::Point),
     tol: f64,
     trials: usize,
-) -> (Vec<f64>, Vec<C::Point>)
-where
+    division: &mut (Vec<f64>, Vec<C::Point>),
+) where
     C: ParametricCurve,
     C::Point: EuclideanSpace<Scalar = f64> + MetricSpace<Metric = f64> + HashGen<f64>,
 {
@@ -113,27 +110,29 @@ where
     let range_is_halvable = range.0 < mid_param && mid_param < range.1;
     let unsplittable = !dist2.is_finite() || !range_is_halvable;
     if dist2 < tol * tol || trials == 0 || unsplittable {
-        (vec![range.0, range.1], vec![ends.0, ends.1])
+        division.0.push(range.1);
+        division.1.push(ends.1);
     } else {
         let mid_value = curve.evaluate(mid_param);
-        let (mut params, mut pts) = sub_parameter_division(
+        // Preserve the exact probes, midpoint evaluations and left-before-right
+        // traversal. Append each accepted leaf endpoint once instead of
+        // allocating leaf vectors and copying right subtrees at every parent.
+        sub_parameter_division(
             curve,
             (range.0, mid_param),
             (ends.0, mid_value),
             tol,
             trials - 1,
+            division,
         );
-        let _ = (params.pop(), pts.pop());
-        let (new_params, new_pts) = sub_parameter_division(
+        sub_parameter_division(
             curve,
             (mid_param, range.1),
             (mid_value, ends.1),
             tol,
             trials - 1,
+            division,
         );
-        params.extend(new_params);
-        pts.extend(new_pts);
-        (params, pts)
     }
 }
 
@@ -252,3 +251,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "polynomial"))]
+mod subdivision_regressions;

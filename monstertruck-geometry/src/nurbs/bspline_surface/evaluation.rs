@@ -134,6 +134,13 @@ impl<P: ControlPoint<f64>> BsplineSurface<P> {
 impl<P: ControlPoint<f64>> ParametricSurface for BsplineSurface<P> {
     type Point = P;
     type Vector = P::Diff;
+    #[inline]
+    fn first_derivatives(&self, u: f64, v: f64) -> [Self::Vector; 3] {
+        let point = self.derivative_mn(0, 0, u, v);
+        let vder = self.derivative_mn(0, 1, u, v);
+        let uder = self.derivative_mn(1, 0, u, v);
+        [point, uder, vder]
+    }
     fn derivative_mn(&self, m: usize, n: usize, u: f64, v: f64) -> Self::Vector {
         let (degree0, degree1) = self.degrees();
         let BsplineSurface {

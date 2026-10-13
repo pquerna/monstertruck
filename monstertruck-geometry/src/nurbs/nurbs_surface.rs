@@ -653,6 +653,13 @@ impl<V: Homogeneous<Scalar = f64> + ControlPoint<f64, Diff = V>> ParametricSurfa
 {
     type Point = V::Point;
     type Vector = <V::Point as EuclideanSpace>::Diff;
+    #[inline]
+    fn first_derivatives(&self, u: f64, v: f64) -> [Self::Vector; 3] {
+        let point = self.derivative_mn(0, 0, u, v);
+        let vder = self.derivative_mn(0, 1, u, v);
+        let uder = self.derivative_mn(1, 0, u, v);
+        [point, uder, vder]
+    }
     #[inline(always)]
     fn derivative_mn(&self, m: usize, n: usize, u: f64, v: f64) -> Self::Vector {
         if m < 7 && n < 7 {
