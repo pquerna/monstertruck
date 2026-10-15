@@ -476,7 +476,7 @@ pub(crate) fn and_prepared<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     other_meshes: &[MeshShell],
     work: &BooleanWork<'_>,
 ) -> ClassicResult<Solid<Point3, C, S>> {
-    let tolerance = prepared.tolerance;
+    let tolerance = prepared.tolerance();
     let mut sources = prepared.source.boundaries().iter().zip(&prepared.meshes);
     let mut others = other.boundaries().iter().zip(other_meshes);
     let (source, source_mesh) = sources
@@ -497,7 +497,7 @@ pub(crate) fn and_prepared<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     for (shell, mesh) in sources.chain(others) {
         work.check()?;
         work.charge(result.len())?;
-        let result_mesh = result.triangulation(tolerance);
+        let result_mesh = result.triangulation(prepared.seed_tolerance());
         work.check()?;
         work.intermediate(&result_mesh)?;
         let [next, _] = process_shell_pair(
@@ -583,7 +583,7 @@ pub(crate) fn and_prepared_with_provenance<C: ShapeOpsCurve<S>, S: ShapeOpsSurfa
                 mesh: other_mesh,
             },
         ],
-        prepared.tolerance,
+        prepared.tolerance(),
         false,
         Some(work),
         Some([&source_origins, &other_origins]),
@@ -592,7 +592,7 @@ pub(crate) fn and_prepared_with_provenance<C: ShapeOpsCurve<S>, S: ShapeOpsSurfa
     for (operand, shell_index, shell, mesh) in sources.chain(others) {
         work.check()?;
         work.charge(result.len())?;
-        let result_mesh = result.triangulation(prepared.tolerance);
+        let result_mesh = result.triangulation(prepared.seed_tolerance());
         work.check()?;
         work.intermediate(&result_mesh)?;
         let shell_origins = origins(shell, operand, shell_index)?;
@@ -607,7 +607,7 @@ pub(crate) fn and_prepared_with_provenance<C: ShapeOpsCurve<S>, S: ShapeOpsSurfa
                     mesh,
                 },
             ],
-            prepared.tolerance,
+            prepared.tolerance(),
             false,
             Some(work),
             Some([&result_origins, &shell_origins]),

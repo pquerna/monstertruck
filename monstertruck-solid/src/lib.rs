@@ -44,11 +44,13 @@
 mod transversal;
 pub use transversal::{
     BooleanCoedgeOrigin, BooleanCoedgeProvenance, BooleanCutSide, BooleanEdgeDerivation,
-    BooleanFaceOrigin, BooleanFaceProvenance, BooleanOperand, BooleanWithProvenance,
-    BooleanWorkBudget, BooleanWorkLimits, PlaneCut, PreparedBooleanSource, ShapeOpsCurve,
-    ShapeOpsError, ShapeOpsSurface, ShellOrientationHints, SnapCurveEndpoints, and, and_prepared,
-    and_prepared_counted, and_prepared_with_provenance, and_prepared_with_provenance_counted,
+    BooleanFaceOrigin, BooleanFaceProvenance, BooleanOperand, BooleanPreparationOptions,
+    BooleanWithProvenance, BooleanWorkBudget, BooleanWorkLimits, PlaneCut, PreparedBooleanSource,
+    ShapeOpsCurve, ShapeOpsError, ShapeOpsSurface, ShellOrientationHints, SnapCurveEndpoints, and,
+    and_prepared, and_prepared_counted, and_prepared_with_provenance,
+    and_prepared_with_provenance_counted, and_prepared_with_provenance_counted_with_query_bytes,
     and_with_orientation_hints, clip_half_space_z, difference, or, plane_cut,
-    prepare_boolean_source, prepare_boolean_source_counted, symmetric_difference,
+    prepare_boolean_source, prepare_boolean_source_counted,
+    prepare_boolean_source_counted_with_options, symmetric_difference,
 };
 mod alternative;

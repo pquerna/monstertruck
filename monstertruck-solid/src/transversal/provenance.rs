@@ -145,7 +145,7 @@ pub fn and_prepared_with_provenance<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     other: &Solid<Point3, C, S>,
     cancel: &AtomicBool,
 ) -> Result<BooleanWithProvenance<C, S>, ShapeOpsError> {
-    and_prepared_with_provenance_impl(prepared, other, cancel, None)
+    and_prepared_with_provenance_impl(prepared, other, cancel, None, None)
 }
 
 /// Reports prepared AND genealogy while charging cumulative native work.
@@ -158,7 +158,28 @@ pub fn and_prepared_with_provenance_counted<C: ShapeOpsCurve<S>, S: ShapeOpsSurf
     cancel: &AtomicBool,
     budget: &BooleanWorkBudget,
 ) -> Result<BooleanWithProvenance<C, S>, ShapeOpsError> {
-    and_prepared_with_provenance_impl(prepared, other, cancel, Some(budget))
+    and_prepared_with_provenance_impl(prepared, other, cancel, Some(budget), None)
+}
+
+/// Reports counted prepared AND genealogy with a caller's remaining query bytes.
+///
+/// `max_query_bytes` excludes the already retained source. Derived input seeds
+/// share this allowance and the original combined/source/other seed limits.
+/// Each reconstruction scratch object is separately capped by the remaining
+/// allowance after retaining those derived seeds and by the original intermediate
+/// limit. This is not an aggregate scratch, allocator or process RSS bound.
+/// Generic meshing temporaries still require an external host memory cap.
+pub fn and_prepared_with_provenance_counted_with_query_bytes<
+    C: ShapeOpsCurve<S>,
+    S: ShapeOpsSurface,
+>(
+    prepared: &PreparedBooleanSource<'_, C, S>,
+    other: &Solid<Point3, C, S>,
+    cancel: &AtomicBool,
+    budget: &BooleanWorkBudget,
+    max_query_bytes: usize,
+) -> Result<BooleanWithProvenance<C, S>, ShapeOpsError> {
+    and_prepared_with_provenance_impl(prepared, other, cancel, Some(budget), Some(max_query_bytes))
 }
 
 fn and_prepared_with_provenance_impl<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
@@ -166,12 +187,30 @@ fn and_prepared_with_provenance_impl<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     other: &Solid<Point3, C, S>,
     cancel: &AtomicBool,
     budget: Option<&BooleanWorkBudget>,
+    max_query_bytes: Option<usize>,
 ) -> Result<BooleanWithProvenance<C, S>, ShapeOpsError> {
-    let work = BooleanWork::with_budget(prepared.limits, cancel, budget);
+    let mut limits = prepared.limits;
+    if let Some(max_query_bytes) = max_query_bytes {
+        limits.max_prepared_bytes = limits
+            .max_prepared_bytes
+            .min(prepared.retained_bytes().saturating_add(max_query_bytes));
+        limits.max_other_prepared_bytes = limits.max_other_prepared_bytes.min(max_query_bytes);
+        limits.max_intermediate_prepared_bytes =
+            limits.max_intermediate_prepared_bytes.min(max_query_bytes);
+    }
+    let work = BooleanWork::with_budget(limits, cancel, budget);
     work.check()?;
     #[cfg(feature = "marching-ssi")]
     {
-        let other_meshes = super::prepared::query_meshes(prepared, other, &work, cancel)?;
+        let (other_meshes, other_bytes) =
+            super::prepared::query_meshes(prepared, other, &work, cancel)?;
+        let mut limits = work.limits;
+        if let Some(max_query_bytes) = max_query_bytes {
+            limits.max_intermediate_prepared_bytes = limits
+                .max_intermediate_prepared_bytes
+                .min(max_query_bytes.saturating_sub(other_bytes));
+        }
+        let work = BooleanWork::with_budget(limits, cancel, budget);
         super::classic::and_prepared_with_provenance(prepared, other, &other_meshes, &work)
     }
     #[cfg(not(feature = "marching-ssi"))]
@@ -341,5 +380,74 @@ mod native_lineage_regressions {
                     .any(|original| original.id() == face.source.face_id)
             );
         }
+    }
+
+    #[cfg(feature = "marching-ssi")]
+    #[test]
+    fn prepared_query_bytes_bound_derived_seeds_and_remaining_scratch() {
+        let source = cube(Point3::origin(), Point3::new(2.0, 2.0, 2.0));
+        let other = cube(Point3::new(-1.0, -1.0, -1.0), Point3::new(3.0, 3.0, 1.0));
+        let cancel = AtomicBool::new(false);
+        let budget = BooleanWorkBudget::new(10_000_000);
+        let prepared =
+            prepare_boolean_source_counted(&source, 1.0e-4, limits(), &cancel, &budget).unwrap();
+        let work = BooleanWork::with_budget(limits(), &cancel, Some(&budget));
+        let (other_meshes, other_bytes) =
+            super::super::prepared::query_meshes(&prepared, &other, &work, &cancel).unwrap();
+        drop(other_meshes);
+        assert!(other_bytes > 0);
+        let before_failure = budget.consumed();
+        assert!(matches!(
+            and_prepared_with_provenance_counted_with_query_bytes(
+                &prepared,
+                &other,
+                &cancel,
+                &budget,
+                other_bytes - 1,
+            ),
+            Err(ShapeOpsError::WorkLimitExceeded {
+                resource: "prepared_bytes",
+                ..
+            })
+        ));
+        assert!(budget.consumed() > before_failure);
+        assert!(matches!(
+            and_prepared_with_provenance_counted_with_query_bytes(
+                &prepared, &other, &cancel, &budget, other_bytes,
+            ),
+            Err(ShapeOpsError::WorkLimitExceeded { actual, limit: 0, .. }) if actual > 0
+        ));
+        let result = and_prepared_with_provenance_counted_with_query_bytes(
+            &prepared,
+            &other,
+            &cancel,
+            &budget,
+            limits().max_prepared_bytes,
+        )
+        .unwrap();
+        assert_eq!(result.solid.boundaries().len(), 1);
+        result.solid.boundaries()[0].check_solid_boundary().unwrap();
+        assert!(result.solid.is_geometric_consistent());
+        assert!(result.solid.vertex_iter().all(|vertex| {
+            let point = vertex.point();
+            point.x >= -1.0e-6
+                && point.x <= 2.0 + 1.0e-6
+                && point.y >= -1.0e-6
+                && point.y <= 2.0 + 1.0e-6
+                && point.z >= -1.0e-6
+                && point.z <= 1.0 + 1.0e-6
+        }));
+        assert!(
+            result
+                .solid
+                .vertex_iter()
+                .any(|vertex| { (vertex.point().z - 1.0).abs() <= 1.0e-6 })
+        );
+        assert!(
+            result
+                .face_origins
+                .iter()
+                .any(|face| { face.source.operand == BooleanOperand::Other })
+        );
     }
 }

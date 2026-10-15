@@ -96,7 +96,20 @@ pub struct BooleanWorkLimits {
     pub max_intermediate_prepared_bytes: usize,
 }
 
-/// Opaque borrowed source and its reusable marching seeds at one fixed tolerance.
+/// Explicit native geometric accuracy and candidate-seed triangulation policy.
+///
+/// Coarser seeds only propose intersections; they do not certify all components.
+/// A caller choosing coarser seeds must independently certify whole native
+/// intersection coverage before accepting a result, including absent components.
+#[derive(Clone, Copy, Debug)]
+pub struct BooleanPreparationOptions {
+    /// Accuracy used by native intersection reconstruction and geometric checks.
+    pub geometric_tolerance: f64,
+    /// Resolution used only to triangulate source, derived and intermediate seeds.
+    pub seed_tolerance: f64,
+}
+
+/// Opaque borrowed source with fixed geometric accuracy and candidate-seed policy.
 ///
 /// No outside meshes are admitted. The source must remain immutable for the
 /// entire borrow, including mutations through shared vertices, edges and faces.
@@ -106,7 +119,7 @@ pub struct BooleanWorkLimits {
 pub struct PreparedBooleanSource<'a, C, S> {
     pub(crate) source: &'a Solid<Point3, C, S>,
     pub(crate) meshes: Vec<MeshShell>,
-    pub(crate) tolerance: f64,
+    pub(crate) options: BooleanPreparationOptions,
     pub(crate) limits: BooleanWorkLimits,
     stats: SeedStats,
 }
@@ -128,8 +141,10 @@ impl<C, S> PreparedBooleanSource<'_, C, S> {
     /// Excludes the borrowed BREP and allocator/Arc bookkeeping. Native object
     /// counts bound the remaining fixed-size seed topology payload.
     pub fn retained_bytes(&self) -> usize { self.stats.bytes }
-    /// Returns the fixed source triangulation and Boolean tolerance.
-    pub fn tolerance(&self) -> f64 { self.tolerance }
+    /// Returns the fixed native geometric Boolean tolerance.
+    pub fn tolerance(&self) -> f64 { self.options.geometric_tolerance }
+    /// Returns the fixed candidate-seed triangulation tolerance.
+    pub fn seed_tolerance(&self) -> f64 { self.options.seed_tolerance }
 }
 
 pub(crate) struct BooleanWork<'a> {
@@ -464,7 +479,11 @@ pub fn prepare_boolean_source<'a, C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     limits: BooleanWorkLimits,
     cancel: &AtomicBool,
 ) -> BooleanResult<PreparedBooleanSource<'a, C, S>> {
-    prepare_boolean_source_impl(source, tolerance, limits, cancel, None)
+    let options = BooleanPreparationOptions {
+        geometric_tolerance: tolerance,
+        seed_tolerance: tolerance,
+    };
+    prepare_boolean_source_impl(source, options, limits, cancel, None)
 }
 
 /// Prepares source seeds while charging a cumulative caller-owned native allowance.
@@ -479,12 +498,33 @@ pub fn prepare_boolean_source_counted<'a, C: ShapeOpsCurve<S>, S: ShapeOpsSurfac
     cancel: &AtomicBool,
     budget: &BooleanWorkBudget,
 ) -> BooleanResult<PreparedBooleanSource<'a, C, S>> {
-    prepare_boolean_source_impl(source, tolerance, limits, cancel, Some(budget))
+    let options = BooleanPreparationOptions {
+        geometric_tolerance: tolerance,
+        seed_tolerance: tolerance,
+    };
+    prepare_boolean_source_impl(source, options, limits, cancel, Some(budget))
+}
+
+/// Prepares counted native seeds with an explicit, independent seed resolution.
+///
+/// Native intersection reconstruction retains `options.geometric_tolerance`.
+/// Coarser `options.seed_tolerance` is candidate discovery only, not permission
+/// to omit small holes or disconnected components. The caller must certify
+/// complete native intersection coverage before accepting such query results.
+/// No source mesh, replacement carrier or fallback geometry is admitted.
+pub fn prepare_boolean_source_counted_with_options<'a, C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
+    source: &'a Solid<Point3, C, S>,
+    options: BooleanPreparationOptions,
+    limits: BooleanWorkLimits,
+    cancel: &AtomicBool,
+    budget: &BooleanWorkBudget,
+) -> BooleanResult<PreparedBooleanSource<'a, C, S>> {
+    prepare_boolean_source_impl(source, options, limits, cancel, Some(budget))
 }
 
 fn prepare_boolean_source_impl<'a, C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     source: &'a Solid<Point3, C, S>,
-    tolerance: f64,
+    options: BooleanPreparationOptions,
     limits: BooleanWorkLimits,
     cancel: &AtomicBool,
     budget: Option<&BooleanWorkBudget>,
@@ -495,16 +535,19 @@ fn prepare_boolean_source_impl<'a, C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
         .min(limits.max_prepared_bytes);
     let work = BooleanWork::with_budget(preparation_limits, cancel, budget);
     work.check()?;
-    if !tolerance.is_finite() || tolerance < TOLERANCE {
+    if [options.geometric_tolerance, options.seed_tolerance]
+        .into_iter()
+        .any(|tolerance| !tolerance.is_finite() || tolerance < TOLERANCE)
+    {
         return Err(ShapeOpsError::InvalidTolerance);
     }
     #[cfg(feature = "marching-ssi")]
     {
-        let (meshes, stats) = meshes(source, tolerance, &work)?;
+        let (meshes, stats) = meshes(source, options.seed_tolerance, &work)?;
         Ok(PreparedBooleanSource {
             source,
             meshes,
-            tolerance,
+            options,
             limits,
             stats,
         })
@@ -552,7 +595,7 @@ fn and_prepared_impl<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     work.check()?;
     #[cfg(feature = "marching-ssi")]
     {
-        let other_meshes = query_meshes(prepared, other, &work, cancel)?;
+        let (other_meshes, _) = query_meshes(prepared, other, &work, cancel)?;
         super::classic::and_prepared(prepared, other, &other_meshes, &work)
     }
     #[cfg(not(feature = "marching-ssi"))]
@@ -568,43 +611,44 @@ pub(crate) fn query_meshes<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     other: &Solid<Point3, C, S>,
     work: &BooleanWork<'_>,
     cancel: &AtomicBool,
-) -> BooleanResult<Vec<MeshShell>> {
+) -> BooleanResult<(Vec<MeshShell>, usize)> {
     let source_counts = work.native(prepared.source)?;
     let other_counts = work.native(other)?;
     work.limit(
         "input_faces",
         source_counts.0.saturating_add(other_counts.0),
-        prepared.limits.max_faces,
+        work.limits.max_faces,
     )?;
     work.limit(
         "input_edges",
         source_counts.1.saturating_add(other_counts.1),
-        prepared.limits.max_edges,
+        work.limits.max_edges,
     )?;
     work.limit(
         "mesh_vertices",
         prepared.stats.vertices,
-        prepared.limits.max_mesh_vertices,
+        work.limits.max_mesh_vertices,
     )?;
     work.limit(
         "mesh_triangles",
         prepared.stats.triangles,
-        prepared.limits.max_mesh_triangles,
+        work.limits.max_mesh_triangles,
     )?;
     work.limit(
         "prepared_bytes",
         prepared.stats.bytes,
-        prepared.limits.max_prepared_bytes,
+        work.limits.max_prepared_bytes,
     )?;
-    let mut other_limits = prepared.limits;
+    let mut other_limits = work.limits;
     other_limits.max_faces -= source_counts.0;
     other_limits.max_edges -= source_counts.1;
     other_limits.max_mesh_vertices -= prepared.stats.vertices;
     other_limits.max_mesh_triangles -= prepared.stats.triangles;
-    other_limits.max_prepared_bytes = prepared
+    other_limits.max_prepared_bytes = work
         .limits
         .max_other_prepared_bytes
-        .min(prepared.limits.max_prepared_bytes - prepared.stats.bytes);
+        .min(work.limits.max_prepared_bytes - prepared.stats.bytes);
     let other_work = BooleanWork::with_budget(other_limits, cancel, work.budget);
-    meshes(other, prepared.tolerance, &other_work).map(|(meshes, _)| meshes)
+    meshes(other, prepared.seed_tolerance(), &other_work)
+        .map(|(meshes, stats)| (meshes, stats.bytes))
 }

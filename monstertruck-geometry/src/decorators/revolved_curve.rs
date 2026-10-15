@@ -581,14 +581,10 @@ where C: ParametricCurve3D + ParameterDivision1D<Point = Point3>
         tol: f64,
     ) -> (Vec<f64>, Vec<f64>) {
         let curve_division = self.curve.parameter_division(urange, tol);
-        let max = curve_division
-            .1
-            .into_iter()
-            .fold(0.0, |max2, pt| {
-                let h = self.revolution.proj_point(pt).y;
-                f64::max(max2, h)
-            })
-            .sqrt();
+        // `proj_point` already returns radial distance, not its square.
+        let max = curve_division.1.into_iter().fold(0.0, |radius, point| {
+            f64::max(radius, self.revolution.proj_point(point).y)
+        });
         let acos = f64::acos(1.0 - tol / max);
         let div: usize = 1 + ((vrange.1 - vrange.0) / acos).floor() as usize;
         let circle_division = (0..=div)
@@ -626,4 +622,42 @@ fn from_axis_angle_derivation(n: usize, axis: Vector3, angle: Rad<f64>) -> Matri
         _1subc * axis.y * axis.z - s * axis.x,
         _1subc * axis.z * axis.z + c,
     )
+}
+
+#[cfg(test)]
+mod parameter_division_regressions {
+    use super::*;
+
+    #[test]
+    fn revolution_angular_division_bounds_physical_chord_sag() {
+        let origin = Point3::new(3.0, -4.0, 5.0);
+        for (r0, r1) in [(64.0, 128.0), (128.0, 128.0), (0.04, 0.08)] {
+            let profile = Line(
+                origin + Vector3::new(r0, 0.0, 0.0),
+                origin + Vector3::new(r1, 2.0, 0.0),
+            );
+            let surface = RevolutionSurface::by_revolution(profile, origin, Vector3::unit_y());
+            let range = ((-0.5, 1.5), (0.17, 2.0 * PI + 0.17));
+            for tolerance in [1.0e-5, 0.001] {
+                let (udiv, vdiv) = surface.parameter_division(range, tolerance);
+                assert_eq!(udiv.first(), Some(&range.0.0));
+                assert_eq!(udiv.last(), Some(&range.0.1));
+                assert_eq!(vdiv.first(), Some(&range.1.0));
+                assert_eq!(vdiv.last(), Some(&range.1.1));
+                for u in [range.0.0, 0.5, range.0.1] {
+                    let radius = r0 + (r1 - r0) * u;
+                    for pair in vdiv.windows(2) {
+                        let angle = pair[1] - pair[0];
+                        assert!(angle > 0.0);
+                        let sag = radius * (1.0 - (angle * 0.5).cos());
+                        assert!(sag <= tolerance, "radius={radius}, sag={sag}");
+                        let front = surface.evaluate(u, pair[0]);
+                        let back = surface.evaluate(u, pair[1]);
+                        let midpoint = surface.evaluate(u, (pair[0] + pair[1]) * 0.5);
+                        assert!(midpoint.distance(front.midpoint(back)) <= tolerance);
+                    }
+                }
+            }
+        }
+    }
 }

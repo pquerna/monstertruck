@@ -110,8 +110,29 @@ monstertruck 0.4.0.
   world-distance endpoint identity rather than unscaled parameter nearness,
   preserving genuinely interior high-speed curve contacts.
 - Propagated native face-topology errors retain bounded invalid-wire evidence.
+- Prepared Boolean genealogy queries can accept a caller's remaining byte
+  allowance without rebuilding the source. Derived seed capacities narrow the
+  combined/other seed caps and are deducted before each intermediate-object
+  admission. Existing tolerance, carrier, topology and provenance behavior is
+  unchanged; independently capped scratch objects are not an aggregate RSS bound.
+- Revolution angular subdivision uses the physical radius returned by the
+  axis projection, not its square root, preserving the requested chord error
+  on large-radius carriers without oversampling small-radius ones.
+- Native face consistency evaluates original parameter curves on another
+  physical carrier instead of requiring identical carrier representations.
+  Analytic circles retained in affine plane charts can therefore remain
+  consistent with cylinder walls and differently framed caps. Existing actual
+  curve evaluation, finite ranges and world-space residual checks remain
+  unchanged; this heuristic is not a whole-domain coverage certificate.
 
 ### Added
+
+- Native Boolean preparation accepts explicit geometric and seed tolerances.
+  Source, derived and intermediate meshes use only the declared seed policy;
+  native reconstruction and carrier checks keep the geometric tolerance.
+  Coarser candidates require independent whole-native-intersection coverage,
+  not mesh completeness or successful reconstruction alone. Legacy constructors
+  retain their single-tolerance behavior.
 
 - STEP curve and surface conversion methods return explicit source/native
   parameter maps with bounded intervals, orientation parity and unavailable

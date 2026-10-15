@@ -174,8 +174,9 @@ impl Transformed<Matrix4> for Surface {
 impl IncludeCurve<Curve> for Surface {
     #[inline(always)]
     fn include(&self, curve: &Curve) -> bool {
-        if let Curve::ParameterCurve(curve) = curve {
-            same_surface(curve.surface().as_ref(), self)
+        if let Curve::ParameterCurve(parameter) = curve {
+            same_surface(parameter.surface().as_ref(), self)
+                || sampled_surface_includes_curve(self, curve)
         } else if matches!(curve, Curve::IntersectionCurve(_) | Curve::TrimmedCurve(_)) {
             sampled_surface_includes_curve(self, curve)
         } else {
@@ -677,5 +678,69 @@ mod native_extrusion_tests {
             conversion.surface.evaluate(-3.0, 7.0).to_point(),
             surface.evaluate(-3.0, 7.0)
         );
+    }
+}
+
+#[cfg(test)]
+mod parameter_curve_containment_regressions {
+    use super::*;
+    use std::f64::consts::TAU;
+
+    fn cylinder(radius: f64) -> Surface {
+        Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+            Curve::Line(Line(
+                Point3::new(radius, 0.0, 0.0),
+                Point3::new(radius, 0.0, 1.0),
+            )),
+            Point3::origin(),
+            Vector3::unit_z(),
+        )))
+    }
+
+    #[test]
+    fn original_parameter_circle_is_included_on_other_actual_carriers() {
+        let radius = 5.0;
+        let height = 3.0;
+        let circle = Curve::ParameterCurve(ParameterCurve::new(
+            Curve2D::Conic(Conic2D::Ellipse(Processor::new(TrimmedCurve::new(
+                UnitCircle::<Point2>::new(),
+                (0.0, TAU),
+            )))),
+            Box::new(Surface::Plane(Plane::new(
+                Point3::new(0.0, 0.0, height),
+                Point3::new(radius, 0.0, height),
+                Point3::new(0.0, radius, height),
+            ))),
+        ));
+        let cap = Surface::Plane(Plane::new(
+            Point3::new(-7.0, 4.0, height),
+            Point3::new(-5.0, 4.0, height),
+            Point3::new(-7.0, 7.0, height),
+        ));
+        let unrelated_cap =
+            cap.transformed(Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.01)));
+        let pose = Matrix4::from_translation(Vector3::new(11.0, -4.0, 7.0))
+            * Matrix4::from_angle_x(Rad(0.37));
+        let mut bounded = Curve::TrimmedCurve(Processor::new(TrimmedCurve::new(
+            Box::new(circle.clone()),
+            (0.3, 1.7),
+        )));
+        bounded.invert();
+        for curve in [circle, bounded] {
+            let actual = curve.transformed(pose);
+            for mut carrier in [cylinder(radius), cap.clone()] {
+                carrier.transform_by(pose);
+                carrier.invert();
+                assert!(carrier.include(&actual));
+                for parameter in [actual.range_tuple().0, actual.range_tuple().1] {
+                    let point = actual.evaluate(parameter);
+                    let local = pose.invert().unwrap().transform_point(point);
+                    assert!((local.x.hypot(local.y) - radius).abs() < 1.0e-10);
+                    assert!((local.z - height).abs() < 1.0e-10);
+                }
+            }
+            assert!(!cylinder(radius + 0.01).transformed(pose).include(&actual));
+            assert!(!unrelated_cap.transformed(pose).include(&actual));
+        }
     }
 }

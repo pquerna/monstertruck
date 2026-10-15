@@ -12,12 +12,14 @@ pub use edge_lineage::{
 };
 mod provenance;
 pub use prepared::{
-    BooleanWorkBudget, BooleanWorkLimits, PreparedBooleanSource, and_prepared,
-    and_prepared_counted, prepare_boolean_source, prepare_boolean_source_counted,
+    BooleanPreparationOptions, BooleanWorkBudget, BooleanWorkLimits, PreparedBooleanSource,
+    and_prepared, and_prepared_counted, prepare_boolean_source, prepare_boolean_source_counted,
+    prepare_boolean_source_counted_with_options,
 };
 pub use provenance::{
     BooleanFaceOrigin, BooleanFaceProvenance, BooleanOperand, BooleanWithProvenance,
     and_prepared_with_provenance, and_prepared_with_provenance_counted,
+    and_prepared_with_provenance_counted_with_query_bytes,
 };
 // Marching-SSI polyline chaining support consumed by the classic backend.
 #[cfg(feature = "marching-ssi")]

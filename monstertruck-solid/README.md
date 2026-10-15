@@ -41,6 +41,26 @@ mutations through aliased topology handles, until the prepared value is dropped.
 classification, carrier reconstruction and release-active manifold checks as
 `and`; it does not accept outside meshes or replace a failed branch.
 
+`prepare_boolean_source_counted_with_options(&source,
+BooleanPreparationOptions { geometric_tolerance, seed_tolerance }, limits,
+&cancel, &budget)` explicitly separates candidate discovery from native accuracy.
+Source, derived-input and intermediate seed triangulation use `seed_tolerance`;
+intersection reconstruction, original-carrier checks and native curve subdivision
+retain `geometric_tolerance`. Both must be finite and at least the kernel minimum.
+The legacy constructors preserve their single tolerance for both purposes.
+`tolerance()` reports geometric accuracy; `seed_tolerance()` reports candidate
+triangulation resolution.
+
+Coarser seed resolution is not a completeness certificate: a seed mesh can miss
+a small hole or a disconnected native intersection. A consumer selecting it must
+independently certify coverage of the whole native intersection, including
+absent components, before accepting any result. Spiling's explicit producer
+policy uses 0.005 mm candidate seeds and unchanged 0.00001 mm native geometry;
+both direct and cached section paths require whole source-face/plane coverage
+against the actual retained native intersection curves and their enclosures.
+Neither candidate absence nor a mesh contour authorizes a section, and no failed
+branch is replaced with a mesh or alternate source representation.
+
 `BooleanWorkLimits` requires explicit `usize` limits for input faces and oriented
 edge occurrences, seed points and triangles, conservative triangle-pair work,
 interference segments, output faces and edge occurrences, and
@@ -59,6 +79,23 @@ borrowed BREP, allocator/Arc bookkeeping or process RSS. Deduct those bytes from
 the caller's aggregate cache budget; both inputs' seed admissions apply together
 to each query. `retained_mesh_vertices()`, `retained_mesh_triangles()` and
 `tolerance()` expose the remaining seed accounting.
+
+`and_prepared_with_provenance_counted_with_query_bytes(&prepared, &clip, &cancel,
+&budget, remaining_query_bytes)` additionally narrows a counted genealogy query
+without rebuilding or mutating the source cache. The byte allowance excludes the
+already retained source: derived seeds obey both the remaining allowance and the
+original combined/other seed limits. Their actual retained capacity is then
+deducted before admitting each reconstruction scratch object. Original limits
+are never enlarged. Scratch objects are admitted separately, not by an aggregate
+allocator ledger; this API does not bound the sum of all live scratch, mesher
+temporaries or process RSS. Callers must deduct their other retained data from
+the supplied allowance and maintain the external host memory cap.
+
+Preparation never infers a looser tolerance from source size or a display mesh.
+An independent seed resolution must be explicitly requested through the options
+constructor. A retained-byte refusal can report a prefix of the completed shell's
+face buffers, because admission visits faces in order after the indivisible shell
+tessellation; its `actual` value is not a total-source or peak-memory measurement.
 
 Cancellation returns `ShapeOpsError::Cancelled`; explicit admission excess
 returns `ShapeOpsError::WorkLimitExceeded { resource, actual, limit }`.

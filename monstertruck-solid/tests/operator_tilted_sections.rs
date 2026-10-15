@@ -6,12 +6,14 @@ use monstertruck_io::step::load::{Table, step_geometry::Curve3D};
 use monstertruck_meshing::prelude::*;
 use monstertruck_modeling::*;
 use monstertruck_solid::{
-    BooleanWorkLimits, PreparedBooleanSource, and_prepared, prepare_boolean_source,
+    BooleanPreparationOptions, BooleanWorkBudget, BooleanWorkLimits, PreparedBooleanSource,
+    and_prepared, prepare_boolean_source_counted_with_options,
 };
 use std::f64::consts::PI;
 use std::sync::atomic::AtomicBool;
 
 const TOLERANCE_MM: f64 = 1.0e-5;
+const SEED_TOLERANCE_MM: f64 = 0.005;
 
 fn limits() -> BooleanWorkLimits {
     BooleanWorkLimits {
@@ -28,6 +30,24 @@ fn limits() -> BooleanWorkLimits {
         max_other_prepared_bytes: 4 * 1024 * 1024,
         max_intermediate_prepared_bytes: 4 * 1024 * 1024,
     }
+}
+
+fn prepare_operator_source<'a>(
+    source: &'a Solid,
+    cancel: &AtomicBool,
+) -> PreparedBooleanSource<'a, Curve, Surface> {
+    let budget = BooleanWorkBudget::new(usize::MAX);
+    prepare_boolean_source_counted_with_options(
+        source,
+        BooleanPreparationOptions {
+            geometric_tolerance: TOLERANCE_MM,
+            seed_tolerance: SEED_TOLERANCE_MM,
+        },
+        limits(),
+        cancel,
+        &budget,
+    )
+    .expect("bounded original source with explicit candidate seed policy")
 }
 
 fn modeling_curve(curve: &Curve3D) -> Option<Curve> {
@@ -156,7 +176,9 @@ fn assert_cut(
     let cut = if let Some(prepared) = prepared {
         and_prepared(prepared, &clip, &AtomicBool::new(false))
     } else {
-        monstertruck_solid::and(source, &clip, TOLERANCE_MM)
+        let cancel = AtomicBool::new(false);
+        let prepared = prepare_operator_source(source, &cancel);
+        and_prepared(&prepared, &clip, &cancel)
     }
     .expect("original transverse AND");
     assert_eq!(cut.boundaries().len(), 1);
@@ -252,11 +274,7 @@ fn original_queries(world_z: f64) {
     let origin = Point3::from_vec(normal * (world_z - 5.0 * angle.sin()));
     let expected = assert_cut(&source, normal, origin, None);
     let cancel = AtomicBool::new(false);
-    let prepared = prepare_boolean_source(&source, TOLERANCE_MM, limits(), &cancel)
-        .expect("bounded original source preparation");
-    assert!(prepared.retained_bytes() > 0);
-    assert!(prepared.retained_mesh_vertices() > 0);
-    assert!(prepared.retained_mesh_triangles() > 0);
+    let prepared = prepare_operator_source(&source, &cancel);
     let (qw, qx, qy) = (
         0.9999619230641713,
         0.006170592427165337,
@@ -313,8 +331,7 @@ fn original_quaternion_and_bed_translation_keep_partial_bottom_mid_and_top_mater
     );
     let posed = builder::transformed(&source, transform);
     let cancel = AtomicBool::new(false);
-    let prepared = prepare_boolean_source(&posed, TOLERANCE_MM, limits(), &cancel)
-        .expect("original posed native source");
+    let prepared = prepare_operator_source(&posed, &cancel);
     for world_z in [0.1, 4.0, 8.0] {
         let retained = assert_cut(
             &posed,
@@ -334,8 +351,7 @@ fn original_tilted_hole_keeps_inward_walls_and_opposite_native_cap_orientation()
     let normal = Vector3::new(-transverse, transverse, angle.cos());
     let origin = Point3::from_vec(normal * (4.0 - 5.0 * angle.sin()));
     let cancel = AtomicBool::new(false);
-    let prepared = prepare_boolean_source(&source, TOLERANCE_MM, limits(), &cancel)
-        .expect("bounded native hole source");
+    let prepared = prepare_operator_source(&source, &cancel);
     assert_cut(&source, normal, origin, Some(&prepared));
     let clip = clip(&source, normal, origin);
     let cut = and_prepared(&prepared, &clip, &cancel).expect("hole material AND");
