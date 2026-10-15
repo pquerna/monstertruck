@@ -97,6 +97,11 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   proposal. Retryable failure retains the image-containing contraction without
   refunding work. Arithmetic-width auxiliary coordinates do not force broad
   nonlinear coordinates to stagnate; source support and endpoint limits are unchanged.
+- Whole-span implicit jets can tighten a slow-contracting nonlinear chart
+  coordinate through fresh interval inclusion inside the retained uniqueness
+  tube. Every coordinate proposal is independently certified over the unchanged
+  complete parameter span. Rejected proposals retain the previous enclosure
+  and consume work; neither guides nor sampled endpoints supply authority.
 - A transverse extrusion/plane section with two original endpoint charts can
   prescribe a bounded original profile parameter and solve the remaining linear
   coordinates constructively, including varying profile height and genuine
@@ -108,6 +113,10 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   one-sided derivative ranges, rejecting positional jumps. Hessian/Taylor,
   gradient-Jacobian, regularity and normal claims require their own premises;
   the strict `validated_surface_jet` contract is unchanged.
+- Prepared native trim domains can monotonically narrow their retained-plus-query
+  byte allowance when caller-owned output grows. Winding scratch shares that
+  narrowed limit; a later larger request cannot restore old capacity or alter
+  original trim proofs.
 - Complete plane coverage contracts cells by necessary interval-Newton root
   bounds on the original surface before subdivision. Whole-cell plane exclusion
   or validated candidate tubes can discharge a cell before trim winding.

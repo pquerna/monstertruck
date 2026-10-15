@@ -844,6 +844,26 @@ impl<'a> PreparedFaceParameterDomain<'a> {
         )
     }
 
+    /// Narrows the shared allowance for retained metadata and transient query scratch.
+    ///
+    /// Call this when other live caller-owned storage grows after preparation.
+    /// The allowance never increases, including when a later request is larger.
+    /// A limit below [`Self::retained_bytes`] returns [`TrimDomainError::ResourceLimit`]
+    /// without changing the current allowance. Original geometry and trim proofs
+    /// are unchanged; classification still admits every live scratch allocation.
+    pub fn restrict_retained_byte_limit(
+        &mut self,
+        max_retained_bytes: usize,
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), TrimDomainError> {
+        budget.charge(1, cancel)?;
+        let limit = self.limits.max_retained_bytes.min(max_retained_bytes);
+        admit_bytes(self.retained_bytes(), limit)?;
+        self.limits.max_retained_bytes = limit;
+        Ok(())
+    }
+
     /// Intersects the cover with an independently certified complete source support domain.
     ///
     /// The caller must prove the original material face lies in `bounds`; a
@@ -1194,6 +1214,48 @@ mod native_trim_regressions {
                 .unwrap(),
             ParameterBoxClassification::Outside
         );
+    }
+
+    #[test]
+    fn caller_growth_narrows_winding_scratch_without_widening_or_losing_holes() {
+        let face = square_with_hole();
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(1_000_000);
+        let mut domain =
+            prepare_face_parameter_domain(&face, limits(), &mut budget, &cancel).unwrap();
+        let material = [[0.25, 0.75], [1.5, 2.5]];
+        let hole = [[1.5, 2.5], [1.5, 2.5]];
+        assert_eq!(
+            domain
+                .classify_parameter_box(hole, &mut budget, &cancel)
+                .unwrap(),
+            ParameterBoxClassification::Outside,
+        );
+        let retained = domain.retained_bytes();
+        assert!(matches!(
+            domain.restrict_retained_byte_limit(retained - 1, &mut budget, &cancel),
+            Err(TrimDomainError::ResourceLimit),
+        ));
+        assert_eq!(
+            domain
+                .classify_parameter_box(material, &mut budget, &cancel)
+                .unwrap(),
+            ParameterBoxClassification::Inside,
+        );
+        domain
+            .restrict_retained_byte_limit(retained, &mut budget, &cancel)
+            .unwrap();
+        assert!(matches!(
+            domain.classify_parameter_box(material, &mut budget, &cancel),
+            Err(TrimDomainError::ResourceLimit),
+        ));
+        domain
+            .restrict_retained_byte_limit(usize::MAX, &mut budget, &cancel)
+            .unwrap();
+        assert!(matches!(
+            domain.classify_parameter_box(hole, &mut budget, &cancel),
+            Err(TrimDomainError::ResourceLimit),
+        ));
     }
 
     #[test]

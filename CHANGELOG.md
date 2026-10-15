@@ -16,6 +16,15 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Whole-span implicit jets independently recertify centered coordinate-domain
+  proposals when image-containing contraction stagnates. Nonlinear coordinates
+  can tighten while other coordinates vary over the full parameter span;
+  accepted jets retain the original branch, and rejected proposals preserve
+  the previous valid bounds without relaxing limits or refunding work.
+- Prepared native trim domains support monotone narrowing of their shared
+  retained-metadata and classification-scratch allowance. Growing caller-owned
+  output need not leave winding allocations admitted against stale capacity;
+  limits below retained metadata fail without changing the existing allowance.
 - Revolution `ToSameGeometry` conversion no longer reverses non-axis-parallel
   source profiles. Original active parameters, evaluations, derivatives and
   oriented normals survive the generic STEP surface construction and roundtrip.

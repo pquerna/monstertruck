@@ -2000,6 +2000,22 @@ fn root_image_domain(tube: &Tube) -> Result<[ValidatedInterval; 4], ValidatedGeo
     Ok(next)
 }
 
+// A centered domain is only a proposal. Fresh inclusion inside the previous
+// uniqueness domain must prove the identical whole-parameter root inventory.
+fn centered_root_domain(tube: &Tube) -> [ValidatedInterval; 4] {
+    std::array::from_fn(|i| {
+        let image = tube.rooted_domain[i];
+        let radius = (tube.domain[i].width() * 0.25)
+            .min(image.width() * 0.51)
+            .max(root_image_padding(image));
+        let centered = inflated(image.midpoint(), radius);
+        ValidatedInterval {
+            lower: centered.lower.max(tube.domain[i].lower),
+            upper: centered.upper.min(tube.domain[i].upper),
+        }
+    })
+}
+
 fn refine_implicit_jet(
     source: Certification<'_, '_>,
     projection: Projection,
@@ -2011,25 +2027,56 @@ fn refine_implicit_jet(
 ) -> Result<ValidatedCurveJet, ValidatedGeometryError> {
     let mut tube = source.certify(projection, parameter, domain, budget, cancel)?;
     let mut jet = implicit_jet(&tube)?;
+    // Constructive charts already evaluate their prescribed source range;
+    // there is no implicit uniqueness domain to contract.
+    if matches!(tube.authority, TubeAuthority::Constructive(_)) {
+        return Ok(jet);
+    }
     for _ in 1..options.max_iterations {
         budget.charge(1, cancel)?;
         let next = root_image_domain(&tube)?;
-        // Use the existing root-image arithmetic margin, not a new geometric
-        // tolerance. Below that floor further contraction only chases padding.
-        if !(0..4).any(|i| {
-            let padding = root_image_padding(tube.rooted_domain[i]);
-            next[i].lower - tube.domain[i].lower > padding
-                || tube.domain[i].upper - next[i].upper > padding
-        }) {
-            break;
+        let proposed = centered_root_domain(&tube);
+        let mut refined = None;
+        // Near-unit contraction can leave one nonlinear chart coordinate broad
+        // even when the requested parameter span is tiny. Tighten coordinates
+        // separately: another coordinate may genuinely vary over the full span.
+        // No centered proposal, guide, endpoint or midpoint supplies authority.
+        for axis in 0..4 {
+            let padding = root_image_padding(tube.rooted_domain[axis]);
+            if proposed[axis].lower - next[axis].lower <= padding
+                && next[axis].upper - proposed[axis].upper <= padding
+            {
+                continue;
+            }
+            let mut candidate = next;
+            candidate[axis] = proposed[axis];
+            match source.certify(projection, parameter, candidate, budget, cancel) {
+                Ok(tube) => {
+                    refined = Some(tube);
+                    break;
+                }
+                Err(error) if retryable(error) => {}
+                Err(error) => return Err(error),
+            }
         }
-        // The image contains the SAME selected roots for every real parameter
-        // in this whole span. The new domain remains inside the old uniqueness
-        // tube, and independent inclusion must succeed before its jet is used.
-        let refined = match source.certify(projection, parameter, next, budget, cancel) {
-            Ok(tube) => tube,
-            Err(error) if retryable(error) => break,
-            Err(error) => return Err(error),
+        let refined = match refined {
+            Some(tube) => tube,
+            None => {
+                // An unsuccessful proposal cannot discard the old valid jet.
+                // Retain the image-containing contraction when it progresses.
+                if !(0..4).any(|i| {
+                    let padding = root_image_padding(tube.rooted_domain[i]);
+                    next[i].lower - tube.domain[i].lower > padding
+                        || tube.domain[i].upper - next[i].upper > padding
+                }) {
+                    break;
+                }
+                match source.certify(projection, parameter, next, budget, cancel) {
+                    Ok(tube) => tube,
+                    Err(error) if retryable(error) => break,
+                    Err(error) => return Err(error),
+                }
+            }
         };
         let refined_jet = match implicit_jet(&refined) {
             Ok(jet) => jet,
@@ -2085,17 +2132,7 @@ fn refine_endpoint(
         // smaller centered box instead of assuming the old image must fit it.
         // Fresh inclusion for the identical parameter interval proves roots
         // inside the old uniqueness tube, hence the SAME selected branch.
-        let proposed = std::array::from_fn(|i| {
-            let image = tube.rooted_domain[i];
-            let radius = (tube.domain[i].width() * 0.25)
-                .min(image.width() * 0.51)
-                .max(root_image_padding(image));
-            let centered = inflated(image.midpoint(), radius);
-            ValidatedInterval {
-                lower: centered.lower.max(tube.domain[i].lower),
-                upper: centered.upper.min(tube.domain[i].upper),
-            }
-        });
+        let proposed = centered_root_domain(&tube);
         tube = match source.certify(projection, parameter, proposed, budget, cancel) {
             Ok(next) => next,
             // The proposal carries no authority. Its refusal retains the
@@ -4230,6 +4267,79 @@ mod continuation_regressions {
                 }
             }
         }
+    }
+
+    #[test]
+    fn generated_axial_root_jet_contracts_nonlinear_chart_over_whole_spans() {
+        let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+            Curve::Line(Line(
+                Point3::new(24.0, 0.0, 2.0),
+                Point3::new(24.0, 1.0, 2.0),
+            )),
+            Point3::new(22.0, 0.0, 2.0),
+            crate::Vector3::unit_y(),
+        )))
+        .inverse();
+        let angle: f64 = 1.253236011880648;
+        let height = 0.0999999285714281;
+        let x = 22.0 + 2.0 * angle.cos();
+        let plane = Plane::new(
+            Point3::new(-1.0000000000000009, 19.000000000000004, height),
+            Point3::new(-0.0000000000000009, 19.000000000000004, height),
+            Point3::new(-1.0000000000000009, 20.000000000000004, height),
+        );
+        let guide = Curve::BsplineCurve(crate::BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 1.0, 1.0]),
+            vec![Point3::new(x, 16.0, height), Point3::new(x, 2.0, height)],
+        ));
+        let cancel = AtomicBool::new(false);
+        let mut work = ValidatedGeometryBudget::new(2_000_000);
+        let prepared = prepared_face_plane_curve(
+            &guide,
+            ValidatedFacePlaneSource {
+                surface: &surface,
+                anchor: Some(ValidatedFacePlaneSourceAnchor::Both {
+                    front: [angle, 16.0],
+                    back: [angle, 2.0],
+                }),
+                endpoint_coordinate_planes: [None; 2],
+            },
+            &plane,
+            [0.0, 1.0],
+            &ValidatedCurveOptions::default(),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        // Independent carrier coefficients prescribe a constant radial root
+        // and affine axial coordinate, not a guide-based straightness claim.
+        for range in [[0.0, 1.0], [0.0, 0.125], [0.5, 0.75]] {
+            let jet = prepared.jet(range, &mut work, &cancel).unwrap();
+            for (axis, expected) in [x, 16.0 - 14.0 * range[0], height].into_iter().enumerate() {
+                assert!(
+                    jet.position[axis].lower <= expected && expected <= jet.position[axis].upper
+                );
+            }
+            for (axis, expected) in [0.0, -14.0, 0.0].into_iter().enumerate() {
+                assert!(jet.first[axis].lower <= expected && expected <= jet.first[axis].upper);
+                assert!(jet.first[axis].width() < 1.0e-5, "{range:?}: {jet:?}");
+                assert!(jet.second[axis].contains_zero());
+                assert!(jet.second[axis].magnitude() < 1.0e-4, "{range:?}: {jet:?}");
+            }
+            assert!(jet.position[0].width() < 1.0e-8, "{range:?}: {jet:?}");
+        }
+        assert!(matches!(
+            prepared.jet([0.0, 0.125], &mut ValidatedGeometryBudget::new(0), &cancel),
+            Err(ValidatedGeometryError::ResourceLimit)
+        ));
+        assert!(matches!(
+            prepared.jet([0.0, 0.125], &mut work, &AtomicBool::new(true)),
+            Err(ValidatedGeometryError::Cancelled)
+        ));
+        assert!(matches!(
+            prepared.jet([-0.125, 0.125], &mut work, &cancel),
+            Err(ValidatedGeometryError::ParameterOutOfRange)
+        ));
     }
 
     #[test]
