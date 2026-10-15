@@ -61,6 +61,12 @@ pub enum ValidatedGeometryError {
     /// Bounded subdivision did not establish the required inclusion.
     #[error("validated geometry inclusion unresolved")]
     Unresolved,
+    /// Complete original-plane coverage remained unresolved at a named proof operation.
+    #[error("validated plane coverage unresolved during {operation}")]
+    PlaneCoverageUnresolved {
+        /// The bounded proof operation that failed, without changing its classification.
+        operation: &'static str,
+    },
     /// Continuation could not establish a single connected local branch.
     #[error("ambiguous intersection continuation branch")]
     AmbiguousBranch,

@@ -34,7 +34,8 @@ use std::sync::atomic::AtomicBool;
 
 mod coverage;
 pub use coverage::{
-    ValidatedPlaneCoverage, ValidatedPlaneCoverageOptions, validated_face_plane_coverage,
+    ValidatedPlaneCoverage, ValidatedPlaneCoverageOptions, ValidatedPlaneTrimEndpoint,
+    ValidatedPlaneTrimEndpointBinding, validated_face_plane_coverage,
     validated_same_surface_coefficients,
 };
 
@@ -2025,15 +2026,24 @@ fn spatial_point(
     }
 }
 fn retryable(error: ValidatedGeometryError) -> bool {
-    matches!(
-        error,
-        ValidatedGeometryError::Unresolved
-            | ValidatedGeometryError::ConditioningFailure
-            | ValidatedGeometryError::NonTransverse
-            | ValidatedGeometryError::Singular
-            | ValidatedGeometryError::DenominatorContainsZero
-            | ValidatedGeometryError::ParameterOutOfRange
-    )
+    use ValidatedGeometryError as E;
+    match error {
+        E::Unresolved
+        | E::ConditioningFailure
+        | E::NonTransverse
+        | E::Singular
+        | E::DenominatorContainsZero
+        | E::ParameterOutOfRange => true,
+        // A completed coverage operation already exhausted its bounded proof;
+        // starting a new local branch search cannot repair that certificate.
+        E::PlaneCoverageUnresolved { .. }
+        | E::Cancelled
+        | E::ResourceLimit
+        | E::AmbiguousBranch
+        | E::InvalidInput
+        | E::Unsupported
+        | E::NonSmooth => false,
+    }
 }
 fn inflated(center: f64, radius: f64) -> ValidatedInterval {
     ValidatedInterval {

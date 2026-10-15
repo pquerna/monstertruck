@@ -63,6 +63,15 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
 - Surface `parameter_division` recursion guard + decorrelated jitter (partial port of upstream [`7b1f4171`](https://github.com/ricosjp/truck/commit/7b1f4171)).
 - `UnitCircle::search_{nearest_}parameter` honors `hint` across the period (upstream [`f563ae53`](https://github.com/ricosjp/truck/commit/f563ae53) + [`86e4ed75`](https://github.com/ricosjp/truck/commit/86e4ed75)).
 - STEP `Axis2Placement3d` guards parallel `axis`/`ref_direction`; revolved-line-to-cylinder conversion drops the spurious inversion (upstream [`524f5f53`](https://github.com/ricosjp/truck/commit/524f5f53)); rational trim boundaries preserved through the load path; inverted-processor sample alignment.
+- Certified native face/plane coverage closes finite section endpoints only through
+  identified original, material-oriented trim coedges and their retained prepared
+  boundary branches. Endpoint bindings are genealogy, not geometric proof: the
+  complete trim-root census, transverse crossing and unique common continuation
+  must still certify. Nonzero chart correspondence error is retained explicitly.
+  Optional closure is disabled by default; enabled closure returns sealed physical
+  extension, arc-length, position and plane-error bounds for independent chord and
+  signed-area accounting, under the same work, storage and cancellation limits.
+  Missing branches, unrelated endpoints and omitted hole roots refuse coverage.
 
 **Meshing**
 - Triangulation/tessellation pipeline rewritten; CDT trim-constraint handling rebuilt across [`b60b1604`](https://github.com/virtualritz/monstertruck/commit/b60b1604)/[`46b21f9f`](https://github.com/virtualritz/monstertruck/commit/46b21f9f)/[`f35d3b6d`](https://github.com/virtualritz/monstertruck/commit/f35d3b6d)/[`7c5ce2d2`](https://github.com/virtualritz/monstertruck/commit/7c5ce2d2) (skip conflicting, avoid invalid, preserve split, split through vertices).

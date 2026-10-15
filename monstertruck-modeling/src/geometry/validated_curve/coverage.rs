@@ -8,18 +8,34 @@ use crate::{
 };
 use std::sync::atomic::AtomicBool;
 
+mod endpoints;
+mod source_identity;
+pub use endpoints::{ValidatedPlaneTrimEndpoint, ValidatedPlaneTrimEndpointBinding};
+
+const COVERAGE_STACK_BYTES: usize = 16 * 1024;
+
 /// Bounded full-face plane-zero subdivision policy.
 #[derive(Clone, Copy, Debug)]
 pub struct ValidatedPlaneCoverageOptions {
     /// Maximum binary UV subdivision depth, at most 48.
     pub max_depth: usize,
+    /// Maximum additional physical endpoint error, zero to disable collars.
+    pub maximum_endpoint_extension_mm: f64,
+    /// Combined owned matches, original root proofs and endpoint receipts.
+    pub max_retained_bytes: usize,
 }
 impl Default for ValidatedPlaneCoverageOptions {
-    fn default() -> Self { Self { max_depth: 48 } }
+    fn default() -> Self {
+        Self {
+            max_depth: 48,
+            maximum_endpoint_extension_mm: 0.0,
+            max_retained_bytes: 32 * 1024 * 1024,
+        }
+    }
 }
 
 /// A completed full-chart zero-candidate census, not a sampled absence test.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ValidatedPlaneCoverage {
     /// Number of closed UV cells examined, including unsuccessful parents.
     pub visited_cells: usize,
@@ -27,6 +43,8 @@ pub struct ValidatedPlaneCoverage {
     pub excluded_cells: usize,
     /// Number whose every plane zero is represented by a prepared branch.
     pub covered_cells: usize,
+    /// Sealed endpoint-root error receipts, paired with the original candidates.
+    pub endpoint_strata: Vec<ValidatedPlaneTrimEndpoint>,
 }
 
 /// Proves that all plane zeros of an authoritative trimmed face are represented.
@@ -46,18 +64,32 @@ pub struct ValidatedPlaneCoverage {
 /// Candidates must directly retain these exact source carriers, as produced by
 /// [`super::prepared_face_plane_curve`]. A spatially mapped standalone binding
 /// is not evidence of association with an unrelated world-space face.
+///
+/// Every original trim-plane crossing must retain an original cut binding.
+/// Endpoint closure additionally proves its oriented transverse trim incidence
+/// and unique continuation from the actual retained candidate end. The caller
+/// must consume every returned endpoint metric in sampling and area bounds.
 pub fn validated_face_plane_coverage(
     domain: &PreparedFaceParameterDomain<'_>,
     plane: &Plane,
     candidates: &[&PreparedValidatedCurve<'_>],
+    endpoint_bindings: &[ValidatedPlaneTrimEndpointBinding<'_>],
     options: &ValidatedPlaneCoverageOptions,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<ValidatedPlaneCoverage, ValidatedGeometryError> {
     budget.charge(1, cancel)?;
-    if options.max_depth > 48 {
+    if options.max_depth > 48
+        || !options.maximum_endpoint_extension_mm.is_finite()
+        || options.maximum_endpoint_extension_mm < 0.0
+    {
         return Err(ValidatedGeometryError::InvalidInput);
     }
+    let storage_limit = options
+        .max_retained_bytes
+        .min(32 * 1024 * 1024)
+        .checked_sub(COVERAGE_STACK_BYTES)
+        .ok_or(ValidatedGeometryError::ResourceLimit)?;
     let bounds = domain.closed_parameter_box();
     let axes = [interval_range(bounds[0])?, interval_range(bounds[1])?];
     if axes.into_iter().any(|axis| axis.lower >= axis.upper) {
@@ -81,8 +113,16 @@ pub fn validated_face_plane_coverage(
     }
     let origin = std::array::from_fn(|i| ValidatedInterval::point(origin[i]));
     domain.face().with_surface(|surface| {
+        let context = endpoints::FacePlaneContext {
+            domain,
+            surface,
+            plane,
+            normal,
+            origin,
+            maximum_extension: options.maximum_endpoint_extension_mm,
+        };
         let mut matches = Vec::new();
-        for candidate in candidates {
+        for (candidate_index, candidate) in candidates.iter().enumerate() {
             budget.charge(1, cancel)?;
             let Ok((s0, s1, _)) = candidate.source.curve().and_then(carriers) else {
                 continue;
@@ -100,9 +140,75 @@ pub fn validated_face_plane_coverage(
             };
             if let Some(index) = index {
                 budget.charge(1, cancel)?;
-                super::reserve_native_vec(&mut matches, 32 * 1024 * 1024, 0, budget, cancel)?;
-                matches.push((*candidate, index));
+                super::reserve_native_vec(&mut matches, storage_limit, 0, budget, cancel)?;
+                matches.push((candidate_index, *candidate, index));
             }
+        }
+        let match_bytes = matches
+            .capacity()
+            .checked_mul(size_of::<(usize, &PreparedValidatedCurve<'_>, usize)>())
+            .ok_or(ValidatedGeometryError::ResourceLimit)?;
+        for binding in endpoint_bindings {
+            if matching_source_index(&matches, binding.candidate_index, budget, cancel)?.is_none() {
+                return Err(ValidatedGeometryError::InvalidInput);
+            }
+        }
+        let receipt_bytes = endpoint_bindings
+            .len()
+            .checked_mul(size_of::<ValidatedPlaneTrimEndpoint>())
+            .ok_or(ValidatedGeometryError::ResourceLimit)?;
+        let endpoint_allowance = storage_limit
+            .checked_sub(match_bytes)
+            .and_then(|x| x.checked_sub(receipt_bytes))
+            .ok_or(ValidatedGeometryError::ResourceLimit)?;
+        let prepared_endpoints = endpoints::prepare_endpoints(
+            &context,
+            candidates,
+            endpoint_bindings,
+            endpoint_allowance,
+            budget,
+            cancel,
+        )
+        .map_err(|error| coverage_context(error, "complete original trim-root census"))?;
+        budget.charge(endpoint_bindings.len(), cancel)?;
+        let mut endpoint_strata = Vec::new();
+        endpoint_strata
+            .try_reserve_exact(endpoint_bindings.len())
+            .map_err(|_| ValidatedGeometryError::ResourceLimit)?;
+        if endpoint_strata
+            .capacity()
+            .checked_mul(size_of::<ValidatedPlaneTrimEndpoint>())
+            .is_none_or(|bytes| bytes > receipt_bytes)
+        {
+            return Err(ValidatedGeometryError::ResourceLimit);
+        }
+        // Seal every actual original crossing even when a later interior cell
+        // happens to bracket an exactly representable endpoint. This prevents
+        // an unused, wrong-end binding from bypassing material-side validation.
+        for endpoint in &prepared_endpoints {
+            let source_index =
+                matching_source_index(&matches, endpoint.binding.candidate_index, budget, cancel)?
+                    .ok_or(ValidatedGeometryError::InvalidInput)?;
+            let cell = endpoint.root_cell();
+            let jet = validated_surface_jet(surface, cell, budget, cancel)?;
+            let receipt = endpoints::endpoint_covers(
+                &context,
+                candidates,
+                endpoint,
+                &prepared_endpoints,
+                endpoints::CoverageCell {
+                    source_index,
+                    uv: cell,
+                    position: jet.position,
+                },
+                budget,
+                cancel,
+            )
+            .map_err(|error| coverage_context(error, "original endpoint unique continuation"))?
+            .ok_or(ValidatedGeometryError::PlaneCoverageUnresolved {
+                operation: "original endpoint unique continuation",
+            })?;
+            endpoints::retain_receipt(&mut endpoint_strata, receipt, budget, cancel)?;
         }
         let mut pending = [(bounds, 0usize); 49];
         let mut length = 1;
@@ -110,6 +216,7 @@ pub fn validated_face_plane_coverage(
             visited_cells: 0,
             excluded_cells: 0,
             covered_cells: 0,
+            endpoint_strata,
         };
         while length != 0 {
             budget.charge(1, cancel)?;
@@ -135,7 +242,7 @@ pub fn validated_face_plane_coverage(
                         result.excluded_cells += 1;
                         continue;
                     }
-                    for &(candidate, index) in &matches {
+                    for &(candidate_index, candidate, index) in &matches {
                         budget.charge(1, cancel)?;
                         if candidate_covers(
                             candidate,
@@ -149,6 +256,39 @@ pub fn validated_face_plane_coverage(
                             covered = true;
                             break;
                         }
+                        if options.maximum_endpoint_extension_mm > 0.0 {
+                            for endpoint in &prepared_endpoints {
+                                budget.charge(1, cancel)?;
+                                if endpoint.binding.candidate_index != candidate_index {
+                                    continue;
+                                }
+                                if let Some(receipt) = endpoints::endpoint_covers(
+                                    &context,
+                                    candidates,
+                                    endpoint,
+                                    &prepared_endpoints,
+                                    endpoints::CoverageCell {
+                                        source_index: index,
+                                        uv: cell,
+                                        position: jet.position,
+                                    },
+                                    budget,
+                                    cancel,
+                                )? {
+                                    endpoints::retain_receipt(
+                                        &mut result.endpoint_strata,
+                                        receipt,
+                                        budget,
+                                        cancel,
+                                    )?;
+                                    covered = true;
+                                    break;
+                                }
+                            }
+                            if covered {
+                                break;
+                            }
+                        }
                     }
                 }
                 Err(error) if splittable(error) => {}
@@ -159,11 +299,15 @@ pub fn validated_face_plane_coverage(
                 continue;
             }
             if depth == options.max_depth {
-                return Err(ValidatedGeometryError::Unresolved);
+                return Err(ValidatedGeometryError::PlaneCoverageUnresolved {
+                    operation: "complete original face cells / subdivision depth",
+                });
             }
             let (axis, middle) = split_cell(surface, cell, budget, cancel)?;
             if middle <= cell[axis][0] || middle >= cell[axis][1] {
-                return Err(ValidatedGeometryError::Unresolved);
+                return Err(ValidatedGeometryError::PlaneCoverageUnresolved {
+                    operation: "complete original face cells / finite split",
+                });
             }
             let mut lower = cell;
             let mut upper = cell;
@@ -176,6 +320,40 @@ pub fn validated_face_plane_coverage(
         }
         Ok(result)
     })
+}
+
+fn matching_source_index(
+    matches: &[(usize, &PreparedValidatedCurve<'_>, usize)],
+    candidate_index: usize,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<usize>, ValidatedGeometryError> {
+    // Matches retain the original candidate enumeration order.
+    let (mut low, mut high) = (0, matches.len());
+    while low < high {
+        budget.charge(1, cancel)?;
+        let middle = low + (high - low) / 2;
+        if matches[middle].0 == candidate_index {
+            return Ok(Some(matches[middle].2));
+        }
+        if matches[middle].0 < candidate_index {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    Ok(None)
+}
+
+fn coverage_context(
+    error: ValidatedGeometryError,
+    operation: &'static str,
+) -> ValidatedGeometryError {
+    if error == ValidatedGeometryError::Unresolved {
+        ValidatedGeometryError::PlaneCoverageUnresolved { operation }
+    } else {
+        error
+    }
 }
 
 fn candidate_covers(

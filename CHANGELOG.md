@@ -16,6 +16,16 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Native face/plane coverage accepts explicit original-coedge endpoint bindings
+  after the prepared candidate slice. Optional bounded endpoint closure certifies
+  the actual original trim roots and unique transverse continuation, including
+  nonzero source-chart uncertainty, rather than treating guide proximity as
+  incidence. Successful coverage retains sealed extension, arc-length, position
+  and plane-error receipts; consumers must account for their physical chord and
+  area contributions. Closure defaults to disabled, retains the subdivision cap,
+  and charges receipt storage and work with cooperative cancellation. Missing
+  candidates, wrong original identities and omitted hole roots remain refusals.
+
 - STEP `SURFACE_CURVE` and `SEAM_CURVE` retain their original explicit leader,
   kind, declared master and associated geometry, including closed restrictions.
   Two associated surfaces alone no longer turn an explicit source into a
