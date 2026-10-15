@@ -59,10 +59,10 @@ pub use storage::{MAX_NATIVE_GEOMETRY_NESTING, curve_owned_bytes, surface_owned_
 pub use surface::Surface;
 pub use validated_curve::{
     CoordinatePlane, PreparedValidatedCurve, ValidatedCurveOptions, ValidatedCurvePiece,
-    ValidatedCurvePoint, ValidatedFacePlaneSource, ValidatedPlaneCoverage,
-    ValidatedPlaneCoverageOptions, ValidatedPlaneTrimEndpoint, ValidatedPlaneTrimEndpointBinding,
-    prepared_face_plane_curve, prepared_validated_curve, prepared_validated_curve_owned,
-    validated_face_plane_coverage, validated_plane_trim_root_chart,
+    ValidatedCurvePoint, ValidatedFacePlaneSource, ValidatedFacePlaneSourceAnchor,
+    ValidatedPlaneCoverage, ValidatedPlaneCoverageOptions, ValidatedPlaneTrimEndpoint,
+    ValidatedPlaneTrimEndpointBinding, prepared_face_plane_curve, prepared_validated_curve,
+    prepared_validated_curve_owned, validated_face_plane_coverage, validated_plane_trim_root_chart,
     validated_same_surface_coefficients,
 };
 pub use validated_interval::{

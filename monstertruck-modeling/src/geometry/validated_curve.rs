@@ -952,7 +952,7 @@ fn prepare_validated_curve<'a>(
 
 #[derive(Clone, Copy, Default)]
 struct SourcePreparation {
-    initial_chart: Option<[f64; 2]>,
+    anchor: Option<ValidatedFacePlaneSourceAnchor>,
     endpoint_coordinate_planes: [Option<CoordinatePlane>; 2],
 }
 
@@ -1000,20 +1000,30 @@ fn prepare_unmapped_curve<'a>(
         budget,
         cancel,
     )?;
-    let first_projection = coordinate_spans[0].1;
-    let leader_start =
-        validated_projection_leader_jet(leader, [range[0], range[0]], budget, cancel)?
+    let from_back = matches!(
+        source_preparation.anchor,
+        Some(ValidatedFacePlaneSourceAnchor::Back(_))
+    );
+    let anchor_parameter = range[usize::from(from_back)];
+    let first_projection = coordinate_spans[if from_back {
+        coordinate_spans.len() - 1
+    } else {
+        0
+    }]
+    .1;
+    let leader_anchor =
+        validated_projection_leader_jet(leader, [anchor_parameter; 2], budget, cancel)?
             .position
             .map(ValidatedInterval::midpoint);
-    let seed0 = match source_preparation.initial_chart {
-        Some(seed) => seed,
-        None => nearest_seed(surface0, leader_start, options, budget, cancel)?,
+    let seed0 = match source_preparation.anchor {
+        Some(anchor) => anchor.chart(),
+        None => nearest_seed(surface0, leader_anchor, options, budget, cancel)?,
     };
-    let seed1 = nearest_seed(surface1, leader_start, options, budget, cancel)?;
+    let seed1 = nearest_seed(surface1, leader_anchor, options, budget, cancel)?;
     let center = numerical_root(
         curve,
         first_projection,
-        range[0],
+        anchor_parameter,
         [seed0[0], seed0[1], seed1[0], seed1[1]],
         options,
         budget,
@@ -1028,7 +1038,7 @@ fn prepare_unmapped_curve<'a>(
         match certify(
             curve,
             first_projection,
-            ValidatedInterval::point(range[0]),
+            ValidatedInterval::point(anchor_parameter),
             domain,
             budget,
             cancel,
@@ -1045,7 +1055,7 @@ fn prepare_unmapped_curve<'a>(
     let (mut anchor, _) = refine_endpoint(
         curve,
         first_projection,
-        ValidatedInterval::point(range[0]),
+        ValidatedInterval::point(anchor_parameter),
         initial.domain,
         options,
         budget,
@@ -1057,7 +1067,12 @@ fn prepare_unmapped_curve<'a>(
     let coordinate_bytes = coordinate_spans
         .capacity()
         .saturating_mul(size_of::<([f64; 2], Projection)>());
-    for (coordinate_range, projection) in coordinate_spans {
+    let mut coordinate_spans = coordinate_spans.into_iter();
+    while let Some((coordinate_range, projection)) = if from_back {
+        coordinate_spans.next_back()
+    } else {
+        coordinate_spans.next()
+    } {
         pending[0] = (coordinate_range, 0);
         let mut pending_len = 1;
         while pending_len != 0 {
@@ -1100,7 +1115,7 @@ fn prepare_unmapped_curve<'a>(
                     let (next, _) = refine_endpoint(
                         curve,
                         projection,
-                        ValidatedInterval::point(part[1]),
+                        ValidatedInterval::point(part[usize::from(!from_back)]),
                         tube.domain,
                         options,
                         budget,
@@ -1132,13 +1147,18 @@ fn prepare_unmapped_curve<'a>(
                         return Err(error);
                     }
                     budget.charge(2, cancel)?;
-                    pending[pending_len] = ([middle, part[1]], depth + 1);
-                    pending[pending_len + 1] = ([part[0], middle], depth + 1);
+                    let halves = [[part[0], middle], [middle, part[1]]];
+                    pending[pending_len] = (halves[usize::from(!from_back)], depth + 1);
+                    pending[pending_len + 1] = (halves[usize::from(from_back)], depth + 1);
                     pending_len += 2;
                 }
                 Err(error) => return Err(error),
             }
         }
+    }
+    if from_back {
+        budget.charge(pieces.len(), cancel)?;
+        pieces.reverse();
     }
     Ok(PreparedValidatedCurve {
         source: PreparedSource::Borrowed(curve),
@@ -1428,16 +1448,37 @@ fn transform_prepared_jet(
     })
 }
 
+/// Numerical source-chart proposal at an actual native candidate endpoint.
+///
+/// This selects where continuation starts, not a certified branch or a period
+/// shift. Full original-source continuation and endpoint coverage still prove
+/// the selection. Native parameter direction and derivative signs never change.
+#[derive(Clone, Copy, Debug)]
+pub enum ValidatedFacePlaneSourceAnchor {
+    /// Start at the ascending native parameter range's front.
+    Front([f64; 2]),
+    /// Start at its back and continue toward the front in the same native gauge.
+    Back([f64; 2]),
+}
+
+impl ValidatedFacePlaneSourceAnchor {
+    fn chart(self) -> [f64; 2] {
+        match self {
+            Self::Front(chart) | Self::Back(chart) => chart,
+        }
+    }
+}
+
 /// Borrowed original carrier and optional numerical start for a generated query.
 #[derive(Clone, Copy, Debug)]
 pub struct ValidatedFacePlaneSource<'a> {
     /// The actual immutable source-face carrier.
     pub surface: &'a Surface,
-    /// Original front trim-root chart midpoint, used only as a numerical proposal.
+    /// Original trim-root chart proposal at the indicated native endpoint.
     ///
     /// This does not certify a branch or replace full continuation and coverage.
     /// In particular it does not modify any retained original master selection.
-    pub initial_chart: Option<[f64; 2]>,
+    pub anchor: Option<ValidatedFacePlaneSourceAnchor>,
     /// Optional exact shared coordinates at the generated front and back.
     ///
     /// Incident guides must retain identical coefficients. These proposals
@@ -1453,7 +1494,7 @@ pub struct ValidatedFacePlaneSource<'a> {
 /// before cloning. Sampling and all-domain coverage must share this same binding.
 ///
 /// An actual original trim-root chart proposal avoids choosing an unrelated
-/// periodic sheet through nearest-point inversion at a closed guide endpoint.
+/// periodic sheet through nearest-point inversion at either native endpoint.
 /// The proposal never substitutes for the same whole-range interval proof.
 pub fn prepared_face_plane_curve(
     guide: &Curve,
@@ -1467,7 +1508,7 @@ pub fn prepared_face_plane_curve(
     budget.charge(1, cancel)?;
     let ValidatedFacePlaneSource {
         surface,
-        initial_chart,
+        anchor,
         endpoint_coordinate_planes,
     } = source;
     let interval = interval_range(range)?;
@@ -1479,7 +1520,7 @@ pub fn prepared_face_plane_curve(
         || options.parameter_radius <= 0.0
         || !options.endpoint_tolerance.is_finite()
         || options.endpoint_tolerance <= 0.0
-        || initial_chart.is_some_and(|chart| !chart.into_iter().all(f64::is_finite))
+        || anchor.is_some_and(|anchor| !anchor.chart().into_iter().all(f64::is_finite))
         || endpoint_coordinate_planes
             .into_iter()
             .flatten()
@@ -1549,7 +1590,7 @@ pub fn prepared_face_plane_curve(
         range,
         &bounded,
         SourcePreparation {
-            initial_chart,
+            anchor,
             endpoint_coordinate_planes,
         },
         budget,

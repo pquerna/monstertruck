@@ -697,13 +697,7 @@ pub fn prepare_face_parameter_domain_with_natural_boundaries<'a, T: NativeTrimCu
                     .unwrap_or(TrimJointKind::EndpointUncertainty)
                 };
                 if matches!(kind, TrimJointKind::EndpointUncertainty)
-                    && (0..2).any(|axis| {
-                        periods[axis].is_some_and(|period| {
-                            !period.is_finite()
-                                || period <= 0.0
-                                || enclosure[axis].width() >= period * 0.5
-                        })
-                    })
+                    && !poles::ordinary_joint_supported(enclosure, periods)
                 {
                     return Err(TrimDomainError::UnsupportedSeam);
                 }

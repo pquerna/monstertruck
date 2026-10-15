@@ -73,14 +73,16 @@ pub(super) struct JointNeighborhood<'a> {
     pub margin: [f64; 2],
 }
 
-/// Certifies a supported singular joint of two original parameter-curve uses.
+/// Certifies a bounded joint of two original parameter-curve uses.
 ///
 /// The caller must bind both endpoint enclosures to the same original shared
 /// vertex and complete, independently proved source curves. This reuses the
-/// native face-domain singular-stratum proof, enclosing the entire connector
-/// image and its residual against that vertex. A period alias is not a joint.
-/// The whole Euclidean residual must remain within `maximum_vertex_deviation`.
-/// This does not replace whole-face trim preparation or coverage.
+/// native face-domain ordinary endpoint rectangle or singular-stratum proof,
+/// enclosing the entire connector image and its residual against that vertex.
+/// Ordinary rectangles must remain strictly within one half-period; a period
+/// alias is not a joint. The whole Euclidean residual must remain within
+/// `maximum_vertex_deviation`. This does not replace whole-face trim preparation
+/// or coverage, and does not assert that a rounded vertex is exactly on-carrier.
 pub fn certified_surface_parameter_joint(
     surface: &Surface,
     vertex: Point3,
@@ -115,22 +117,58 @@ pub fn certified_surface_parameter_joint(
         budget,
         cancel,
     )?;
-    budget.charge(4, cancel)?;
-    Ok(proof.filter(|kind| {
+    let (kind, residual) = if let Some(kind) = proof {
         let TrimJointKind::SphericalPole {
             vertex_residual, ..
         } = kind
         else {
-            return false;
+            return Ok(None);
         };
-        let squared = vertex_residual
-            .iter()
-            .fold(ValidatedInterval::point(0.0), |sum, axis| {
-                sum + *axis * *axis
-            });
-        let limit = ValidatedInterval::point(maximum_vertex_deviation);
-        squared.upper <= (limit * limit).lower
-    }))
+        (kind, vertex_residual)
+    } else {
+        let enclosure = [
+            enclosure[0] + ValidatedInterval::new(-margin_uv[0], margin_uv[0])?,
+            enclosure[1] + ValidatedInterval::new(-margin_uv[1], margin_uv[1])?,
+        ];
+        if !ordinary_joint_supported(enclosure, [surface.period_u(), surface.period_v()]) {
+            return Ok(None);
+        }
+        let (_, residual) = joint_image_residual(surface, vertex, enclosure, budget, cancel)?;
+        (TrimJointKind::EndpointUncertainty, residual)
+    };
+    budget.charge(4, cancel)?;
+    let squared = residual
+        .iter()
+        .fold(ValidatedInterval::point(0.0), |sum, axis| {
+            sum + *axis * *axis
+        });
+    let limit = ValidatedInterval::point(maximum_vertex_deviation);
+    Ok((squared.upper <= (limit * limit).lower).then_some(kind))
+}
+
+/// Matches the ordinary endpoint-joint covering-chart gate used in preparation.
+pub(super) fn ordinary_joint_supported(
+    enclosure: [ValidatedInterval; 2],
+    periods: [Option<f64>; 2],
+) -> bool {
+    (0..2).all(|axis| {
+        periods[axis].is_none_or(|period| {
+            period.is_finite() && period > 0.0 && enclosure[axis].width() < period * 0.5
+        })
+    })
+}
+
+fn joint_image_residual(
+    surface: &Surface,
+    vertex: Point3,
+    enclosure: [ValidatedInterval; 2],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<([ValidatedInterval; 3], [ValidatedInterval; 3]), TrimDomainError> {
+    let bounds = enclosure.map(|axis| [axis.lower, axis.upper]);
+    let world = validated_surface_jet(surface, bounds, budget, cancel)?.position;
+    let residual = std::array::from_fn(|axis| world[axis] - ValidatedInterval::point(vertex[axis]));
+    Ok((world, residual))
 }
 
 pub(super) fn pole_completion(
@@ -209,11 +247,8 @@ fn pole_completion_on(
             enclosure[1] + ValidatedInterval::new(-margin_uv[1], margin_uv[1])?,
         ];
         joint[polar_axis] = joint[polar_axis].hull(polar_tube);
-        let bounds = joint.map(|axis| [axis.lower, axis.upper]);
-        let world_enclosure = validated_surface_jet(surface, bounds, budget, cancel)?.position;
-        let vertex_residual = std::array::from_fn(|axis| {
-            world_enclosure[axis] - ValidatedInterval::point(vertex[axis])
-        });
+        let (world_enclosure, vertex_residual) =
+            joint_image_residual(surface, vertex, joint, budget, cancel)?;
         if !vertex_residual
             .into_iter()
             .all(ValidatedInterval::contains_zero)

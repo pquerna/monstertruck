@@ -1590,7 +1590,7 @@ mod plane_zero_cell_regressions {
     use crate::{
         BsplineCurve, BsplineSurface, Edge, Face, Invertible, KnotVector, Line, Point2, Point3,
         Processor, RevolutionSurface, TrimDomainLimits, TrimmedCurve, ValidatedCurveOptions,
-        ValidatedFacePlaneSource, Vector3, Wire, builder,
+        ValidatedFacePlaneSource, ValidatedFacePlaneSourceAnchor, Vector3, Wire, builder,
         prepare_face_parameter_domain_with_uncertainty, prepared_face_plane_curve,
     };
     use monstertruck_core::EuclideanSpace;
@@ -1704,7 +1704,7 @@ mod plane_zero_cell_regressions {
             &guide,
             ValidatedFacePlaneSource {
                 surface: &surface,
-                initial_chart: Some(chart),
+                anchor: Some(ValidatedFacePlaneSourceAnchor::Front(chart)),
                 endpoint_coordinate_planes: [
                     Some(coordinate),
                     Some(CoordinatePlane {
@@ -1835,7 +1835,7 @@ mod plane_zero_cell_regressions {
                 &guide,
                 ValidatedFacePlaneSource {
                     surface: &surface,
-                    initial_chart: Some([angle + delta, -6.0]),
+                    anchor: Some(ValidatedFacePlaneSourceAnchor::Front([angle + delta, -6.0])),
                     endpoint_coordinate_planes: [
                         None,
                         Some(CoordinatePlane {
@@ -2026,7 +2026,10 @@ mod plane_zero_cell_regressions {
                 &guide,
                 ValidatedFacePlaneSource {
                     surface: &surface,
-                    initial_chart: Some([u, if back { 0.25 } else { 0.5 }]),
+                    anchor: Some(ValidatedFacePlaneSourceAnchor::Front([
+                        u,
+                        if back { 0.25 } else { 0.5 },
+                    ])),
                     endpoint_coordinate_planes: if back {
                         [None, Some(shared)]
                     } else {
@@ -2138,7 +2141,7 @@ mod plane_zero_cell_regressions {
             &guide,
             ValidatedFacePlaneSource {
                 surface: &surface,
-                initial_chart: Some([0.75, 0.25]),
+                anchor: Some(ValidatedFacePlaneSourceAnchor::Front([0.75, 0.25])),
                 endpoint_coordinate_planes: [None; 2],
             },
             &plane,

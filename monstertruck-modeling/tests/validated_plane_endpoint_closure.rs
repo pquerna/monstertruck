@@ -155,7 +155,7 @@ fn coverage(
         &guide,
         ValidatedFacePlaneSource {
             surface: &surface,
-            initial_chart: None,
+            anchor: None,
             endpoint_coordinate_planes: [None; 2],
         },
         &plane,
@@ -513,7 +513,7 @@ fn periodic_original_seam_root_seeds_complete_closed_face_coverage() {
         &guide,
         ValidatedFacePlaneSource {
             surface: &surface,
-            initial_chart: None,
+            anchor: None,
             endpoint_coordinate_planes: [None; 2],
         },
         &plane,
@@ -531,7 +531,9 @@ fn periodic_original_seam_root_seeds_complete_closed_face_coverage() {
         &guide,
         ValidatedFacePlaneSource {
             surface: &surface,
-            initial_chart: Some(initial_chart.map(ValidatedInterval::midpoint)),
+            anchor: Some(ValidatedFacePlaneSourceAnchor::Front(
+                initial_chart.map(ValidatedInterval::midpoint),
+            )),
             endpoint_coordinate_planes: [None; 2],
         },
         &plane,
@@ -616,6 +618,300 @@ fn periodic_original_seam_root_seeds_complete_closed_face_coverage() {
             .error,
         original_cut
     );
+}
+
+#[derive(Clone, Copy)]
+enum BackAnchorCase {
+    Complete,
+    UnseededBack,
+    WrongSeam,
+    GeneratedGap,
+    BoundedProfile,
+}
+
+fn back_anchored_taper_coverage(
+    case: BackAnchorCase,
+) -> std::result::Result<ValidatedPlaneCoverage, ValidatedGeometryError> {
+    // A physical tapered face with its ORIGINAL negative full-period chart.
+    // The two half-circle sections meet at a generated interior junction;
+    // the second half has no original front root, only its actual raw-u=0 back.
+    let height = 0.0999999912280684;
+    let radius = 6.0 - height / 6.0;
+    // STEP CONICAL_SURFACE retains an untrimmed original Line profile; the face
+    // itself is bounded by its original coedges, not by a new carrier trim.
+    let profile = Curve::Line(Line(
+        Point3::new(6.0, 0.0, 0.0),
+        Point3::new(6.0 + 1.0 / 6.0, 0.0, -1.0),
+    ));
+    let profile = if matches!(case, BackAnchorCase::BoundedProfile) {
+        Curve::TrimmedCurve(Processor::new(TrimmedCurve::new(
+            Box::new(profile),
+            (-12.0, 0.0),
+        )))
+    } else {
+        profile
+    };
+    let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+        profile,
+        Point3::origin(),
+        Vector3::unit_z(),
+    )))
+    .inverse();
+    let bottom: Wire = primitive::circle(
+        Point3::new(6.0, 0.0, 0.0),
+        Point3::origin(),
+        Vector3::unit_z(),
+        2,
+    );
+    let top: Wire = primitive::circle(
+        Point3::new(4.0, 0.0, 12.0),
+        Point3::new(0.0, 0.0, 12.0),
+        Vector3::unit_z(),
+        2,
+    );
+    let seam_length = 148.0_f64.sqrt();
+    let seam_step = Vector3::new(-2.0 / seam_length, 0.0, 12.0 / seam_length);
+    let seam_curve = Curve::TrimmedCurve(Processor::new(TrimmedCurve::new(
+        Box::new(Curve::Line(Line(
+            Point3::new(6.0, 0.0, 0.0),
+            Point3::new(6.0, 0.0, 0.0) + seam_step,
+        ))),
+        (0.0, seam_length),
+    )));
+    let seam = Edge::new(bottom[0].front(), top[0].front(), seam_curve.clone());
+    let wire: Wire = [
+        seam.clone(),
+        top[0].clone(),
+        top[1].clone(),
+        seam.inverse(),
+        bottom[1].inverse(),
+        bottom[0].inverse(),
+    ]
+    .into_iter()
+    .collect();
+    let trims = [
+        [Point2::new(-TAU, 0.0), Point2::new(-TAU, -12.0)],
+        [Point2::new(-TAU, -12.0), Point2::new(-PI, -12.0)],
+        [Point2::new(-PI, -12.0), Point2::new(0.0, -12.0)],
+        [Point2::new(0.0, 0.0), Point2::new(0.0, -12.0)],
+        [Point2::new(-PI, 0.0), Point2::new(0.0, 0.0)],
+        [Point2::new(-TAU, 0.0), Point2::new(-PI, 0.0)],
+    ]
+    .map(|[front, back]| Some(Curve2D::Line(Line(front, back))))
+    .to_vec();
+    let trimmed = TrimmedFace::new(Face::new(vec![wire], surface.clone()), vec![trims]);
+    let cancel = AtomicBool::new(false);
+    let mut preparation = ValidatedGeometryBudget::new(2_000_000);
+    let domain = prepare_face_parameter_domain_with_uncertainty(
+        &trimmed,
+        [CHART_ERROR; 2],
+        TrimDomainLimits {
+            max_coedges: 16,
+            max_subdivisions: 65_536,
+            max_retained_bytes: 32 * 1024 * 1024,
+        },
+        &mut preparation,
+        &cancel,
+    )
+    .expect("original negative-chart taper retains both distinct seam uses");
+    let plane = Plane::new(
+        Point3::new(0.0, 0.0, height),
+        Point3::new(1.0, 0.0, height),
+        Point3::new(0.0, 1.0, height),
+    );
+    let options = ValidatedCurveOptions::default();
+    let boundary_range = [0.0, seam_length];
+    let source_cut_parameter = height / seam_step.z;
+    let master = prepared_validated_curve(
+        &seam_curve,
+        boundary_range,
+        &options,
+        &mut preparation,
+        &cancel,
+    )
+    .expect("same original sloping seam, independent arc-length native gauge");
+    let original_cut = master
+        .evaluate(source_cut_parameter, &mut preparation, &cancel)
+        .unwrap()
+        .error;
+    let guides = [false, true].map(|second| {
+        let gap = if second && matches!(case, BackAnchorCase::GeneratedGap) {
+            0.001
+        } else {
+            0.0
+        };
+        let (front, back) = if second {
+            (-PI + gap, 0.0)
+        } else {
+            (-TAU, -PI)
+        };
+        let points = (0..=16)
+            .map(|index| {
+                if (!second && index == 0) || (second && index == 16) {
+                    Point3::new(radius, 0.0, height)
+                } else if (!second && index == 16) || (second && index == 0 && gap == 0.0) {
+                    Point3::new(-radius, 0.0, height)
+                } else {
+                    let angle = front + (back - front) * index as f64 / 16.0;
+                    Point3::new(radius * angle.cos(), radius * angle.sin(), height)
+                }
+            })
+            .collect();
+        Curve::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(
+                std::iter::once(0.0)
+                    .chain((0..=16).map(|index| index as f64))
+                    .chain(std::iter::once(16.0))
+                    .collect::<Vec<_>>(),
+            ),
+            points,
+        ))
+    });
+    let shared = CoordinatePlane {
+        normal: [0.0, 1.0, 0.0],
+        offset: 0.0,
+    };
+    let curves = [0, 1].map(|index| {
+        let anchor = if index == 0 {
+            Some(ValidatedFacePlaneSourceAnchor::Front([-TAU, -height]))
+        } else if matches!(case, BackAnchorCase::UnseededBack) {
+            None
+        } else {
+            Some(ValidatedFacePlaneSourceAnchor::Back([0.0, -height]))
+        };
+        let coordinates = if index == 0 {
+            [None, Some(shared)]
+        } else {
+            [
+                Some(CoordinatePlane {
+                    offset: if matches!(case, BackAnchorCase::GeneratedGap) {
+                        radius * (-PI + 0.001).sin()
+                    } else {
+                        0.0
+                    },
+                    ..shared
+                }),
+                None,
+            ]
+        };
+        prepared_face_plane_curve(
+            &guides[index],
+            ValidatedFacePlaneSource {
+                surface: &surface,
+                anchor,
+                endpoint_coordinate_planes: coordinates,
+            },
+            &plane,
+            [0.0, 16.0],
+            &options,
+            &mut ValidatedGeometryBudget::new(2_000_000),
+            &cancel,
+        )
+        .expect("whole original tapered half-circle continuation")
+    });
+    let mut covered_until = 0.0;
+    for piece in curves[1].pieces() {
+        assert_eq!(piece.parameter[0], covered_until);
+        assert!(piece.parameter[1] > piece.parameter[0]);
+        covered_until = piece.parameter[1];
+    }
+    assert_eq!(covered_until, 16.0);
+    if !matches!(case, BackAnchorCase::UnseededBack) {
+        let first_uv = curves[1].pieces()[0].source_parameters.unwrap()[0];
+        assert!(
+            first_uv[0].upper < 0.0,
+            "back anchor retains the original negative sheet"
+        );
+        let jet = curves[1].jet([16.0; 2], &mut preparation, &cancel).unwrap();
+        assert!(
+            jet.first[1].lower > 0.0,
+            "native ascending derivative is not reversed"
+        );
+    }
+    let wrong_seam = matches!(case, BackAnchorCase::WrongSeam);
+    let bindings = [
+        ValidatedPlaneTrimEndpointBinding {
+            coedge_index: if wrong_seam { 3 } else { 0 },
+            original_edge_id: seam.id(),
+            boundary: &master,
+            boundary_range,
+            boundary_scale: 1.0,
+            candidate_index: 0,
+            endpoint_is_back: false,
+            source_cut_parameter,
+            source_chart_error_mm: CHART_ERROR,
+        },
+        ValidatedPlaneTrimEndpointBinding {
+            coedge_index: if wrong_seam { 0 } else { 3 },
+            original_edge_id: seam.id(),
+            boundary: &master,
+            boundary_range,
+            boundary_scale: 1.0,
+            candidate_index: 1,
+            endpoint_is_back: true,
+            source_cut_parameter,
+            source_chart_error_mm: CHART_ERROR,
+        },
+    ];
+    let result = validated_face_plane_coverage(
+        &domain,
+        &plane,
+        &[&curves[0], &curves[1]],
+        &bindings,
+        &ValidatedPlaneCoverageOptions {
+            maximum_endpoint_extension_mm: EXTENSION_LIMIT,
+            ..ValidatedPlaneCoverageOptions::default()
+        },
+        &mut ValidatedGeometryBudget::new(2_000_000),
+        &cancel,
+    );
+    assert_eq!(master.range(), boundary_range);
+    assert_eq!(
+        master
+            .evaluate(source_cut_parameter, &mut preparation, &cancel)
+            .unwrap()
+            .error,
+        original_cut
+    );
+    result
+}
+
+#[test]
+fn original_back_root_anchors_complete_negative_chart_taper_coverage() {
+    let coverage = back_anchored_taper_coverage(BackAnchorCase::Complete)
+        .expect("back-only original anchor must close the entire physical tapered section");
+    assert!(coverage.covered_cells > 0);
+    assert_eq!(coverage.endpoint_strata.len(), 2);
+    for (candidate, coedge, back) in [(0, 0, false), (1, 3, true)] {
+        assert!(coverage.endpoint_strata.iter().any(|receipt| {
+            receipt.candidate_index() == candidate
+                && receipt.coedge_index() == coedge
+                && receipt.endpoint_is_back() == back
+                && receipt.maximum_extension_mm() <= EXTENSION_LIMIT
+        }));
+    }
+}
+
+#[test]
+fn back_anchor_cannot_weld_wrong_original_seam_or_generated_gap() {
+    for case in [
+        BackAnchorCase::UnseededBack,
+        BackAnchorCase::WrongSeam,
+        BackAnchorCase::GeneratedGap,
+    ] {
+        assert!(back_anchored_taper_coverage(case).is_err());
+    }
+}
+
+#[test]
+fn back_anchor_does_not_extend_finite_profile_for_whole_face_census() {
+    // The retained trim uncertainty and outward full-span boundary jets reach
+    // outside this deliberately finite carrier. An anchor cannot authorize
+    // evaluating its original profile beyond its admitted parameter domain.
+    assert!(matches!(
+        back_anchored_taper_coverage(BackAnchorCase::BoundedProfile),
+        Err(ValidatedGeometryError::ParameterOutOfRange)
+    ));
 }
 
 #[test]

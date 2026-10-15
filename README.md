@@ -77,11 +77,12 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   extension, arc-length, position and plane-error bounds for independent chord and
   signed-area accounting, under the same work, storage and cancellation limits.
   Missing branches, unrelated endpoints and omitted hole roots refuse coverage.
-  Generated face/plane preparation can receive an actual original front-root
-  chart midpoint through `ValidatedFacePlaneSource`. The numerical proposal
-  avoids a nearest-point inverse choosing another chart sheet at a closed
-  endpoint, while unchanged whole-curve continuation and all-domain coverage
-  remain mandatory. Original prepared master branches are not reselected.
+  Generated face/plane preparation can receive an actual original endpoint chart
+  through `ValidatedFacePlaneSourceAnchor::Front` or `Back`. Back anchoring
+  continues in the original gauge toward the front, retaining ascending output
+  intervals and native derivative signs. These are numerical proposals only:
+  whole-curve continuation, original endpoint ownership and complete all-domain
+  coverage remain mandatory. Original prepared masters are not reselected.
 - Complete plane coverage contracts cells by necessary interval-Newton root
   bounds on the original surface before subdivision. Whole-cell plane exclusion
   or validated candidate tubes can discharge a cell before trim winding.

@@ -16,10 +16,11 @@ monstertruck 0.4.0.
 
 ### Fixed
 
-- Surface-parameter joint admission can reuse the same bounded singular-stratum
-  proof as native face-domain preparation. The certificate encloses the complete
-  spherical-pole connector against the original shared vertex and caller's
-  physical allowance; ordinary chart gaps and period aliases remain refusals.
+- Surface-parameter joint admission reuses native face-domain ordinary endpoint
+  rectangles and singular-stratum completion. The complete connector image must
+  remain within the original shared vertex's Euclidean physical allowance;
+  ordinary joints also retain the strict half-period gate. Unrelated source
+  uses and period aliases cannot be joined by spatial proximity.
 - Prepared intersection-curve jets contract nested original root images over
   the complete requested subspan before enclosing first and second derivatives.
   This resolves coarse uniqueness-tube Green-integral bounds without pointwise
@@ -43,12 +44,13 @@ monstertruck 0.4.0.
   area contributions. Closure defaults to disabled, retains the subdivision cap,
   and charges receipt storage and work with cooperative cancellation. Missing
   candidates, wrong original identities and omitted hole roots remain refusals.
-- Generated face/plane curve preparation accepts an optional original-front
-  chart proposal with its borrowed carrier. The trim-root chart helper shares
-  the complete independent original/UV root census and exact retained-source
-  association with endpoint coverage. This avoids closed-endpoint inverse-sheet
-  ambiguity without guessed period shifts, original master reselection or
-  relaxed continuation, endpoint, work or storage bounds.
+- Generated face/plane curve preparation accepts an optional original `Front`
+  or `Back` chart proposal with its borrowed carrier. Back-anchored continuation
+  traverses original spans backward and returns ascending pieces without changing
+  their parameters, projections or derivative signs. The trim-root helper shares
+  the complete original/UV root census and exact retained-source association with
+  endpoint coverage. Original masters, continuation, endpoint, work, storage and
+  cancellation bounds remain unchanged; no guessed period shift is introduced.
 - Complete plane coverage uses original-surface interval-Newton zero contraction
   and defers trim winding until whole-cell zero/tube proofs need it. Correlated
   axial/radial Rodrigues coefficients avoid artificial full-period height motion;
