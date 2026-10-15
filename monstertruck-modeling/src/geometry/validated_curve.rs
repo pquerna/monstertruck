@@ -2048,29 +2048,25 @@ fn refine_endpoint(
     source: Certification<'_, '_>,
     projection: Projection,
     parameter: ValidatedInterval,
-    mut domain: [ValidatedInterval; 4],
+    domain: [ValidatedInterval; 4],
     options: &ValidatedCurveOptions,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<([ValidatedInterval; 4], [ValidatedInterval; 3]), ValidatedGeometryError> {
-    for _ in 0..options.max_iterations {
-        budget.charge(1, cancel)?;
-        let tube = source.certify(projection, parameter, domain, budget, cancel)?;
-        // A successful Krawczyk inclusion already bounds this same exact root.
-        // Keep a relative interior margin when contracting: reducing an affine
-        // coordinate to one ulp while a nonlinear coordinate still converges
-        // can make the next strict inclusion fail solely on arithmetic noise.
-        // The new box contains the proven image and remains inside the previous
-        // uniqueness box; the next iteration independently certifies it again.
-        domain = std::array::from_fn(|i| {
-            let padding = domain[i].width() * 0.0625;
+    budget.charge(1, cancel)?;
+    let mut tube = source.certify(projection, parameter, domain, budget, cancel)?;
+    for iteration in 0..options.max_iterations {
+        // This box contains the proven image and stays inside its owned
+        // uniqueness tube. Preserve the existing arithmetic padding floor
+        // while nonlinear coordinates are still contracting.
+        let enclosed = std::array::from_fn(|i| {
+            let image = tube.rooted_domain[i];
+            let padding = (tube.domain[i].width() * 0.0625).max(root_image_padding(image));
             ValidatedInterval {
-                lower: (tube.rooted_domain[i].lower - padding)
+                lower: (image.lower - padding)
                     .next_down()
-                    .max(domain[i].lower),
-                upper: (tube.rooted_domain[i].upper + padding)
-                    .next_up()
-                    .min(domain[i].upper),
+                    .max(tube.domain[i].lower),
+                upper: (image.upper + padding).next_up().min(tube.domain[i].upper),
             }
         });
         let position = tube.position()?;
@@ -2078,8 +2074,37 @@ fn refine_endpoint(
             .into_iter()
             .all(|interval| interval.width() <= options.endpoint_tolerance)
         {
-            return Ok((domain, position));
+            return Ok((enclosed, position));
         }
+        if iteration + 1 == options.max_iterations {
+            break;
+        }
+        budget.charge(1, cancel)?;
+        // A nearly unit contraction bound can leave a nonlinear coordinate
+        // broad while affine coordinates reach arithmetic width. Propose a
+        // smaller centered box instead of assuming the old image must fit it.
+        // Fresh inclusion for the identical parameter interval proves roots
+        // inside the old uniqueness tube, hence the SAME selected branch.
+        let proposed = std::array::from_fn(|i| {
+            let image = tube.rooted_domain[i];
+            let radius = (tube.domain[i].width() * 0.25)
+                .min(image.width() * 0.51)
+                .max(root_image_padding(image));
+            let centered = inflated(image.midpoint(), radius);
+            ValidatedInterval {
+                lower: centered.lower.max(tube.domain[i].lower),
+                upper: centered.upper.min(tube.domain[i].upper),
+            }
+        });
+        tube = match source.certify(projection, parameter, proposed, budget, cancel) {
+            Ok(next) => next,
+            // The proposal carries no authority. Its refusal retains the
+            // original image-containing contraction, without refunding work.
+            Err(error) if retryable(error) => {
+                source.certify(projection, parameter, enclosed, budget, cancel)?
+            }
+            Err(error) => return Err(error),
+        };
     }
     Err(ValidatedGeometryError::Unresolved)
 }
@@ -4042,6 +4067,169 @@ mod continuation_regressions {
                 .error,
             original_middle,
         );
+    }
+
+    #[test]
+    fn generated_nonuniform_cylinder_generator_keeps_original_knot_coordinates() {
+        let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+            Curve::Line(Line(
+                Point3::new(24.0, 0.0, 2.0),
+                Point3::new(24.0, 1.0, 2.0),
+            )),
+            Point3::new(22.0, 0.0, 2.0),
+            crate::Vector3::new(-0.0, 1.0, 0.0),
+        )))
+        .inverse();
+        let height = 0.0999999285714281;
+        let plane = Plane::new(
+            Point3::new(-1.0, 19.0, height),
+            Point3::new(25.0, 19.0, height),
+            Point3::new(-1.0, -1.0, height),
+        );
+        let guide = Curve::BsplineCurve(crate::BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0]),
+            vec![
+                Point3::new(22.62449958252302, 16.0, 0.09999992857142836),
+                Point3::new(22.624499582523015, 12.844555966903268, 0.09999992857142811),
+                Point3::new(22.624499582523015, 9.0, 0.09999992857142811),
+                Point3::new(22.624499582523015, 5.155445987406469, 0.09999992857142811),
+                Point3::new(22.62449958252302, 2.0, 0.09999992857142836),
+            ],
+        ));
+        let source = ValidatedFacePlaneSource {
+            surface: &surface,
+            anchor: Some(ValidatedFacePlaneSourceAnchor::Both {
+                front: [1.253236011880648, 16.0],
+                back: [1.253236011880648, 2.0],
+            }),
+            endpoint_coordinate_planes: [None; 2],
+        };
+        let options = ValidatedCurveOptions::default();
+        let cancel = AtomicBool::new(false);
+        let mut work = ValidatedGeometryBudget::new(2_000_000);
+        let prepared = prepared_face_plane_curve(
+            &guide,
+            source,
+            &plane,
+            [0.0, 1.0],
+            &options,
+            &mut work,
+            &cancel,
+        );
+        let prepared =
+            prepared.expect("Original nonuniform knot coordinates retain a complete root.");
+        assert_eq!(prepared.range(), [0.0, 1.0]);
+        let mut covered = 0.0;
+        for piece in prepared.pieces() {
+            assert_eq!(piece.parameter[0], covered);
+            covered = piece.parameter[1];
+            assert!(piece.contraction_bound < 1.0);
+        }
+        assert_eq!(covered, 1.0);
+        let front = prepared.evaluate(0.0, &mut work, &cancel).unwrap();
+        let back = prepared.evaluate(1.0, &mut work, &cancel).unwrap();
+        assert!(front.error[1].lower <= 16.0 && 16.0 <= front.error[1].upper);
+        assert!(back.error[1].lower <= 2.0 && 2.0 <= back.error[1].upper);
+        assert!(matches!(
+            prepared.evaluate(0.25, &mut ValidatedGeometryBudget::new(0), &cancel,),
+            Err(ValidatedGeometryError::ResourceLimit)
+        ));
+        assert!(matches!(
+            prepared.evaluate(0.25, &mut work, &AtomicBool::new(true)),
+            Err(ValidatedGeometryError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn generated_cylinder_generator_keeps_axial_profile_and_endpoint_gauges() {
+        let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+            Curve::Line(Line(
+                Point3::new(24.0, 0.0, 2.0),
+                Point3::new(24.0, 1.0, 2.0),
+            )),
+            Point3::new(22.0, 0.0, 2.0),
+            crate::Vector3::unit_y(),
+        )))
+        .inverse();
+        let angle: f64 = 1.253236011880648;
+        let height = 0.0999999285714281;
+        let x = 22.0 + 2.0 * angle.cos();
+        let plane = Plane::new(
+            Point3::new(-1.0000000000000009, 19.000000000000004, height),
+            Point3::new(-0.0000000000000009, 19.000000000000004, height),
+            Point3::new(-1.0000000000000009, 20.000000000000004, height),
+        );
+        let cancel = AtomicBool::new(false);
+        let mut work = ValidatedGeometryBudget::new(2_000_000);
+        let jet = validated_surface_piecewise_jet(
+            &surface,
+            [[angle, angle], [2.0, 16.0]],
+            &mut work,
+            &cancel,
+        )
+        .expect("The bare unit profile retains its actual unbounded affine semantics.");
+        for axis in [0, 2] {
+            assert!(
+                jet.position[axis].width() < 1.0e-11,
+                "Axial width must not become a radial-position uncertainty: {jet:?}"
+            );
+            assert_eq!(jet.dv[axis], ZERO);
+            assert_eq!(jet.duv[axis], ZERO);
+        }
+        assert_eq!(jet.dv[1], ONE);
+        assert!(jet.position[1].lower <= 2.0 && jet.position[1].upper >= 16.0);
+        for range in [[0.0, 1.0], [10.0, 14.0]] {
+            let guide = Curve::BsplineCurve(crate::BsplineCurve::new(
+                KnotVector::from(vec![range[0], range[0], range[1], range[1]]),
+                vec![Point3::new(x, 16.0, height), Point3::new(x, 2.0, height)],
+            ));
+            for anchor in [
+                ValidatedFacePlaneSourceAnchor::Front([angle, 16.0]),
+                ValidatedFacePlaneSourceAnchor::Back([angle, 2.0]),
+                ValidatedFacePlaneSourceAnchor::Both {
+                    front: [angle, 16.0],
+                    back: [angle, 2.0],
+                },
+            ] {
+                let prepared = prepared_face_plane_curve(
+                    &guide,
+                    ValidatedFacePlaneSource {
+                        surface: &surface,
+                        anchor: Some(anchor),
+                        endpoint_coordinate_planes: [None; 2],
+                    },
+                    &plane,
+                    range,
+                    &ValidatedCurveOptions::default(),
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("Generator preparation at {anchor:?}, range {range:?}: {error:?}")
+                });
+                assert_eq!(prepared.range(), range);
+                let mut covered = range[0];
+                for piece in prepared.pieces() {
+                    assert_eq!(piece.parameter[0], covered);
+                    covered = piece.parameter[1];
+                    let chart = piece.source_parameters.expect("Original source charts.");
+                    assert!(chart[0][0].lower <= angle && angle <= chart[0][0].upper);
+                }
+                assert_eq!(covered, range[1]);
+                for ratio in [0.0, 0.5, 1.0] {
+                    let t = range[0] + ratio * (range[1] - range[0]);
+                    let point = prepared.evaluate(t, &mut work, &cancel).unwrap();
+                    for (axis, expected) in [x, 16.0 - 14.0 * ratio, height].into_iter().enumerate()
+                    {
+                        assert!(
+                            point.error[axis].lower <= expected
+                                && expected <= point.error[axis].upper,
+                            "Native generator position at {anchor:?}, t={t}: {point:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -55,6 +55,11 @@ monstertruck 0.4.0.
   under bounded conditioning checks; original-carrier continuation, source
   support and complete coverage remain authoritative. Numerical proposal
   failure retries the original partition on the same consumed-work budget.
+- Endpoint refinement freshly certifies centered nested original-source boxes
+  rather than overcontracting affine auxiliary coordinates while nonlinear
+  coordinates barely shrink. Prior uniqueness and identical parameter intervals
+  retain branch identity; failed proposals use the original image-containing
+  contraction on the same budget, with unchanged arithmetic padding and limits.
 - Transverse extrusion/plane sections may use a typed constructive original-
   profile graph, with independently bound original endpoint charts, a complete
   bounded profile image and outward position/derivative transport. This includes

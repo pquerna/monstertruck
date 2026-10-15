@@ -87,6 +87,12 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   across retained guide knots. Fresh original-carrier continuation and complete
   coverage still certify every result; a failed proposal retries the original
   partition without resetting consumed work. Original-master gauges are unchanged.
+- Endpoint refinement may propose smaller centered boxes nested inside its
+  certified original-source uniqueness tube. Fresh inclusion over the identical
+  parameter interval proves the same branch; an old image need not fit a mere
+  proposal. Retryable failure retains the image-containing contraction without
+  refunding work. Arithmetic-width auxiliary coordinates do not force broad
+  nonlinear coordinates to stagnate; source support and endpoint limits are unchanged.
 - A transverse extrusion/plane section with two original endpoint charts can
   prescribe a bounded original profile parameter and solve the remaining linear
   coordinates constructively, including varying profile height and genuine
