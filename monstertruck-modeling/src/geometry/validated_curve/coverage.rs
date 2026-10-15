@@ -191,7 +191,7 @@ pub fn validated_face_plane_coverage(
                     .ok_or(ValidatedGeometryError::InvalidInput)?;
             let cell = endpoint.root_cell();
             let jet = validated_surface_jet(surface, cell, budget, cancel)?;
-            let receipt = endpoints::endpoint_covers(
+            let outcome = endpoints::endpoint_covers(
                 &context,
                 candidates,
                 endpoint,
@@ -204,10 +204,13 @@ pub fn validated_face_plane_coverage(
                 budget,
                 cancel,
             )
-            .map_err(|error| coverage_context(error, "original endpoint unique continuation"))?
-            .ok_or(ValidatedGeometryError::PlaneCoverageUnresolved {
-                operation: "original endpoint unique continuation",
-            })?;
+            .map_err(|error| coverage_context(error, "original endpoint unique continuation"))?;
+            let receipt = match outcome {
+                endpoints::EndpointCoverage::Covered(receipt) => receipt,
+                endpoints::EndpointCoverage::Refused(operation, error) => {
+                    return Err(coverage_context(error, operation));
+                }
+            };
             endpoints::retain_receipt(&mut endpoint_strata, receipt, budget, cancel)?;
         }
         let mut pending = [(bounds, 0usize); 49];
@@ -262,19 +265,21 @@ pub fn validated_face_plane_coverage(
                                 if endpoint.binding.candidate_index != candidate_index {
                                     continue;
                                 }
-                                if let Some(receipt) = endpoints::endpoint_covers(
-                                    &context,
-                                    candidates,
-                                    endpoint,
-                                    &prepared_endpoints,
-                                    endpoints::CoverageCell {
-                                        source_index: index,
-                                        uv: cell,
-                                        position: jet.position,
-                                    },
-                                    budget,
-                                    cancel,
-                                )? {
+                                if let endpoints::EndpointCoverage::Covered(receipt) =
+                                    endpoints::endpoint_covers(
+                                        &context,
+                                        candidates,
+                                        endpoint,
+                                        &prepared_endpoints,
+                                        endpoints::CoverageCell {
+                                            source_index: index,
+                                            uv: cell,
+                                            position: jet.position,
+                                        },
+                                        budget,
+                                        cancel,
+                                    )?
+                                {
                                     endpoints::retain_receipt(
                                         &mut result.endpoint_strata,
                                         receipt,

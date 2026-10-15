@@ -669,6 +669,11 @@ fn complete_incidence(
     Ok(true)
 }
 
+pub(super) enum EndpointCoverage {
+    Covered(ValidatedPlaneTrimEndpoint),
+    Refused(&'static str, ValidatedGeometryError),
+}
+
 pub(super) fn endpoint_covers(
     context: &FacePlaneContext<'_, '_>,
     candidates: &[&PreparedValidatedCurve<'_>],
@@ -677,7 +682,7 @@ pub(super) fn endpoint_covers(
     coverage_cell: CoverageCell,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<Option<ValidatedPlaneTrimEndpoint>, ValidatedGeometryError> {
+) -> Result<EndpointCoverage, ValidatedGeometryError> {
     let &FacePlaneContext {
         domain,
         surface,
@@ -705,7 +710,10 @@ pub(super) fn endpoint_covers(
     // crossing inventory, material side and a fresh common uniqueness proof.
     if norm_upper(std::array::from_fn(|i| position[i] - nominal_end[i]))? > 4.0 * maximum_extension
     {
-        return Ok(None);
+        return Ok(EndpointCoverage::Refused(
+            "endpoint / search envelope distance",
+            ValidatedGeometryError::Unresolved,
+        ));
     }
     let endpoint = if binding.endpoint_is_back {
         candidate.range[1]
@@ -731,7 +739,10 @@ pub(super) fn endpoint_covers(
         [plane_chart[0], plane_chart[1], chart[0], chart[1]]
     };
     if !(0..4).all(|i| contains(box4[i], q[i])) {
-        return Ok(None);
+        return Ok(EndpointCoverage::Refused(
+            "endpoint / source cell in original uniqueness tube",
+            ValidatedGeometryError::Unresolved,
+        ));
     }
     let original = prepared.original;
     let root = prepared.root;
@@ -739,7 +750,10 @@ pub(super) fn endpoint_covers(
     let original_root = prepared.original_position;
     let uv = prepared.uv;
     if disjoint2(uv, chart) {
-        return Ok(None);
+        return Ok(EndpointCoverage::Refused(
+            "endpoint / original trim root intersects cell",
+            ValidatedGeometryError::Unresolved,
+        ));
     }
     let endpoint_jet = candidate.jet([endpoint; 2], budget, cancel)?;
     let axis = (0..3)
@@ -755,7 +769,10 @@ pub(super) fn endpoint_covers(
     let hv = dot3(normal, chart_jet.dv);
     let determinant = chart_jet.du[axis] * hv - chart_jet.dv[axis] * hu;
     if determinant.contains_zero() {
-        return Ok(None);
+        return Ok(EndpointCoverage::Refused(
+            "endpoint / chart crossing determinant",
+            ValidatedGeometryError::Unresolved,
+        ));
     }
     let material_positive = sign(-root.derivative * determinant)
         .map(|x| if boundary.identity.orientation { x } else { !x })
@@ -763,17 +780,26 @@ pub(super) fn endpoint_covers(
     let candidate_positive =
         sign(endpoint_jet.first[axis]).ok_or(ValidatedGeometryError::NonTransverse)?;
     if material_positive != (candidate_positive != binding.endpoint_is_back) {
-        return Ok(None);
+        return Ok(EndpointCoverage::Refused(
+            "endpoint / oriented material side",
+            ValidatedGeometryError::Unresolved,
+        ));
     }
     if !complete_incidence(context, cell, prepared, all_roots, budget, cancel)? {
-        return Ok(None);
+        return Ok(EndpointCoverage::Refused(
+            "endpoint / complete original trim incidence",
+            ValidatedGeometryError::Unresolved,
+        ));
     }
     let coordinate = position[axis]
         .hull(original_root[axis])
         .hull(nominal_root[axis])
         .hull(nominal_end[axis]);
     if coordinate.lower >= coordinate.upper {
-        return Ok(None);
+        return Ok(EndpointCoverage::Refused(
+            "endpoint / nondegenerate fixed coordinate",
+            ValidatedGeometryError::Unresolved,
+        ));
     }
     let mut direction = [0.0; 3];
     direction[axis] = 1.0;
@@ -803,7 +829,10 @@ pub(super) fn endpoint_covers(
         [root_chart[0], root_chart[1], uv[0], uv[1]]
     };
     if !(0..4).all(|i| contains(box4[i], root_q[i])) {
-        return Ok(None);
+        return Ok(EndpointCoverage::Refused(
+            "endpoint / original trim root in original uniqueness tube",
+            ValidatedGeometryError::Unresolved,
+        ));
     }
     let mut tube = match certify(
         candidate.source.curve()?,
@@ -814,7 +843,12 @@ pub(super) fn endpoint_covers(
         cancel,
     ) {
         Ok(tube) => tube,
-        Err(error) if splittable(error) => return Ok(None),
+        Err(error) if splittable(error) => {
+            return Ok(EndpointCoverage::Refused(
+                "endpoint / fixed-coordinate uniqueness certification",
+                error,
+            ));
+        }
         Err(error) => return Err(error),
     };
     for _ in 0..8 {
@@ -851,7 +885,10 @@ pub(super) fn endpoint_covers(
         norm_upper(std::array::from_fn(|i| original_root[i] - nominal_root[i]))?;
     let extension = (arc_length + source_displacement).next_up();
     if !extension.is_finite() || extension > maximum_extension {
-        return Ok(None);
+        return Ok(EndpointCoverage::Refused(
+            "endpoint / achieved extension under frozen allowance",
+            ValidatedGeometryError::Unresolved,
+        ));
     }
     let position =
         std::array::from_fn(|i| jet.position[i].hull(original_root[i]).hull(nominal_end[i]));
@@ -867,7 +904,7 @@ pub(super) fn endpoint_covers(
     if !plane_error.is_finite() {
         return Err(ValidatedGeometryError::InvalidInput);
     }
-    Ok(Some(ValidatedPlaneTrimEndpoint {
+    Ok(EndpointCoverage::Covered(ValidatedPlaneTrimEndpoint {
         candidate_index: binding.candidate_index,
         endpoint_is_back: binding.endpoint_is_back,
         coedge_index: binding.coedge_index,
