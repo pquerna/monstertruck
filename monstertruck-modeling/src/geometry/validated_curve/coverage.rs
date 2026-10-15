@@ -7,8 +7,8 @@ use crate::{
     Conic2D, Curve, Curve2D, ParameterBoxClassification, Plane, PreparedFaceParameterDomain,
     Surface, TrimDomainError, ValidatedGeometryBudget, ValidatedGeometryError, ValidatedInterval,
     ValidatedPlaneCandidateWitness, ValidatedPlaneCoverageRejection, ValidatedPlaneCoverageWitness,
-    ValidatedPlaneJunctionCondition, ValidatedPlaneJunctionRejection,
-    ValidatedPlaneJunctionWitness,
+    ValidatedPlaneEndpointWitness, ValidatedPlaneJunctionCondition,
+    ValidatedPlaneJunctionRejection, ValidatedPlaneJunctionWitness,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -181,6 +181,7 @@ pub fn validated_face_plane_coverage(
                     .ok_or(ValidatedGeometryError::InvalidInput)?;
             let cell = endpoint.root_cell();
             let jet = validated_surface_jet(surface, cell, budget, cancel)?;
+            let mut witness = None;
             let outcome = endpoints::endpoint_covers(
                 &context,
                 candidates,
@@ -191,8 +192,8 @@ pub fn validated_face_plane_coverage(
                     uv: cell,
                     position: jet.position,
                 },
-                budget,
-                cancel,
+                (&mut *budget, cancel),
+                Some(&mut witness),
             )
             .map_err(|error| {
                 coverage_context(error, "original endpoint unique continuation", Some(cell))
@@ -200,7 +201,15 @@ pub fn validated_face_plane_coverage(
             let receipt = match outcome {
                 endpoints::EndpointCoverage::Covered(receipt) => receipt,
                 endpoints::EndpointCoverage::Refused(operation, error) => {
-                    return Err(coverage_context(error, operation, Some(cell)));
+                    let mut error = coverage_context(error, operation, Some(cell));
+                    if let ValidatedGeometryError::PlaneCoverageUnresolved {
+                        witness: recorded,
+                        ..
+                    } = &mut error
+                    {
+                        *recorded = witness;
+                    }
+                    return Err(error);
                 }
             };
             endpoints::retain_receipt(&mut endpoint_strata, receipt, budget, cancel)?;
@@ -263,8 +272,8 @@ pub fn validated_face_plane_coverage(
                                             uv: root_cell,
                                             position,
                                         },
-                                        budget,
-                                        cancel,
+                                        (&mut *budget, cancel),
+                                        None,
                                     )?
                                 {
                                     endpoints::retain_receipt(
@@ -462,7 +471,8 @@ impl CandidateDiagnostics<'_> {
                     || (progress(previous.rejection) == progress(rejection)
                         && usize::from(previous.piece_count) >= group.1)
             }
-            ValidatedPlaneCoverageWitness::Junction(_) => true,
+            ValidatedPlaneCoverageWitness::Junction(_)
+            | ValidatedPlaneCoverageWitness::Endpoint(_) => true,
         }) {
             return;
         }
@@ -513,6 +523,7 @@ impl JunctionDiagnostics<'_> {
                 progress(previous.rejection) >= progress(rejection)
             }
             ValidatedPlaneCoverageWitness::Candidate(_) => false,
+            ValidatedPlaneCoverageWitness::Endpoint(_) => true,
         }) {
             return;
         }

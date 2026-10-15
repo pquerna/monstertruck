@@ -822,15 +822,45 @@ pub(super) enum EndpointCoverage {
     Refused(&'static str, ValidatedGeometryError),
 }
 
+fn endpoint_tube_witness(
+    candidate: &PreparedValidatedCurve<'_>,
+    binding: &ValidatedPlaneTrimEndpointBinding<'_>,
+    source_index: usize,
+    coordinate: usize,
+    tube: ValidatedInterval,
+    query: ValidatedInterval,
+) -> Option<ValidatedPlaneCoverageWitness> {
+    let piece_index = if binding.endpoint_is_back {
+        candidate.pieces.len().checked_sub(1)?
+    } else {
+        0
+    };
+    // Diagnostic representability must not change the numerical refusal.
+    // Query/storage caps already bound these indices; check rather than truncate.
+    Some(ValidatedPlaneCoverageWitness::Endpoint(
+        ValidatedPlaneEndpointWitness {
+            candidate_index: u32::try_from(binding.candidate_index).ok()?,
+            piece_index: u32::try_from(piece_index).ok()?,
+            coedge_index: u32::try_from(binding.coedge_index).ok()?,
+            source_index: u8::try_from(source_index).ok()?,
+            endpoint_is_back: binding.endpoint_is_back,
+            coordinate: u8::try_from(coordinate).ok()?,
+            tube_bounds: [tube.lower, tube.upper],
+            query_bounds: [query.lower, query.upper],
+        },
+    ))
+}
+
 pub(super) fn endpoint_covers(
     context: &FacePlaneContext<'_, '_>,
     candidates: &[&PreparedValidatedCurve<'_>],
     prepared: &PreparedEndpoint<'_>,
     all_roots: &[PreparedEndpoint<'_>],
     coverage_cell: CoverageCell,
-    budget: &mut ValidatedGeometryBudget,
-    cancel: &AtomicBool,
+    execution: (&mut ValidatedGeometryBudget, &AtomicBool),
+    mut diagnostic: Option<&mut Option<ValidatedPlaneCoverageWitness>>,
 ) -> Result<EndpointCoverage, ValidatedGeometryError> {
+    let (budget, cancel) = execution;
     let &FacePlaneContext {
         domain,
         surface,
@@ -886,7 +916,11 @@ pub(super) fn endpoint_covers(
     } else {
         [plane_chart[0], plane_chart[1], chart[0], chart[1]]
     };
-    if !(0..4).all(|i| contains(box4[i], q[i])) {
+    if let Some(axis) = (0..4).find(|&i| !contains(box4[i], q[i])) {
+        if let Some(diagnostic) = diagnostic.as_deref_mut() {
+            *diagnostic =
+                endpoint_tube_witness(candidate, &binding, source_index, axis, box4[axis], q[axis]);
+        }
         return Ok(EndpointCoverage::Refused(
             "endpoint / source cell in original uniqueness tube",
             ValidatedGeometryError::Unresolved,
@@ -980,7 +1014,17 @@ pub(super) fn endpoint_covers(
     } else {
         [root_chart[0], root_chart[1], uv[0], uv[1]]
     };
-    if !(0..4).all(|i| contains(box4[i], root_q[i])) {
+    if let Some(axis) = (0..4).find(|&i| !contains(box4[i], root_q[i])) {
+        if let Some(diagnostic) = diagnostic {
+            *diagnostic = endpoint_tube_witness(
+                candidate,
+                &binding,
+                source_index,
+                axis,
+                box4[axis],
+                root_q[axis],
+            );
+        }
         return Ok(EndpointCoverage::Refused(
             "endpoint / original trim root in original uniqueness tube",
             ValidatedGeometryError::Unresolved,

@@ -141,13 +141,41 @@ pub struct ValidatedPlaneJunctionWitness {
     pub condition: Option<ValidatedPlaneJunctionCondition>,
 }
 
-/// Fixed-size evidence from an existing terminal-depth coverage attempt.
+/// Compact evidence from an actual original-endpoint tube containment refusal.
+///
+/// Intervals remain in the unchanged original source-system gauge. This is a
+/// diagnostic, not an endpoint receipt or permission to rewrap a parameter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ValidatedPlaneEndpointWitness {
+    /// Actual matched candidate in the original query.
+    pub candidate_index: u32,
+    /// Actual first/last prepared piece selected for that bound endpoint.
+    pub piece_index: u32,
+    /// Actual original coedge occurrence bound to that candidate endpoint.
+    pub coedge_index: u32,
+    /// Original face carrier index, zero or one, in the candidate source system.
+    pub source_index: u8,
+    /// Front=false, back=true in the unchanged native candidate parameter.
+    pub endpoint_is_back: bool,
+    /// First failing source-system coordinate, zero through three.
+    /// Coordinates `2*source_index..2*source_index+2` are original face UV;
+    /// the other pair is the unchanged original section-plane chart.
+    pub coordinate: u8,
+    /// Complete retained uniqueness-tube interval on the deciding axis.
+    pub tube_bounds: [f64; 2],
+    /// Complete query interval on that same original-gauge axis.
+    pub query_bounds: [f64; 2],
+}
+
+/// Fixed-size evidence from a terminal coverage or mandatory endpoint attempt.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ValidatedPlaneCoverageWitness {
     /// An individual candidate or contiguous prepared-piece group refused.
     Candidate(ValidatedPlaneCandidateWitness),
     /// A proposed joined continuation refused.
     Junction(ValidatedPlaneJunctionWitness),
+    /// Mandatory original endpoint preseal refused tube containment.
+    Endpoint(ValidatedPlaneEndpointWitness),
 }
 
 /// Failure to establish a native interval geometry certificate.
@@ -190,7 +218,7 @@ pub enum ValidatedGeometryError {
         /// Actual unresolved closed box in the unchanged original covering chart.
         /// Absent when the failing proof has no single original source cell.
         parameter_box: Option<[[f64; 2]; 2]>,
-        /// Best-progress actual candidate or junction attempt, only at terminal depth.
+        /// Actual endpoint preseal or best-progress terminal-depth coverage refusal.
         witness: Option<ValidatedPlaneCoverageWitness>,
     },
     /// Continuation could not establish a single connected local branch.

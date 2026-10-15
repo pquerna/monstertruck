@@ -66,6 +66,9 @@ monstertruck 0.4.0.
   parameter box. Terminal-depth candidate/junction witnesses identify the actual
   prepared-piece group or endpoint pair, failed inequality and existing raw
   bounds, without extra proof work, allocation or changes to limits/classification.
+  Mandatory endpoint preseal refusals also retain the actual first failing
+  original uniqueness-tube coordinate, complete tube/query intervals and checked
+  candidate, piece and coedge identity in a fixed-size, allocation-free witness.
 - Nested periodic trim inverse queries lift the basis parameter by its declared
   period into the original raw trim range before clipping or rejection, keeping
   shifted original charts rather than selecting the wrong endpoint.
