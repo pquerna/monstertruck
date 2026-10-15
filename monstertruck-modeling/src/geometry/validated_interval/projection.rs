@@ -434,21 +434,9 @@ fn projected_curve2d(
             if !(0..3).all(|i| (0..3).all(|j| matrix[i][j].is_finite())) {
                 return Err(E::InvalidInput);
             }
-            let a = dot(
-                [matrix[0][0], matrix[0][1]],
-                direction,
-                offset * I::point(matrix[0][2]),
-            )?;
-            let b = dot(
-                [matrix[1][0], matrix[1][1]],
-                direction,
-                offset * I::point(matrix[1][2]),
-            )?;
-            let c = dot(
-                [matrix[2][0], matrix[2][1]],
-                direction,
-                offset * I::point(matrix[2][2]),
-            )?;
+            let a = dot([matrix[0][0], matrix[0][1]], direction, ZERO)?;
+            let b = dot([matrix[1][0], matrix[1][1]], direction, ZERO)?;
+            let c = dot([matrix[2][0], matrix[2][1]], direction, offset)?;
             let [x, y] = match kind {
                 0 => {
                     let (sine, cosine) = parameter.sin_cos();
@@ -464,16 +452,7 @@ fn projected_curve2d(
                 }
                 _ => [parameter * parameter, parameter * Taylor::constant(2.0)],
             };
-            let numerator = Taylor::interval(c) + Taylor::interval(a) * x + Taylor::interval(b) * y;
-            if matrix[0][2] == 0.0 && matrix[1][2] == 0.0 && matrix[2][2] == 1.0 {
-                return Ok(numerator);
-            }
-            let denominator = project_taylor(
-                [x, y],
-                [matrix[0][2], matrix[1][2]].map(I::point),
-                I::point(matrix[2][2]),
-            );
-            numerator * denominator.reciprocal()?
+            Taylor::interval(c) + Taylor::interval(a) * x + Taylor::interval(b) * y
         }
         Curve2D::Polyline(curve) => {
             if curve.len() < 2 {
@@ -515,14 +494,14 @@ fn projected_curve2d(
                 );
             }
             let mut functional = [ZERO; 3];
-            for j in 0..3 {
-                functional[j] = dot(
+            for (j, value) in functional.iter_mut().enumerate() {
+                *value = dot(
                     [matrix[j][0], matrix[j][1]],
                     direction,
-                    offset * I::point(matrix[j][2]),
+                    if j == 2 { offset } else { ZERO },
                 )?;
             }
-            let numerator = projected_curve2d(
+            projected_curve2d(
                 wrapper.entity().curve(),
                 parameter,
                 ScalarProjection {
@@ -534,28 +513,7 @@ fn projected_curve2d(
                 true,
                 budget,
                 cancel,
-            )?;
-            if matrix[0][2] == 0.0 && matrix[1][2] == 0.0 && matrix[2][2] == 1.0 {
-                return Ok(numerator);
-            }
-            let denominator = if matrix[0][2] == 0.0 && matrix[1][2] == 0.0 {
-                Taylor::constant(matrix[2][2])
-            } else {
-                projected_curve2d(
-                    wrapper.entity().curve(),
-                    parameter,
-                    ScalarProjection {
-                        direction: [matrix[0][2], matrix[1][2]].map(I::point),
-                        offset: I::point(matrix[2][2]),
-                        center: None,
-                    },
-                    nesting + 1,
-                    true,
-                    budget,
-                    cancel,
-                )?
-            };
-            numerator * denominator.reciprocal()?
+            )?
         }
     })
 }
@@ -717,7 +675,7 @@ fn projected_spline_cell<const N: usize>(
 #[cfg(test)]
 mod scalar_projection_regressions {
     use super::*;
-    use crate::{BsplineCurve, Line, NurbsCurve, Point3, Vector4};
+    use crate::{BsplineCurve, Line, NurbsCurve, Point3, Tolerance, Vector4};
 
     #[test]
     fn polynomial_line_preserves_small_plane_residual() {
@@ -760,5 +718,49 @@ mod scalar_projection_regressions {
         )
         .expect("A positive-denominator rational span retains its coefficient plane.");
         assert_eq!([jet.position, jet.first, jet.second], [ZERO; 3]);
+    }
+
+    #[test]
+    fn native_affine_uv_scalar_projection_retains_constant_value_and_offset_once() {
+        use crate::{
+            Conic2D, Matrix3, ParameterCurve, Plane, Point2, Processor, TrimmedCurve, UnitCircle,
+        };
+        let matrix = Matrix3::new(0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0);
+        let line = Curve2D::TrimmedCurve(Processor::with_transform(
+            TrimmedCurve::new(
+                Box::new(Curve2D::Line(Line(
+                    Point2::new(0.0, 0.0),
+                    Point2::new(1.0, 0.0),
+                ))),
+                (0.5, 0.75),
+            ),
+            matrix,
+        ));
+        let circle = Curve2D::Conic(Conic2D::Ellipse(Processor::with_transform(
+            TrimmedCurve::new(UnitCircle::<Point2>::new(), (0.5, 0.75)),
+            matrix,
+        )));
+        for (uv, circular) in [(line, false), (circle, true)] {
+            let curve = Curve::ParameterCurve(ParameterCurve::new(
+                uv,
+                Box::new(Surface::Plane(Plane::xy())),
+            ));
+            for t in [0.5_f64, 0.625, 0.75] {
+                let expected = Point3::new(1.0, if circular { t.sin() } else { 0.0 }, 0.0);
+                assert!(curve.subs(t).near(&expected));
+                assert_eq!(curve.der(t).x, 0.0);
+            }
+            let jet = validated_curve_projected_jet(
+                &curve,
+                [0.5, 0.75],
+                [3.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                &mut ValidatedGeometryBudget::new(100_000),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert!(jet.position.lower <= -4.0 && -4.0 <= jet.position.upper);
+            assert!(jet.position.upper - jet.position.lower < 1.0e-10);
+        }
     }
 }

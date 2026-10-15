@@ -770,14 +770,9 @@ fn transform2(matrix: Matrix3, point: [Taylor; 2]) -> Result<[Taylor; 2], Valida
             + Taylor::constant(matrix[0][i]) * point[0]
             + Taylor::constant(matrix[1][i]) * point[1]
     });
-    if matrix[0][2] == 0.0 && matrix[1][2] == 0.0 && matrix[2][2] == 1.0 {
-        return Ok(coordinates);
-    }
-    let denominator = Taylor::constant(matrix[2][2])
-        + Taylor::constant(matrix[0][2]) * point[0]
-        + Taylor::constant(matrix[1][2]) * point[1];
-    let inverse = denominator.reciprocal()?;
-    Ok(coordinates.map(|value| value * inverse))
+    // cgmath's native Matrix3/Point2 action truncates, without a homogeneous
+    // divide. Rational control-net weights are handled at their original leaf.
+    Ok(coordinates)
 }
 fn transform3(matrix: Matrix4, point: [Taylor; 3]) -> Result<[Taylor; 3], ValidatedGeometryError> {
     if !(0..4).all(|i| (0..4).all(|j| matrix[i][j].is_finite())) {
@@ -2010,7 +2005,7 @@ mod tensor_factor_regressions {
 mod retained_trim_regressions {
     use super::*;
     use crate::{
-        Invertible, Line, Matrix3, Matrix4, Point2, Point3, Processor, TrimmedCurve, UnitCircle,
+        Invertible, Line, Matrix3, Matrix4, Point2, Point3, Processor, Tolerance, TrimmedCurve, UnitCircle,
     };
 
     #[test]
@@ -2070,34 +2065,66 @@ mod retained_trim_regressions {
     }
 
     #[test]
-    fn retained_uv_pose_keeps_original_homogeneous_denominators() {
-        let basis = Curve2D::Line(Line(Point2::new(0.0, 0.0), Point2::new(5.0, 10.0)));
-        let matrix = Matrix3::new(80.0, 0.0, 0.0, 0.0, 120.0, 0.0, 40.0, 80.0, 40.0);
+    fn retained_uv_jets_enclose_actual_native_affine_points_and_derivatives() {
+        let cases = [
+            (
+                Line(Point2::new(0.0, 0.0), Point2::new(5.0, 10.0)),
+                Matrix3::new(80.0, 0.0, 0.0, 0.0, 120.0, 0.0, 40.0, 80.0, 40.0),
+                Line(Point2::new(40.0, 80.0), Point2::new(440.0, 1280.0)),
+            ),
+            (
+                Line(Point2::new(0.0, 0.0), Point2::new(1.0, 2.0)),
+                Matrix3::new(1.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, -0.25),
+                Line(Point2::new(0.0, 0.0), Point2::new(1.0, 2.0)),
+            ),
+        ];
+        for (basis, matrix, expected) in cases {
+            let curve = Curve2D::TrimmedCurve(Processor::with_transform(
+                TrimmedCurve::new(Box::new(Curve2D::Line(basis)), (0.0, 1.0)),
+                matrix,
+            ));
+            let jet = validated_curve2d_jet(
+                &curve,
+                [0.0, 1.0],
+                &mut ValidatedGeometryBudget::new(100_000),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            for t in [0.0, 0.5, 1.0] {
+                let point = expected.subs(t);
+                let derivative = expected.der(t);
+                assert!(curve.subs(t).near(&point));
+                assert!(curve.der(t).near(&derivative));
+                for (axis, value) in [point.x, point.y].into_iter().enumerate() {
+                    assert!(jet.position[axis].lower <= value && value <= jet.position[axis].upper);
+                }
+                for (axis, value) in [derivative.x, derivative.y].into_iter().enumerate() {
+                    assert!(jet.first[axis].lower <= value && value <= jet.first[axis].upper);
+                    assert_eq!(jet.second[axis], super::super::ZERO);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rational_uv_leaf_pole_is_not_repaired_by_unused_pose_row() {
+        use crate::{BsplineCurve, NurbsCurve, Vector3};
+        let basis = Curve2D::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 1.0, 1.0]),
+            vec![Vector3::new(0.0, 0.0, -0.5), Vector3::new(1.0, 0.0, 0.5)],
+        )));
         let curve = Curve2D::TrimmedCurve(Processor::with_transform(
             TrimmedCurve::new(Box::new(basis), (0.0, 1.0)),
-            matrix,
+            Matrix3::new(1.0, 0.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0, -2.0),
         ));
-        let mut budget = ValidatedGeometryBudget::new(100_000);
-        let jet = validated_curve2d_jet(&curve, [0.0, 1.0], &mut budget, &AtomicBool::new(false))
-            .unwrap();
-        for (axis, expected) in [10.0, 30.0].into_iter().enumerate() {
-            assert!(jet.first[axis].lower <= expected && expected <= jet.first[axis].upper);
-            assert_eq!(jet.second[axis], super::super::ZERO);
-        }
-        assert!(jet.position[0].lower <= 1.0 && jet.position[0].upper >= 11.0);
-        assert!(jet.position[1].lower <= 2.0 && jet.position[1].upper >= 32.0);
-        let pole = Curve2D::TrimmedCurve(Processor::with_transform(
-            TrimmedCurve::new(
-                Box::new(Curve2D::Line(Line(
-                    Point2::new(0.0, 0.0),
-                    Point2::new(1.0, 2.0),
-                ))),
-                (0.0, 1.0),
-            ),
-            Matrix3::new(1.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, -0.25),
-        ));
+        assert!(!curve.subs(0.5).x.is_finite());
         assert!(matches!(
-            validated_curve2d_jet(&pole, [0.5, 0.5], &mut budget, &AtomicBool::new(false)),
+            validated_curve2d_jet(
+                &curve,
+                [0.5, 0.5],
+                &mut ValidatedGeometryBudget::new(100_000),
+                &AtomicBool::new(false),
+            ),
             Err(ValidatedGeometryError::DenominatorContainsZero)
         ));
     }

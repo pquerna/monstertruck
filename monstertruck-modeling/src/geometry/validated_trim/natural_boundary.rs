@@ -28,11 +28,11 @@ pub struct NaturalBoundaryJointEvidence {
 
 /// Proves a literal native UV endpoint coordinate by exact coefficient arithmetic.
 ///
-/// `true` means homogeneous numerator equals `value * denominator` exactly, with
-/// nonzero denominator. Clamped polynomial/rational endpoints, line/polyline
-/// endpoints and bounded nested literal processor factors are supported,
-/// retaining every independent inverse anchor. No sampled or interval-nearness
-/// equality is used. `false` also covers an unsupported exact representation;
+/// `true` means homogeneous numerator equals `value * denominator` exactly,
+/// and every original native evaluation has nonzero denominator. Clamped
+/// polynomial/rational endpoints, line/polyline endpoints and bounded nested
+/// literal processor factors retain every independent inverse anchor. No sampled
+/// or interval-nearness equality is used. `false` also covers unsupported forms;
 /// checked arithmetic/cancellation/resource failures remain errors.
 pub fn certified_curve2d_endpoint_coordinate(
     curve: &Curve2D,
@@ -59,12 +59,11 @@ pub fn certified_curve2d_endpoint_coordinate(
     };
     let point = match extrusion::exact_uv_point(curve, number(parameter)?, 0, budget, cancel) {
         Ok(point) => point,
-        Err(TrimDomainError::Geometry(ValidatedGeometryError::Unsupported)) => return Ok(false),
+        Err(TrimDomainError::Geometry(
+            ValidatedGeometryError::Unsupported | ValidatedGeometryError::Singular,
+        )) => return Ok(false),
         Err(error) => return Err(error),
     };
-    if point[2] == number(0.0)? {
-        return Ok(false);
-    }
     let expected = number(value)?
         .multiply(point[2])
         .ok_or(TrimDomainError::Geometry(
@@ -76,13 +75,13 @@ pub fn certified_curve2d_endpoint_coordinate(
 /// Proves that a retained native UV branch is a simple regular straight line.
 ///
 /// A literal line or single-span degree-one polynomial/rational spline leaf,
-/// every retained homogeneous `Mat3` factor and independent inverse anchor
-/// establish homogeneous coordinates affine in the original scalar parameter.
+/// every retained native affine `Mat3` action on `Point2`, and independent
+/// inverse anchors retain homogeneous coordinates affine in the root parameter.
 /// The original span length stays homogeneous, without a rounded reciprocal.
-/// Exact endpoint denominator signs
-/// then exclude a pole on the whole interval; a nonzero projective tangent
-/// numerator proves regularity and strict monotonicity along the image. A
-/// singular matrix is allowed when that actual one-dimensional image is regular.
+/// Native `Mat3` point actions preserve the leaf denominator unchanged, so its
+/// exact endpoint signs exclude poles at every original level on the interval.
+/// A nonzero projective tangent numerator proves regularity and strict
+/// monotonicity; ambient matrix invertibility is not required.
 /// Either orientation of a finite active subrange is accepted. `false` also
 /// covers unsupported leaves. This supplies no source/3D correspondence,
 /// trim membership or domain-coverage authority.
@@ -136,8 +135,23 @@ pub fn certified_curve2d_is_straight_regular(
             ValidatedGeometryError::Unresolved,
         ))
     };
-    let a = extrusion::exact_uv_point(curve, number(range[0])?, 0, budget, cancel)?;
-    let b = extrusion::exact_uv_point(curve, number(range[1])?, 0, budget, cancel)?;
+    let point_at = |parameter, budget: &mut ValidatedGeometryBudget| match extrusion::exact_uv_point(
+        curve,
+        number(parameter)?,
+        0,
+        budget,
+        cancel,
+    ) {
+        Ok(point) => Ok(Some(point)),
+        Err(TrimDomainError::Geometry(ValidatedGeometryError::Singular)) => Ok(None),
+        Err(error) => Err(error),
+    };
+    let Some(a) = point_at(range[0], budget)? else {
+        return Ok(false);
+    };
+    let Some(b) = point_at(range[1], budget)? else {
+        return Ok(false);
+    };
     let sign = a[2].compare(number(0.0)?);
     if sign.is_eq() || b[2].compare(number(0.0)?) != sign {
         return Ok(false);
@@ -652,7 +666,7 @@ mod natural_boundary_regressions {
     }
 
     #[test]
-    fn endpoint_coordinate_identity_preserves_rational_weight_pose_and_inverse_anchor() {
+    fn native_rational_endpoint_witnesses_follow_affine_uv_pose_and_inverse_anchor() {
         use crate::{
             BsplineCurve, Invertible, Matrix3, NurbsCurve, Processor, TrimmedCurve, Vector3,
         };
@@ -668,36 +682,40 @@ mod natural_boundary_regressions {
         let curve = Curve2D::TrimmedCurve(posed);
         let mut budget = ValidatedGeometryBudget::new(100_000);
         let cancel = AtomicBool::new(false);
-        for parameter in [10.0, 14.0] {
-            assert!(
-                certified_curve2d_endpoint_coordinate(
-                    &curve,
-                    parameter,
-                    0,
-                    2.0,
-                    &mut budget,
-                    &cancel
-                )
-                .unwrap()
-            );
-            assert!(
-                !certified_curve2d_endpoint_coordinate(
-                    &curve,
-                    parameter,
-                    0,
-                    2.0_f64.next_up(),
-                    &mut budget,
-                    &cancel
-                )
-                .unwrap()
-            );
+        // Native UV poses translate x by 80; their third row cannot divide
+        // either coordinate by 40. The inverse retains the original 10+14 anchor.
+        for (parameter, expected) in [
+            (10.0, Point2::new(80.0, 5.0)),
+            (14.0, Point2::new(80.0, 3.0)),
+        ] {
+            assert!(curve.subs(parameter).near(&expected));
+            for (axis, value) in [expected.x, expected.y].into_iter().enumerate() {
+                assert!(
+                    certified_curve2d_endpoint_coordinate(
+                        &curve,
+                        parameter,
+                        axis,
+                        value,
+                        &mut budget,
+                        &cancel,
+                    )
+                    .unwrap()
+                );
+                assert!(
+                    !certified_curve2d_endpoint_coordinate(
+                        &curve,
+                        parameter,
+                        axis,
+                        value.next_up(),
+                        &mut budget,
+                        &cancel,
+                    )
+                    .unwrap()
+                );
+            }
         }
         assert!(
-            certified_curve2d_endpoint_coordinate(&curve, 10.0, 1, 0.125, &mut budget, &cancel)
-                .unwrap()
-        );
-        assert!(
-            !certified_curve2d_endpoint_coordinate(&curve, 12.0, 0, 2.0, &mut budget, &cancel)
+            !certified_curve2d_endpoint_coordinate(&curve, 12.0, 0, 80.0, &mut budget, &cancel,)
                 .unwrap()
         );
     }
@@ -716,7 +734,7 @@ mod natural_boundary_regressions {
     }
 
     #[test]
-    fn projective_line_is_regular_even_when_ambient_matrix_is_singular() {
+    fn affine_native_line_is_regular_even_when_ambient_matrix_is_singular() {
         let curve = line_operator(
             crate::Matrix3::new(1.0, 2.0, 1.0, 0.0, 0.0, 0.0, 3.0, 4.0, 2.0),
             (0.0, 1.0),
@@ -751,17 +769,25 @@ mod natural_boundary_regressions {
     }
 
     #[test]
-    fn zero_projective_tangent_and_zero_active_range_are_not_regular() {
+    fn native_affine_tangent_survives_noncanonical_row_and_empty_range_still_refuses() {
         let curve = line_operator(
             crate::Matrix3::new(2.0, 4.0, 1.0, 0.0, 0.0, 0.0, 2.0, 4.0, 1.0),
             (0.0, 1.0),
         );
+        for t in [0.0, 0.5, 1.0] {
+            assert!(
+                curve
+                    .subs(t)
+                    .near(&Point2::new(2.0 * t + 2.0, 4.0 * t + 4.0))
+            );
+            assert_eq!(curve.der(t), crate::Vector2::new(2.0, 4.0));
+        }
         assert!(
-            !certified_curve2d_is_straight_regular(
+            certified_curve2d_is_straight_regular(
                 &curve,
                 [0.0, 1.0],
                 &mut ValidatedGeometryBudget::new(1000),
-                &AtomicBool::new(false)
+                &AtomicBool::new(false),
             )
             .unwrap()
         );
@@ -770,7 +796,7 @@ mod natural_boundary_regressions {
                 &curve,
                 [0.5, 0.5],
                 &mut ValidatedGeometryBudget::new(1000),
-                &AtomicBool::new(false)
+                &AtomicBool::new(false),
             )
             .unwrap()
         );
@@ -803,18 +829,22 @@ mod natural_boundary_regressions {
     }
 
     #[test]
-    fn denominator_zero_at_boundary_or_between_finite_endpoints_is_refused() {
+    fn unused_native_mat3_row_does_not_create_line_poles() {
         for constant in [0.0, 1.0] {
             let curve = line_operator(
                 crate::Matrix3::new(1.0, 0.0, -2.0, 0.0, 1.0, 0.0, 0.0, 0.0, constant),
                 (0.0, 1.0),
             );
+            for t in [0.0, 0.5, 1.0] {
+                assert!(curve.subs(t).near(&Point2::new(t, 0.0)));
+                assert_eq!(curve.der(t), crate::Vector2::new(1.0, 0.0));
+            }
             assert!(
-                !certified_curve2d_is_straight_regular(
+                certified_curve2d_is_straight_regular(
                     &curve,
                     [0.0, 1.0],
                     &mut ValidatedGeometryBudget::new(1000),
-                    &AtomicBool::new(false)
+                    &AtomicBool::new(false),
                 )
                 .unwrap()
             );
@@ -952,5 +982,85 @@ mod natural_boundary_regressions {
                 .unwrap()
             );
         }
+    }
+
+    #[test]
+    fn native_affine_point2_operators_cannot_invent_regularity_or_erase_rational_poles() {
+        use crate::{BsplineCurve, Matrix3, NurbsCurve, Processor, TrimmedCurve, Vector2, Vector3};
+        // Native Matrix3::transform_point truncates its third component. These
+        // upper rows map the entire native line to (1,0), NOT (1/t,0).
+        let constant = Curve2D::TrimmedCurve(Processor::with_transform(
+            TrimmedCurve::new(
+                Box::new(Curve2D::Line(Line(
+                    Point2::new(0.0, 0.0),
+                    Point2::new(1.0, 0.0),
+                ))),
+                (0.5, 0.75),
+            ),
+            Matrix3::new(0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0),
+        ));
+        for t in [0.5, 0.625, 0.75] {
+            assert!(constant.subs(t).near(&Point2::new(1.0, 0.0)));
+            assert_eq!(constant.der(t), Vector2::new(0.0, 0.0));
+        }
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(100_000);
+        assert!(
+            !certified_curve2d_is_straight_regular(&constant, [0.5, 0.75], &mut budget, &cancel,)
+                .unwrap()
+        );
+        assert!(
+            certified_curve2d_endpoint_coordinate(&constant, 0.5, 0, 1.0, &mut budget, &cancel,)
+                .unwrap()
+        );
+        assert!(
+            !certified_curve2d_endpoint_coordinate(&constant, 0.5, 0, 2.0, &mut budget, &cancel,)
+                .unwrap()
+        );
+        let rational_leaf = Curve2D::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 1.0, 1.0]),
+            vec![Vector3::new(0.0, 0.0, -0.5), Vector3::new(1.0, 0.0, 0.5)],
+        )));
+        // The unused bottom row algebraically cancels W only in the incorrect
+        // full-projective interpretation, never in the actual native operator.
+        let outer_matrix = Matrix3::new(1.0, 0.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0, -2.0);
+        let wrap = |range| {
+            Curve2D::TrimmedCurve(Processor::with_transform(
+                TrimmedCurve::new(Box::new(rational_leaf.clone()), range),
+                outer_matrix,
+            ))
+        };
+        let curve = wrap((0.0, 1.0));
+        assert!(curve.subs(0.125).near(&Point2::new(-1.0 / 3.0, 0.0)));
+        assert!(!curve.subs(0.5).x.is_finite());
+        assert!(
+            !certified_curve2d_is_straight_regular(&curve, [0.0, 1.0], &mut budget, &cancel,)
+                .unwrap()
+        );
+        assert!(
+            certified_curve2d_is_straight_regular(&curve, [0.0, 0.25], &mut budget, &cancel,)
+                .unwrap()
+        );
+        let endpoint_pole = wrap((0.5, 1.0));
+        assert!(
+            !certified_curve2d_is_straight_regular(
+                &endpoint_pole,
+                [0.5, 1.0],
+                &mut budget,
+                &cancel,
+            )
+            .unwrap()
+        );
+        assert!(
+            !certified_curve2d_endpoint_coordinate(
+                &endpoint_pole,
+                0.5,
+                0,
+                0.5,
+                &mut budget,
+                &cancel,
+            )
+            .unwrap()
+        );
     }
 }

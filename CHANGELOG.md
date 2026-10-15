@@ -16,6 +16,10 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Validated UV geometry follows native `Matrix3<Point2>` affine upper-row
+  semantics rather than inventing perspective division. Exact endpoints,
+  regularity, Taylor enclosures and scalar projections preserve original
+  rational denominators; unused matrix rows cannot create or erase poles.
 - STEP VECTOR directions are normalized independently of their declared
   magnitude. Degenerate, nonfinite and dimensionally inconsistent geometric
   vectors return typed conversion errors rather than silently changing line

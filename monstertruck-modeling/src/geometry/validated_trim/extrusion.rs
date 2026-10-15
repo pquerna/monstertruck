@@ -731,6 +731,20 @@ pub(super) fn exact_uv_point(
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<[Dyadic; 3], TrimDomainError> {
+    let point = uv_point_homogeneous(curve, parameter, depth, budget, cancel)?;
+    if point[2].compare(number(0.0)?).is_eq() {
+        return Err(ValidatedGeometryError::Singular.into());
+    }
+    Ok(point)
+}
+
+fn uv_point_homogeneous(
+    curve: &Curve2D,
+    parameter: Dyadic,
+    depth: usize,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<[Dyadic; 3], TrimDomainError> {
     budget.charge(12, cancel)?;
     if depth > MAX_NATIVE_GEOMETRY_NESTING {
         return Err(ValidatedGeometryError::ResourceLimit.into());
@@ -917,13 +931,13 @@ fn exact_uv_transform(
     matrix: &Matrix3,
     point: [Dyadic; 3],
 ) -> Result<[Dyadic; 3], TrimDomainError> {
-    let mut result = [number(0.0)?; 3];
-    for axis in 0..3 {
-        for term in 0..3 {
-            result[axis] = sum(
-                result[axis],
-                product(number(matrix[term][axis])?, point[term])?,
-            )?;
+    // Native Matrix3::transform_point(Point2) uses only its upper two rows;
+    // unlike Matrix4/Point3 it never divides by the computed third component.
+    // The original rational leaf's denominator therefore survives every pose.
+    let mut result = [number(0.0)?, number(0.0)?, point[2]];
+    for (axis, coordinate) in result.iter_mut().enumerate().take(2) {
+        for (term, value) in point.iter().enumerate() {
+            *coordinate = sum(*coordinate, product(number(matrix[term][axis])?, *value)?)?;
         }
     }
     Ok(result)
