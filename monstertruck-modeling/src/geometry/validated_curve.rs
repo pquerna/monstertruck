@@ -372,15 +372,7 @@ impl PreparedValidatedCurve<'_> {
                         position,
                         intersect3(tube.surfaces[0].position, tube.surfaces[1].position)?,
                     )?;
-                    let mut next = domain;
-                    for i in 0..4 {
-                        let image = tube.rooted_domain[i];
-                        let radius =
-                            0.51 * image.width() + 64.0 * f64::EPSILON * (1.0 + image.magnitude());
-                        next[i] = domain[i]
-                            .intersection(inflated(image.midpoint(), radius))
-                            .ok_or(ValidatedGeometryError::ConditioningFailure)?;
-                    }
+                    let next = root_image_domain(&tube)?;
                     if next == domain {
                         break;
                     }
@@ -404,6 +396,13 @@ impl PreparedValidatedCurve<'_> {
     }
 
     /// Encloses a subrange without selecting another intersection branch.
+    ///
+    /// Original intersections receive fresh whole-subrange certificates inside
+    /// the retained uniqueness tube. Nested root-image contraction sharpens
+    /// their jets without replacing the original projection or selecting a new
+    /// root. Every tighter jet is independently certified over the entire span,
+    /// under the existing iteration, work and cancellation limits. Refinement
+    /// stops at the root-image arithmetic margin; point jets are not substituted.
     ///
     /// Implicit third derivatives are not supplied: their intervals are
     /// unbounded. Other fields enclose finite piecewise/one-sided derivatives,
@@ -481,15 +480,15 @@ impl PreparedValidatedCurve<'_> {
                     .source_parameters
                     .ok_or(ValidatedGeometryError::InvalidInput)?,
             );
-            let tube = certify(
+            let jet = refine_implicit_jet(
                 self.source.curve()?,
                 piece.projection,
                 part,
                 parameters,
+                &self.options,
                 budget,
                 cancel,
             )?;
-            let jet = implicit_jet(&tube)?;
             result = Some(match result {
                 None => jet,
                 Some(previous) => hull_jet(previous, jet),
@@ -1753,6 +1752,66 @@ fn certify(
     })
 }
 
+fn root_image_padding(image: ValidatedInterval) -> f64 {
+    64.0 * f64::EPSILON * (1.0 + image.magnitude())
+}
+
+fn root_image_domain(tube: &Tube) -> Result<[ValidatedInterval; 4], ValidatedGeometryError> {
+    let mut next = tube.domain;
+    for (i, bound) in next.iter_mut().enumerate() {
+        let image = tube.rooted_domain[i];
+        let radius = 0.51 * image.width() + root_image_padding(image);
+        *bound = tube.domain[i]
+            .intersection(inflated(image.midpoint(), radius))
+            .ok_or(ValidatedGeometryError::ConditioningFailure)?;
+    }
+    Ok(next)
+}
+
+fn refine_implicit_jet(
+    curve: &Curve,
+    projection: Projection,
+    parameter: ValidatedInterval,
+    domain: [ValidatedInterval; 4],
+    options: &ValidatedCurveOptions,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<ValidatedCurveJet, ValidatedGeometryError> {
+    let mut tube = certify(curve, projection, parameter, domain, budget, cancel)?;
+    let mut jet = implicit_jet(&tube)?;
+    for _ in 1..options.max_iterations {
+        budget.charge(1, cancel)?;
+        let next = root_image_domain(&tube)?;
+        // Use the existing root-image arithmetic margin, not a new geometric
+        // tolerance. Below that floor further contraction only chases padding.
+        if !(0..4).any(|i| {
+            let padding = root_image_padding(tube.rooted_domain[i]);
+            next[i].lower - tube.domain[i].lower > padding
+                || tube.domain[i].upper - next[i].upper > padding
+        }) {
+            break;
+        }
+        // The image contains the SAME selected roots for every real parameter
+        // in this whole span. The new domain remains inside the old uniqueness
+        // tube, and independent inclusion must succeed before its jet is used.
+        let refined = match certify(curve, projection, parameter, next, budget, cancel) {
+            Ok(tube) => tube,
+            Err(error) if retryable(error) => break,
+            Err(error) => return Err(error),
+        };
+        let refined_jet = match implicit_jet(&refined) {
+            Ok(jet) => jet,
+            Err(error) if retryable(error) => break,
+            Err(error) => return Err(error),
+        };
+        jet.position = intersect3(jet.position, refined_jet.position)?;
+        jet.first = intersect3(jet.first, refined_jet.first)?;
+        jet.second = intersect3(jet.second, refined_jet.second)?;
+        tube = refined;
+    }
+    Ok(jet)
+}
+
 fn refine_endpoint(
     curve: &Curve,
     projection: Projection,
@@ -2762,7 +2821,10 @@ fn reserve_native_vec<T>(
 #[cfg(test)]
 mod continuation_regressions {
     use super::*;
-    use crate::{BsplineSurface, Invertible, Line, NurbsSurface, Processor, TrimmedCurve, Vector4};
+    use crate::{
+        BsplineSurface, Invertible, Line, NurbsSurface, Processor, RevolutionSurface, TrimmedCurve,
+        Vector4,
+    };
 
     #[test]
     fn continuous_c0_sources_retain_whole_image_without_a_false_taylor_receipt() {
@@ -3087,6 +3149,108 @@ mod continuation_regressions {
             prepared_validated_curve(&pole, [0.0, 1.0], &options, &mut budget, &cancel),
             Err(ValidatedGeometryError::DenominatorContainsZero)
         ));
+    }
+
+    #[test]
+    fn restricted_original_cylinder_jets_resolve_green_sign_from_a_coarse_tube() {
+        let profile = Curve::TrimmedCurve(Processor::new(TrimmedCurve::new(
+            Box::new(Curve::Line(Line(
+                Point3::new(2.0, 0.0, -1.0),
+                Point3::new(2.0, 0.0, 0.0),
+            ))),
+            (1.0, 13.0),
+        )));
+        let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+            profile,
+            Point3::new(0.0, 0.0, 0.0),
+            crate::Vector3::unit_z(),
+        )))
+        .inverse();
+        let plane = Plane::new(
+            Point3::new(0.0, 0.0, 6.0),
+            Point3::new(1.0, 0.0, 6.0),
+            Point3::new(0.0, 1.0, 6.0),
+        );
+        let point = |angle: f64| Point3::new(2.0 * angle.cos(), 2.0 * angle.sin(), 6.0);
+        let endpoints = [point(0.69), point(0.71)];
+        let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+            Box::new(surface),
+            Box::new(Surface::Plane(plane)),
+            Box::new(Curve::Line(Line(endpoints[0], endpoints[1]))),
+            None,
+            None,
+        ));
+        let projection = Projection::BetweenPlanes {
+            parameter: [0.0, 1.0],
+            planes: endpoints.map(|point| CoordinatePlane {
+                normal: [0.0, 1.0, 0.0],
+                offset: point.y,
+            }),
+        };
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(2_000_000);
+        let options = ValidatedCurveOptions::default();
+        let requested = [0.49, 0.51];
+        let green = |jet: &ValidatedCurveJet| {
+            jet.position[0] * jet.first[1] - jet.position[1] * jet.first[0]
+        };
+        // A genuine original uniqueness tube, substantially wider than the
+        // requested subspan. Its coefficients and cached jets are unmodified.
+        let domain = [
+            ValidatedInterval::new(0.475, 0.925).unwrap(),
+            ValidatedInterval::new(6.0, 8.0).unwrap(),
+            ValidatedInterval::new(-1.0, 4.0).unwrap(),
+            ValidatedInterval::new(-1.0, 4.0).unwrap(),
+        ];
+        let tube = certify(
+            &curve,
+            projection,
+            interval_range([0.0, 1.0]).unwrap(),
+            domain,
+            &mut budget,
+            &cancel,
+        )
+        .unwrap();
+        let old_jet = implicit_jet(&tube).unwrap();
+        let prepared = PreparedValidatedCurve {
+            source: PreparedSource::Borrowed(&curve),
+            range: [0.0, 1.0],
+            pieces: vec![ValidatedCurvePiece {
+                parameter: [0.0, 1.0],
+                jet: old_jet,
+                source_parameters: Some(unflatten(tube.domain)),
+                contraction_bound: tube.rho,
+                surface_residual: subtract3(tube.surfaces[0].position, tube.surfaces[1].position),
+                projection,
+            }],
+            options,
+            mapped: None,
+        };
+        let jet = prepared.jet(requested, &mut budget, &cancel).unwrap();
+        assert!(
+            green(&jet).lower > 0.0,
+            "fresh whole-span Green sign must resolve"
+        );
+        let dy = endpoints[1].y - endpoints[0].y;
+        for t in [requested[0], 0.5, requested[1]] {
+            let y = endpoints[0].y + t * dy;
+            let x = (4.0 - y * y).sqrt();
+            let position = [x, y, 6.0];
+            let first = [-y * dy / x, dy, 0.0];
+            let second = [-4.0 * dy * dy / (x * x * x), 0.0, 0.0];
+            for axis in 0..3 {
+                for (bound, value) in [
+                    (jet.position[axis], position[axis]),
+                    (jet.first[axis], first[axis]),
+                    (jet.second[axis], second[axis]),
+                ] {
+                    assert!(
+                        bound.lower <= value && value <= bound.upper,
+                        "{bound:?} misses {value}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

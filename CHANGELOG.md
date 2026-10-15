@@ -16,6 +16,12 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Prepared intersection-curve jets contract nested original root images over
+  the complete requested subspan before enclosing first and second derivatives.
+  This resolves coarse uniqueness-tube Green-integral bounds without pointwise
+  sampling, source replacement or increased tolerances. Every retained jet
+  encloses the same original branch; optional retryable refinement keeps the
+  last valid enclosure, while cancellation and resource failures propagate.
 - Generated curve junction coverage freshly certifies shorter original endpoint
   subpaths when a retained whole-piece derivative cannot prove monotonicity.
   Interval-Newton contraction stays inside the same original uniqueness tube
