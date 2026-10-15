@@ -48,6 +48,9 @@ monstertruck 0.4.0.
 - Spatial trim projection returns a typed unsupported/refused result. Only
   parameter-only trims may use carrier projection; a refused original spatial
   trim tries direct retained-chart sampling instead of silently changing charts.
+- Complete plane-coverage refusals retain an optional fixed-size original
+  parameter box, including endpoint continuation and exhausted cell subdivision,
+  without changing numerical limits or error classification.
 
 - STEP `SURFACE_CURVE` and `SEAM_CURVE` retain their original explicit leader,
   kind, declared master and associated geometry, including closed restrictions.

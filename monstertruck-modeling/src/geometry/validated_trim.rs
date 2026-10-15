@@ -75,7 +75,7 @@ pub enum ParameterBoxClassification {
 }
 
 /// Failure to admit or query an authoritative closed covering chart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Error)]
 pub enum TrimDomainError {
     /// Native interval arithmetic or the cumulative work allowance refused the query.
     #[error(transparent)]

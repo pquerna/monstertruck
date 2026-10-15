@@ -32,7 +32,7 @@ pub struct ValidatedInterval {
 }
 
 /// Failure to establish a native interval geometry certificate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Error)]
 pub enum ValidatedGeometryError {
     /// Cooperative cancellation was requested.
     #[error("validated geometry query cancelled")]
@@ -62,10 +62,15 @@ pub enum ValidatedGeometryError {
     #[error("validated geometry inclusion unresolved")]
     Unresolved,
     /// Complete original-plane coverage remained unresolved at a named proof operation.
-    #[error("validated plane coverage unresolved during {operation}")]
+    #[error(
+        "validated plane coverage unresolved during {operation}; original parameter box {parameter_box:?}"
+    )]
     PlaneCoverageUnresolved {
         /// The bounded proof operation that failed, without changing its classification.
         operation: &'static str,
+        /// Actual unresolved closed box in the unchanged original covering chart.
+        /// Absent when the failing proof has no single original source cell.
+        parameter_box: Option<[[f64; 2]; 2]>,
     },
     /// Continuation could not establish a single connected local branch.
     #[error("ambiguous intersection continuation branch")]

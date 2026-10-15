@@ -156,7 +156,7 @@ pub fn validated_face_plane_coverage(
             budget,
             cancel,
         )
-        .map_err(|error| coverage_context(error, "complete original trim-root census"))?;
+        .map_err(|error| coverage_context(error, "complete original trim-root census", None))?;
         budget.charge(endpoint_bindings.len(), cancel)?;
         let mut endpoint_strata = Vec::new();
         endpoint_strata
@@ -191,11 +191,13 @@ pub fn validated_face_plane_coverage(
                 budget,
                 cancel,
             )
-            .map_err(|error| coverage_context(error, "original endpoint unique continuation"))?;
+            .map_err(|error| {
+                coverage_context(error, "original endpoint unique continuation", Some(cell))
+            })?;
             let receipt = match outcome {
                 endpoints::EndpointCoverage::Covered(receipt) => receipt,
                 endpoints::EndpointCoverage::Refused(operation, error) => {
-                    return Err(coverage_context(error, operation));
+                    return Err(coverage_context(error, operation, Some(cell)));
                 }
             };
             endpoints::retain_receipt(&mut endpoint_strata, receipt, budget, cancel)?;
@@ -293,12 +295,14 @@ pub fn validated_face_plane_coverage(
             if depth == options.max_depth {
                 return Err(ValidatedGeometryError::PlaneCoverageUnresolved {
                     operation: "complete original face cells / subdivision depth",
+                    parameter_box: Some(root_cell),
                 });
             }
             let (axis, middle) = split_cell(surface, root_cell, budget, cancel)?;
             if middle <= root_cell[axis][0] || middle >= root_cell[axis][1] {
                 return Err(ValidatedGeometryError::PlaneCoverageUnresolved {
                     operation: "complete original face cells / finite split",
+                    parameter_box: Some(root_cell),
                 });
             }
             let mut lower = root_cell;
@@ -340,9 +344,13 @@ fn matching_source_index(
 fn coverage_context(
     error: ValidatedGeometryError,
     operation: &'static str,
+    parameter_box: Option<[[f64; 2]; 2]>,
 ) -> ValidatedGeometryError {
     if error == ValidatedGeometryError::Unresolved {
-        ValidatedGeometryError::PlaneCoverageUnresolved { operation }
+        ValidatedGeometryError::PlaneCoverageUnresolved {
+            operation,
+            parameter_box,
+        }
     } else {
         error
     }

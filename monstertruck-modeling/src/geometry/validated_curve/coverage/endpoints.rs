@@ -462,7 +462,13 @@ pub fn validated_plane_trim_root_chart(
             }
             selected.ok_or(ValidatedGeometryError::Unresolved)
         })
-        .map_err(|error| coverage_context(error, "original trim chart / generated candidate start"))
+        .map_err(|error| {
+            coverage_context(
+                error,
+                "original trim chart / generated candidate start",
+                None,
+            )
+        })
 }
 
 pub(super) fn prepare_endpoints<'a>(

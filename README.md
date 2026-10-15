@@ -84,6 +84,9 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   or validated candidate tubes can discharge a cell before trim winding.
   Revolution enclosures form constant axial/radial Rodrigues coefficients before
   applying the original profile, preserving correlated full-period coordinates.
+  Unresolved plane coverage retains the actual original parameter box when a
+  single failing cell exists, without rewrapping its chart or changing the
+  resource, cancellation or conditioning error category.
 - Generated face/plane endpoints may share a proposed `CoordinatePlane` through
   `ValidatedFacePlaneSource.endpoint_coordinate_planes`. Exact common-coordinate
   root uniqueness, strict path monotonicity and complete joined continuation
