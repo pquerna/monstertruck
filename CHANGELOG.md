@@ -16,6 +16,12 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Generated curve junction coverage freshly certifies shorter original endpoint
+  subpaths when a retained whole-piece derivative cannot prove monotonicity.
+  Interval-Newton contraction stays inside the same original uniqueness tube
+  and retains the original projection. Complete subpath derivatives, outer
+  brackets, shared-root uniqueness and whole-cell coverage remain mandatory;
+  depth, iteration, work, storage and cancellation limits are unchanged.
 - Native face/plane coverage accepts explicit original-coedge endpoint bindings
   after the prepared candidate slice. Optional bounded endpoint closure certifies
   the actual original trim roots and unique transverse continuation, including

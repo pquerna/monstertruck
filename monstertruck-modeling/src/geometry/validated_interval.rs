@@ -96,7 +96,7 @@ pub enum ValidatedPlaneJunctionRejection {
     OuterLowerBracket,
     /// The actual upper outer endpoint does not bracket the cell.
     OuterUpperBracket,
-    /// Fresh shared-original-root uniqueness refused.
+    /// Common original-root uniqueness refused, including disjoint retained tubes.
     SharedRootUniqueness,
     /// Fresh whole-cell fixed-coordinate uniqueness refused.
     CoordinateUniqueness,
@@ -132,10 +132,10 @@ pub struct ValidatedPlaneJunctionWitness {
     /// The failed precondition or fresh original certificate.
     pub rejection: ValidatedPlaneJunctionRejection,
     /// Source-system axis for tube failures; world axis for path failures.
-    /// Shared-root failure uses the original UV axis when its old tubes separate.
+    /// Shared-root failure uses a source-system axis when its old tubes separate.
     pub coordinate: Option<u8>,
     /// Raw deciding bounds, or None when the stage has no scalar bounds.
-    /// Shared-root failure reports old UV tube separation, never a period shift.
+    /// Shared-root failure reports old tube separation, never a period shift.
     pub bounds: Option<[f64; 2]>,
     /// The actual retryable fresh-certificate refusal, if one was attempted.
     pub condition: Option<ValidatedPlaneJunctionCondition>,

@@ -102,9 +102,14 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   root uniqueness, strict path monotonicity and complete joined continuation
   must certify before their union covers an original cell, including a single
   candidate's own front/back junction. Overlapping tubes, nearby endpoint
-  positions or a closed guide alone do not establish a junction. Interpolated
-  coordinate residuals retain their common parameter coefficient before
-  interval evaluation, including when endpoint normals differ.
+  positions or a closed guide alone do not establish a junction.
+  Inconclusive whole-piece derivative caches trigger fresh original endpoint
+  subspan certificates inside the same retained uniqueness tubes. Restriction
+  and root-image contraction use the existing depth, iteration, work and
+  cancellation limits; full-span monotonicity, actual outer root brackets and
+  fresh common-root/whole-cell uniqueness remain mandatory.
+  Interpolated coordinate residuals retain their common parameter coefficient
+  before interval evaluation, including when endpoint normals differ.
 
 **Meshing**
 - Triangulation/tessellation pipeline rewritten; CDT trim-constraint handling rebuilt across [`b60b1604`](https://github.com/virtualritz/monstertruck/commit/b60b1604)/[`46b21f9f`](https://github.com/virtualritz/monstertruck/commit/46b21f9f)/[`f35d3b6d`](https://github.com/virtualritz/monstertruck/commit/f35d3b6d)/[`7c5ce2d2`](https://github.com/virtualritz/monstertruck/commit/7c5ce2d2) (skip conflicting, avoid invalid, preserve split, split through vertices).
