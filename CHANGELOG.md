@@ -16,6 +16,9 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Revolution `ToSameGeometry` conversion no longer reverses non-axis-parallel
+  source profiles. Original active parameters, evaluations, derivatives and
+  oriented normals survive the generic STEP surface construction and roundtrip.
 - Surface-parameter joint admission reuses native face-domain ordinary endpoint
   rectangles and singular-stratum completion. The complete connector image must
   remain within the original shared vertex's Euclidean physical allowance;

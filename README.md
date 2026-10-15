@@ -66,6 +66,10 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   period into the original trim range before clipping or rejecting it. Stored
   ranges and curve evaluations are unchanged.
 - STEP `Axis2Placement3d` guards parallel `axis`/`ref_direction`; revolved-line-to-cylinder conversion drops the spurious inversion (upstream [`524f5f53`](https://github.com/ricosjp/truck/commit/524f5f53)); rational trim boundaries preserved through the load path; inverted-processor sample alignment.
+- Revolution `ToSameGeometry` conversion preserves the original profile,
+  parameter gauge, derivatives and oriented normals for nonaxial profiles as
+  well as the cylinder specialization. Conversion does not invert source curves
+  to compensate for an author's material winding.
 - Certified original trim endpoint closure uses identified, material-oriented
   original coedges and their retained prepared boundary branches. Endpoint
   bindings are genealogy, not geometric proof: the

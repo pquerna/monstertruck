@@ -94,7 +94,7 @@ impl ToSameGeometry<Surface> for RevolutionSurface<Curve3D> {
     #[inline]
     fn to_same_geometry(&self) -> Surface {
         let default = || {
-            let (curve, origin, axis) = (self.entity_curve().inverse(), self.origin(), self.axis());
+            let (curve, origin, axis) = (self.entity_curve().clone(), self.origin(), self.axis());
             let processor = Processor::new(RevolutionSurface::by_revolution(
                 Box::new(curve),
                 origin,
@@ -155,6 +155,120 @@ fn to_same_geometry_revolution_of_axis_parallel_line_is_uninverted_cylinder() {
         }
         other => panic!("expected cylindrical surface, got {other:?}"),
     }
+}
+
+#[test]
+fn to_same_geometry_revolution_preserves_profile_gauge_and_oriented_normals() {
+    let mut reflected_profile = Processor::with_transform(
+        TrimmedCurve::new(UnitCircle::<Point3>::new(), (0.2, 1.1)),
+        Matrix4::from_cols(
+            Vector4::new(-1.0, 0.0, 0.0, 0.0),
+            Vector4::new(0.0, 0.0, 1.0, 0.0),
+            Vector4::new(0.0, -1.0, 0.0, 0.0),
+            Vector4::new(3.0, 0.0, 2.0, 1.0),
+        ),
+    );
+    reflected_profile.invert();
+    let profiles = [
+        Curve3D::Line(Line(Point3::new(5.0, 0.0, 0.0), Point3::new(3.0, 0.0, 8.0))),
+        Curve3D::Line(Line(Point3::new(3.0, 0.0, 8.0), Point3::new(0.0, 0.0, 8.0))),
+        Curve3D::BsplineCurve(BsplineCurve::new(
+            KnotVector::bezier_knot(2),
+            vec![
+                Point3::new(3.0, 0.0, 1.0),
+                Point3::new(4.0, 0.0, 2.0),
+                Point3::new(2.0, 0.0, 4.0),
+            ],
+        )),
+        Curve3D::Conic(Conic3D::Ellipse(reflected_profile)),
+    ];
+    for profile in profiles {
+        for profile in [profile.clone(), profile.inverse()] {
+            for axis in [Vector3::unit_z(), -Vector3::unit_z()] {
+                let original = RevolutionSurface::by_revolution(
+                    profile.clone(),
+                    Point3::new(0.5, -0.5, 0.0),
+                    axis,
+                );
+                let lifted: Surface = original.to_same_geometry();
+                assert_eq!(lifted.parameter_range(), original.parameter_range());
+                assert_eq!(lifted.period_u(), original.period_u());
+                assert_eq!(lifted.period_v(), original.period_v());
+                let (start, end) = profile.range_tuple();
+                for (fraction, v) in [(0.1, 0.2), (0.37, 1.1), (0.9, 4.7)] {
+                    let u = start + fraction * (end - start);
+                    assert_near!(lifted.evaluate(u, v), original.evaluate(u, v));
+                    assert_near!(lifted.derivative_u(u, v), original.derivative_u(u, v));
+                    assert_near!(lifted.derivative_v(u, v), original.derivative_v(u, v));
+                    assert_near!(lifted.normal(u, v), original.normal(u, v));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn revolved_step_frustum_keeps_outward_caps_and_walls_through_step_roundtrip() {
+    use crate::step::{
+        load::Table,
+        save::{CompleteStepDisplay, StepModel},
+    };
+    use monstertruck_modeling::builder;
+    monstertruck_topology::prelude!(Point3, Curve3D, Surface);
+
+    fn assert_outward_material(solid: &Solid) {
+        assert_eq!(solid.boundaries().len(), 1);
+        solid.boundaries()[0].check_solid_boundary().unwrap();
+        let mut caps = [0; 2];
+        let mut walls = 0;
+        for face in solid.face_iter() {
+            let surface = face.oriented_surface();
+            if face.edge_iter().all(|edge| edge.front().point().z == 8.0) {
+                assert!(surface.normal(0.31, 0.43).z > 0.999);
+                caps[1] += 1;
+            } else if face.edge_iter().all(|edge| edge.front().point().z == 0.0) {
+                assert!(surface.normal(0.31, 0.43).z < -0.999);
+                caps[0] += 1;
+            } else {
+                let point = surface.evaluate(0.31, 0.43);
+                let radial = Vector3::new(point.x, point.y, 0.0);
+                assert!(surface.normal(0.31, 0.43).dot(radial) > 0.0);
+                walls += 1;
+            }
+        }
+        assert_eq!(caps, [4, 4]);
+        assert_eq!(walls, 4);
+    }
+
+    let vertices = builder::vertices([
+        (0.0, 0.0, 8.0),
+        (3.0, 0.0, 8.0),
+        (5.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+    ]);
+    let meridian: Wire = vertices
+        .windows(2)
+        .map(|pair| builder::line(&pair[0], &pair[1]))
+        .collect();
+    let solid = Solid::new(vec![builder::revolve_wire(
+        &meridian,
+        Point3::origin(),
+        Vector3::unit_z(),
+        builder::SweepAngle::Closed,
+        4,
+    )]);
+    assert_outward_material(&solid);
+    let compressed = solid.compress();
+    let step =
+        CompleteStepDisplay::new(StepModel::from(&compressed), Default::default()).to_string();
+    let table = Table::from_step(&step).unwrap();
+    assert_eq!(table.manifold_solid_brep.len(), 1);
+    let (compressed, reports) = table
+        .to_compressed_solid_reported(table.manifold_solid_brep.values().next().unwrap())
+        .unwrap();
+    assert!(reports.iter().all(|report| report.is_lossless()));
+    let restored = Solid::extract(compressed).unwrap();
+    assert_outward_material(&restored);
 }
 
 #[test]

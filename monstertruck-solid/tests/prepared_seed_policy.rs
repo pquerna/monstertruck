@@ -253,3 +253,210 @@ fn explicit_options_validate_both_tolerances() {
         ));
     }
 }
+
+fn original_frustum() -> Solid {
+    // The open meridian and four sectors are the original source construction,
+    // including the finite quadrant caps rather than a replacement disk face.
+    let vertices = builder::vertices([
+        (0.0, 0.0, 0.0),
+        (5.0, 0.0, 0.0),
+        (3.0, 0.0, 8.0),
+        (0.0, 0.0, 8.0),
+    ]);
+    let meridian: Wire = vertices
+        .windows(2)
+        .map(|pair| builder::line(&pair[0], &pair[1]))
+        .collect();
+    // Positive revolution of the listed meridian points inward. Define the
+    // outward material operand before freezing any source identity or geometry.
+    let meridian = meridian.inverse();
+    let shell = builder::revolve_wire(
+        &meridian,
+        Point3::origin(),
+        Vector3::unit_z(),
+        builder::SweepAngle::Closed,
+        4,
+    );
+    Solid::new(vec![shell]).mapped(
+        |point| *point,
+        Clone::clone,
+        |surface| {
+            let Surface::RevolutionSurface(processor) = surface else {
+                return surface.clone();
+            };
+            let Curve::Line(line) = processor.entity().entity_curve() else {
+                panic!("the original meridian contains only lines");
+            };
+            let mut replacement = if (line.1.z - line.0.z).abs() < 1.0e-10 {
+                Surface::Plane(Plane::new(line.0, line.1, line.0 + Vector3::unit_y()))
+            } else {
+                Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+                    Curve::Line(Line(
+                        Point3::new(5.0, 0.0, 0.0),
+                        Point3::new(4.75, 0.0, 1.0),
+                    )),
+                    Point3::origin(),
+                    Vector3::unit_z(),
+                )))
+            };
+            let uv = replacement
+                .search_parameter(surface.subs(0.31, 0.43), None, 100)
+                .expect("the original complete carrier contains its source quadrant");
+            if surface
+                .normal(0.31, 0.43)
+                .dot(replacement.normal(uv.0, uv.1))
+                < 0.0
+            {
+                replacement.invert();
+            }
+            replacement
+        },
+    )
+}
+
+fn assert_original_frustum_caps(source: Solid) {
+    use monstertruck_solid::BooleanOperand;
+
+    assert!(source.is_geometric_consistent());
+    source.boundaries()[0].check_solid_boundary().unwrap();
+    for face in source.face_iter() {
+        let surface = face.oriented_surface();
+        match surface {
+            Surface::Plane(plane) => {
+                let height = face.edge_iter().next().unwrap().front().point().z;
+                let expected = if height == 0.0 { -1.0 } else { 1.0 };
+                assert!(
+                    plane.normal().z * expected > 0.999,
+                    "positive source cap at {height} must face out of the original material"
+                );
+            }
+            Surface::RevolutionSurface(_) => {
+                let uv = surface
+                    .search_parameter(Point3::new(4.0, 0.0, 4.0), None, 100)
+                    .unwrap();
+                assert!(
+                    surface.normal(uv.0, uv.1).x > 0.0,
+                    "positive source cone must face radially out of the original material"
+                );
+            }
+            _ => panic!("the original frustum has only planar and conical faces"),
+        }
+    }
+    let snapshot = serde_json::to_vec(&source.boundaries()[0].compress()).unwrap();
+    let identities = source
+        .face_iter()
+        .map(|face| (face.id(), face.orientation()))
+        .collect::<Vec<_>>();
+    let cancel = AtomicBool::new(false);
+    let budget = BooleanWorkBudget::new(10_000_000);
+    let prepared = prepare_boolean_source_counted_with_options(
+        &source,
+        BooleanPreparationOptions {
+            geometric_tolerance: GEOMETRIC_TOLERANCE,
+            seed_tolerance: SEED_TOLERANCE,
+        },
+        limits(),
+        &cancel,
+        &budget,
+    )
+    .unwrap();
+    for height in [0.01, 4.0, 7.99, 8.01] {
+        let clip = primitive::cuboid(BoundingBox::from_iter([
+            Point3::new(-6.0, -6.0, height),
+            Point3::new(6.0, 6.0, 9.0),
+        ]));
+        let result = and_prepared_with_provenance_counted_with_query_bytes(
+            &prepared,
+            &clip,
+            &cancel,
+            &budget,
+            limits().max_prepared_bytes - prepared.retained_bytes(),
+        )
+        .unwrap_or_else(|error| panic!("original frustum section at {height}: {error:?}"));
+        if height > 8.0 {
+            assert!(result.solid.boundaries().is_empty());
+            assert!(result.face_origins.is_empty());
+            continue;
+        }
+        assert_eq!(result.solid.boundaries().len(), 1);
+        let shell = &result.solid.boundaries()[0];
+        shell.check_solid_boundary().unwrap();
+        assert!(result.solid.is_geometric_consistent());
+        for vertex in shell.vertex_iter() {
+            let point = vertex.point();
+            assert!(
+                point.z >= height - GEOMETRIC_TOLERANCE && point.z <= 8.0 + GEOMETRIC_TOLERANCE,
+                "original frustum section at {height} retained point {point:?} outside [{height}, 8]"
+            );
+        }
+        let caps = shell
+            .iter()
+            .filter(|face| {
+                face.edge_iter()
+                    .all(|edge| (edge.front().point().z - 8.0).abs() < GEOMETRIC_TOLERANCE)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            caps.len(),
+            4,
+            "every original top quadrant survives at {height}"
+        );
+        for cap in caps {
+            assert!(cap.oriented_surface().normal(0.0, 0.0).z > 0.999);
+            let origin = &result
+                .face_origins
+                .iter()
+                .find(|origin| origin.output_face == cap.id())
+                .unwrap()
+                .source;
+            assert_eq!(origin.operand, BooleanOperand::Source);
+            let original = &source.boundaries()[origin.shell_index][origin.face_index];
+            assert_eq!(origin.face_id, original.id());
+            assert_eq!(origin.orientation, original.orientation());
+            assert_eq!(
+                serde_json::to_value(cap.surface()).unwrap(),
+                serde_json::to_value(original.surface()).unwrap()
+            );
+        }
+        assert_eq!(
+            shell
+                .iter()
+                .filter(|face| { matches!(face.surface(), Surface::RevolutionSurface(_)) })
+                .count(),
+            4,
+            "all four actual lateral strips survive at {height}"
+        );
+        assert!(
+            result
+                .face_origins
+                .iter()
+                .any(|origin| { origin.source.operand == BooleanOperand::Other })
+        );
+    }
+    assert_eq!(
+        serde_json::to_vec(&source.boundaries()[0].compress()).unwrap(),
+        snapshot
+    );
+    assert_eq!(
+        source
+            .face_iter()
+            .map(|face| (face.id(), face.orientation()))
+            .collect::<Vec<_>>(),
+        identities
+    );
+}
+
+#[test]
+fn original_frustum_caps_and_lateral_strips_keep_native_incidence_and_provenance() {
+    assert_original_frustum_caps(original_frustum());
+}
+
+#[test]
+fn original_frustum_caps_keep_incidence_when_orientation_is_in_the_carrier_chart() {
+    let source = original_frustum();
+    let shell = source.boundaries()[0]
+        .iter()
+        .map(|face| Face::new(face.boundaries(), face.oriented_surface()))
+        .collect();
+    assert_original_frustum_caps(Solid::new(vec![shell]));
+}
