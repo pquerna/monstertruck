@@ -11,6 +11,12 @@ pub enum ExactConversionError {
         "STEP {family} curve has an unbounded, degenerate or unrepresentable conversion chart."
     )]
     CurveDomain { family: &'static str },
+    /// An edge vertex is incompatible with its original spatial line carrier.
+    #[error("STEP LINE edge vertex does not lie on its original LINE carrier.")]
+    LineEdgeVertexOffCarrier,
+    /// An edge restriction contradicts the original spatial line direction.
+    #[error("STEP LINE edge restriction contradicts its declared same_sense direction.")]
+    LineEdgeSense,
     /// Transforming a parameter curve requires a nonlinear composition.
     #[error("STEP parameter curve requires an exact nonlinear carrier-chart composition.")]
     NonlinearParameterCurveChart,
@@ -69,7 +75,7 @@ pub enum CurveParameterMapKind {
 pub enum CurveParameterDomain {
     /// Bare analytic primitive; its `0..1`/`0..TAU` native range is not authority.
     Unbounded,
-    /// An explicit trim, polyline or spline declares a finite active interval.
+    /// An explicit trim, edge restriction, polyline or spline declares finite bounds.
     Bounded,
 }
 

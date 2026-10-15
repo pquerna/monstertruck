@@ -24,6 +24,12 @@ monstertruck 0.4.0.
   callers still need whole original PCURVE/surface correspondence evidence.
   Genuine `INTERSECTION_CURVE` remains implicit through nested restrictions and
   reports unavailable leader correspondence until validated continuation.
+- STEP spatial `LINE` edges retain their original origin and semantic vector,
+  with a finite restriction in the original parameter gauge. Edge vertices no
+  longer replace the source carrier with a unit-parameter chord. Displaced or
+  wrongly directed original carriers return typed conversion errors; accepted
+  vertex residuals do not fit or move the retained line. Origin and vector stay
+  separate so large source coordinates cannot erase a small valid direction.
 - Validated UV geometry follows native `Matrix3<Point2>` affine upper-row
   semantics rather than inventing perspective division. Exact endpoints,
   regularity, Taylor enclosures and scalar projections preserve original

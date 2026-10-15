@@ -9,7 +9,7 @@ use std::ops::Deref;
 pub enum SourceParameterGauge {
     /// A synthetic restriction has no independent raw STEP declaration.
     Internal,
-    /// A declared trim retains its canonical source chart and selected basis span.
+    /// A source restriction retains its original chart and selected basis span.
     Declared {
         /// Canonical raw STEP parameter to decoded internal parameter.
         raw_to_internal: ParameterChart,

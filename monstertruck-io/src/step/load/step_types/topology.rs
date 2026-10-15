@@ -4,6 +4,7 @@
 //! entity's references against the entity table while loading.
 
 use super::*;
+use crate::step::{ParameterChart, ParameterEnclosure};
 
 /// `vertex_point`
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Holder)]
@@ -186,12 +187,7 @@ impl EdgeCurve {
         same_sense: bool,
     ) -> Result<Curve3D, StepConvertingError> {
         let mut curve = match curve {
-            CurveAny::Line(line) => {
-                // This legacy edge path parameterizes its declared endpoints,
-                // but must not silently admit an invalid source VECTOR.
-                let _ = Vector3::try_from(&line.dir)?;
-                Curve3D::Line(Line(p, q))
-            }
+            CurveAny::Line(line) => Self::restricted_original_line(line, p, q)?,
             CurveAny::BoundedCurve(b) => b.as_ref().try_into()?,
             CurveAny::TrimmedCurve(curve) => curve.as_ref().try_into()?,
             CurveAny::Conic(curve) => match curve.as_ref() {
@@ -400,6 +396,97 @@ impl EdgeCurve {
         }
         curve.raw_parameter_gauge()?;
         Ok(curve)
+    }
+
+    fn restricted_original_line(
+        line: &Line,
+        p: Point3,
+        q: Point3,
+    ) -> Result<Curve3D, StepConvertingError> {
+        if line.pnt.coordinates.len() != 3 {
+            return Err(VectorSemanticError::InvalidDimension {
+                expected: 3,
+                actual: line.pnt.coordinates.len(),
+            }
+            .into());
+        }
+        let origin = Point3::from(&line.pnt);
+        let vector = Vector3::try_from(&line.dir)?;
+        if (0..3).any(|axis| !origin[axis].is_finite()) {
+            return Err(VectorSemanticError::NonFinite.into());
+        }
+        // Keep the original origin and vector separate: adding them to encode
+        // two line points can erase a valid vector at a large source origin.
+        let basis = Box::new(Curve3D::Line(geom::Line(
+            Point3::origin(),
+            Point3::from_vec(vector),
+        )));
+        let axis = (0..3).fold(0, |best, axis| {
+            if vector[axis].abs() > vector[best].abs() {
+                axis
+            } else {
+                best
+            }
+        });
+        let parameter = |point: Point3| -> Result<f64, StepConvertingError> {
+            let parameter = (point[axis] - origin[axis]) / vector[axis];
+            // Certify the residual on the original carrier before rounded
+            // world evaluation can hide cancellation at a large source origin.
+            let residual_squared = (0..3).try_fold(0.0, |sum, axis| {
+                let product = parameter * vector[axis];
+                let error = parameter.mul_add(vector[axis], -product);
+                let product = ParameterEnclosure::new(
+                    if error < 0.0 {
+                        product.next_down()
+                    } else {
+                        product
+                    },
+                    if error > 0.0 {
+                        product.next_up()
+                    } else {
+                        product
+                    },
+                )?;
+                let residual = ParameterEnclosure::point(origin[axis])?
+                    .sum(ParameterEnclosure::point(-point[axis])?)?
+                    .sum(product)?;
+                let absolute = residual.lower.abs().max(residual.upper.abs());
+                let squared = (absolute * absolute).next_up();
+                Some((sum + squared).next_up())
+            });
+            if !parameter.is_finite()
+                || !residual_squared
+                    .is_some_and(|squared| squared <= (TOLERANCE * TOLERANCE).next_down())
+            {
+                Err(step_geometry::ExactConversionError::LineEdgeVertexOffCarrier.into())
+            } else {
+                Ok(parameter)
+            }
+        };
+        let range = (parameter(p)?, parameter(q)?);
+        if range.1 <= range.0 {
+            return Err(step_geometry::ExactConversionError::LineEdgeSense.into());
+        }
+        let enclosure = ParameterEnclosure::new(range.0, range.1)
+            .ok_or(step_geometry::ExactConversionError::UnrepresentableTrimParameterChart)?;
+        let bounds = [
+            ParameterEnclosure::point(range.0)
+                .ok_or(step_geometry::ExactConversionError::UnrepresentableTrimParameterChart)?,
+            ParameterEnclosure::point(range.1)
+                .ok_or(step_geometry::ExactConversionError::UnrepresentableTrimParameterChart)?,
+        ];
+        let restricted = Processor::with_transform(
+            TrimmedCurve::new(basis, range),
+            Matrix4::from_translation(origin.to_vec()),
+        );
+        Ok(Curve3D::TrimmedCurve(SourceTrimmedCurve::declared(
+            restricted,
+            ParameterChart::identity(),
+            enclosure,
+            enclosure,
+            bounds,
+            bounds,
+        )))
     }
 }
 

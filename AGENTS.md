@@ -42,6 +42,11 @@ requirements and negative unrelated-carrier/invalid-endpoint regressions.
 Ordinary curve containment preserves the carrier's complete Processor transform
 and inversion and checks residuals in world coordinates. Qualify posed, inverted
 and affine carriers and centered/placed first-layer sections, not midplanes alone.
+Spatial STEP `LINE` edges retain the original origin and semantic vector with
+their directed finite raw-parameter restriction. Vertex residual admission is
+not permission to replace the source carrier with an endpoint chord. Preserve
+the raw gauge through native conversion and reject incompatible carriers or
+edge sense explicitly.
 
 This fork uses the public project-specific rules below. The private `.blueprints`
 agent-guidance submodule is not required to clone or build the public source.
