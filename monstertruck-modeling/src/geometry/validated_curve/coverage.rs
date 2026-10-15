@@ -565,6 +565,13 @@ fn candidate_covers(
     mut diagnostic: Option<CandidateDiagnostics<'_>>,
 ) -> Result<bool, ValidatedGeometryError> {
     let (budget, cancel) = execution;
+    budget.charge(1, cancel)?;
+    if let Some(graph) = candidate.source.graph() {
+        // Invertible extrusion/plane coefficients give exactly one plane zero
+        // for each original profile parameter. The complete prepared graph
+        // covers this closed u-image, independently of spatial tube overlap.
+        return Ok(graph.covers(source_index, cell));
+    }
     let (_, _, leader) = carriers(candidate.source.curve()?)?;
     let plane_parameters = plane_parameters(plane, position)?;
     let source = [interval_range(cell[0])?, interval_range(cell[1])?];
@@ -1089,8 +1096,7 @@ fn certified_endpoint_subpath(
     // The initial domain is the old uniqueness tube. Later domains contain
     // its proved root images and remain nested inside it. Restrict only the
     // native parameter span and retain the original projection and branch.
-    let tube = match certify(
-        candidate.source.curve()?,
+    let tube = match super::Certification::Prepared(candidate).certify(
         original.projection,
         parameter,
         domain,
@@ -1122,8 +1128,8 @@ fn certified_endpoint_subpath(
             parameter: range,
             jet,
             source_parameters: Some(unflatten(tube.domain)),
-            contraction_bound: tube.rho,
-            surface_residual: subtract3(tube.surfaces[0].position, tube.surfaces[1].position),
+            contraction_bound: tube.contraction_bound(),
+            surface_residual: tube.surface_residual(),
             projection: original.projection,
         },
         next_domain,

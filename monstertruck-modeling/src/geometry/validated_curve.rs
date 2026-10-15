@@ -2,10 +2,11 @@
 //!
 //! A prepared intersection is a unique regular source-surface root in a
 //! validated connected chart tube. C2 leaders retain the native equation
-//! `L'(t) dot ((S0 + S1)/2 - L(t)) = 0`. Nonsmooth leaders instead propose one
-//! fixed plane at every native knot; neighboring plane equations interpolate
-//! linearly in native `t`. Both incident pieces use the identical joint plane,
-//! so continuation proves a common exact root rather than overlapping samples.
+//! `L'(t) dot ((S0 + S1)/2 - L(t)) = 0`. Original nonsmooth leaders instead
+//! propose fixed planes at native knots; generated face-plane queries may use
+//! conditioned groups of those knot coordinates. Neighboring equations share
+//! the identical joint plane and interpolate linearly in native `t`, so
+//! continuation proves a common exact root rather than overlapping samples.
 //! Guide geometry only proposes coordinates, never intersection containment.
 //! This immutable prepared representation never snaps endpoints, switches to
 //! nearest-point projection, or returns a leader on Newton failure.
@@ -33,6 +34,7 @@ use std::mem::size_of;
 use std::sync::atomic::AtomicBool;
 
 mod coverage;
+mod extrusion;
 pub use coverage::{
     ValidatedPlaneCoverage, ValidatedPlaneCoverageOptions, ValidatedPlaneTrimEndpoint,
     ValidatedPlaneTrimEndpointBinding, validated_face_plane_coverage,
@@ -76,6 +78,8 @@ pub struct ValidatedCurvePiece {
     /// Direct source chart boxes; mapped/explicit views retain no single tube here.
     pub source_parameters: Option<[[ValidatedInterval; 2]; 2]>,
     /// Outward bound on the preconditioned Jacobian defect infinity norm.
+    /// Constructive algebraic elimination reports zero, without claiming an
+    /// interior four-variable Krawczyk certificate.
     pub contraction_bound: f64,
     /// Source-surface difference enclosure at the enclosed branch roots.
     pub surface_residual: [ValidatedInterval; 3],
@@ -118,6 +122,7 @@ enum PreparedSource<'a> {
     Owned {
         curve: Box<Curve>,
         bytes: usize,
+        authority: OwnedSourceAuthority,
     },
     Mapped {
         transform: Matrix4,
@@ -125,7 +130,22 @@ enum PreparedSource<'a> {
         orientation: bool,
     },
 }
+#[derive(Debug)]
+enum OwnedSourceAuthority {
+    Original,
+    Extrusion(Box<extrusion::Graph>),
+}
+
 impl PreparedSource<'_> {
+    fn graph(&self) -> Option<&extrusion::Graph> {
+        match self {
+            Self::Owned {
+                authority: OwnedSourceAuthority::Extrusion(graph),
+                ..
+            } => Some(graph),
+            _ => None,
+        }
+    }
     fn curve(&self) -> Result<&Curve, ValidatedGeometryError> {
         match self {
             Self::Borrowed(curve) => Ok(curve),
@@ -147,6 +167,45 @@ impl PreparedSource<'_> {
         match self {
             Self::Borrowed(_) | Self::Mapped { .. } => 0,
             Self::Owned { bytes, .. } => *bytes,
+        }
+    }
+}
+
+/// A fresh certificate borrows its existing immutable source authority.
+#[derive(Clone, Copy)]
+enum Certification<'a, 'source> {
+    Original(&'a Curve),
+    Prepared(&'a PreparedValidatedCurve<'source>),
+}
+impl Certification<'_, '_> {
+    fn certify(
+        self,
+        projection: Projection,
+        parameter: ValidatedInterval,
+        domain: [ValidatedInterval; 4],
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Tube, ValidatedGeometryError> {
+        match (self, projection) {
+            (Self::Prepared(prepared), Projection::SourceProfile) => prepared
+                .source
+                .graph()
+                .ok_or(ValidatedGeometryError::InvalidInput)?
+                .certify(prepared.source.curve()?, parameter, budget, cancel),
+            (Self::Original(_), Projection::SourceProfile) => {
+                Err(ValidatedGeometryError::InvalidInput)
+            }
+            (Self::Original(curve), _) => {
+                certify(curve, projection, parameter, domain, budget, cancel)
+            }
+            (Self::Prepared(prepared), _) => certify(
+                prepared.source.curve()?,
+                projection,
+                parameter,
+                domain,
+                budget,
+                cancel,
+            ),
         }
     }
 }
@@ -189,6 +248,7 @@ impl CoordinatePlane {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Projection {
     Native,
+    SourceProfile,
     BetweenPlanes {
         parameter: [f64; 2],
         planes: [CoordinatePlane; 2],
@@ -258,6 +318,9 @@ impl PreparedValidatedCurve<'_> {
             let mapped = reflected_trim_range(orientation, active, range)?;
             return child.is_smooth_on([mapped.lower, mapped.upper], budget, cancel);
         }
+        if let Some(graph) = self.source.graph() {
+            return graph.is_smooth(self.source.curve()?, range, budget, cancel);
+        }
         if !matches!(self.source.curve()?, Curve::IntersectionCurve(_)) {
             return curve_span_smooth(self.source.curve()?, range, 1, false, budget, cancel);
         }
@@ -284,8 +347,7 @@ impl PreparedValidatedCurve<'_> {
                     .source_parameters
                     .ok_or(ValidatedGeometryError::InvalidInput)?,
             );
-            let tube = certify(
-                self.source.curve()?,
+            let tube = Certification::Prepared(self).certify(
                 piece.projection,
                 part,
                 original,
@@ -354,8 +416,7 @@ impl PreparedValidatedCurve<'_> {
                 let mut position = piece.jet.position;
                 for _ in 0..self.options.max_iterations {
                     budget.charge(1, cancel)?;
-                    let tube = match certify(
-                        self.source.curve()?,
+                    let tube = match Certification::Prepared(self).certify(
                         piece.projection,
                         part,
                         domain,
@@ -368,10 +429,7 @@ impl PreparedValidatedCurve<'_> {
                         Err(error) if retryable(error) => break,
                         Err(error) => return Err(error),
                     };
-                    position = intersect3(
-                        position,
-                        intersect3(tube.surfaces[0].position, tube.surfaces[1].position)?,
-                    )?;
+                    position = intersect3(position, tube.position()?)?;
                     let next = root_image_domain(&tube)?;
                     if next == domain {
                         break;
@@ -481,7 +539,7 @@ impl PreparedValidatedCurve<'_> {
                     .ok_or(ValidatedGeometryError::InvalidInput)?,
             );
             let jet = refine_implicit_jet(
-                self.source.curve()?,
+                Certification::Prepared(self),
                 piece.projection,
                 part,
                 parameters,
@@ -688,7 +746,7 @@ impl PreparedValidatedCurve<'_> {
                     .ok_or(ValidatedGeometryError::InvalidInput)?,
             );
             let (_, enclosure) = refine_endpoint(
-                self.source.curve()?,
+                Certification::Prepared(self),
                 piece.projection,
                 part,
                 initial,
@@ -827,7 +885,11 @@ fn prepare_owned_leaf(
         (prepared.range, prepared.pieces)
     };
     Ok(PreparedValidatedCurve {
-        source: PreparedSource::Owned { curve, bytes },
+        source: PreparedSource::Owned {
+            curve,
+            bytes,
+            authority: OwnedSourceAuthority::Original,
+        },
         range,
         pieces,
         options: *options,
@@ -954,7 +1016,10 @@ fn prepare_validated_curve<'a>(
 struct SourcePreparation {
     anchor: Option<ValidatedFacePlaneSourceAnchor>,
     endpoint_coordinate_planes: [Option<CoordinatePlane>; 2],
+    coalesce_coordinates: bool,
 }
+
+type CoordinateSpans = Vec<([f64; 2], Projection)>;
 
 fn prepare_unmapped_curve<'a>(
     curve: &'a Curve,
@@ -992,11 +1057,12 @@ fn prepare_unmapped_curve<'a>(
         });
     }
     let (surface0, surface1, leader) = carriers(curve)?;
-    let coordinate_spans = coordinate_spans(
+    let (coordinate_spans, coalesced_coordinates) = coordinate_spans(
         leader,
         range,
         options.max_retained_bytes - size_of::<PreparedValidatedCurve<'_>>(),
-        source_preparation.endpoint_coordinate_planes,
+        &source_preparation,
+        options.max_depth,
         budget,
         cancel,
     )?;
@@ -1053,7 +1119,7 @@ fn prepare_unmapped_curve<'a>(
     }
     let initial = initial.ok_or(last_error)?;
     let (mut anchor, _) = refine_endpoint(
-        curve,
+        Certification::Original(curve),
         first_projection,
         ValidatedInterval::point(anchor_parameter),
         initial.domain,
@@ -1101,19 +1167,36 @@ fn prepare_unmapped_curve<'a>(
                             + 2.0 * anchor[i].width();
                     inflated(center[i], radius).hull(anchor[i])
                 });
-                certify(curve, projection, t, domain, budget, cancel)
+                let tube = certify(curve, projection, t, domain, budget, cancel)?;
+                let jet = if coalesced_coordinates {
+                    let jet = implicit_jet(&tube)?;
+                    if !jet
+                        .first
+                        .into_iter()
+                        .any(|value| value.lower > 0.0 || value.upper < 0.0)
+                    {
+                        return Err(ValidatedGeometryError::NonTransverse);
+                    }
+                    Some(jet)
+                } else {
+                    None
+                };
+                Ok((tube, jet))
             });
             match attempt {
-                Ok(tube) => {
+                Ok((tube, jet)) => {
                     if !(0..4).all(|i| {
                         tube.domain[i].lower <= anchor[i].lower
                             && anchor[i].upper <= tube.domain[i].upper
                     }) {
                         return Err(ValidatedGeometryError::AmbiguousBranch);
                     }
-                    let jet = implicit_jet(&tube)?;
+                    let jet = match jet {
+                        Some(jet) => jet,
+                        None => implicit_jet(&tube)?,
+                    };
                     let (next, _) = refine_endpoint(
-                        curve,
+                        Certification::Original(curve),
                         projection,
                         ValidatedInterval::point(part[usize::from(!from_back)]),
                         tube.domain,
@@ -1133,11 +1216,8 @@ fn prepare_unmapped_curve<'a>(
                         parameter: part,
                         jet,
                         source_parameters: Some(unflatten(tube.domain)),
-                        contraction_bound: tube.rho,
-                        surface_residual: subtract3(
-                            tube.surfaces[0].position,
-                            tube.surfaces[1].position,
-                        ),
+                        contraction_bound: tube.contraction_bound(),
+                        surface_residual: tube.surface_residual(),
                         projection,
                     });
                     anchor = next;
@@ -1459,12 +1539,26 @@ pub enum ValidatedFacePlaneSourceAnchor {
     Front([f64; 2]),
     /// Start at its back and continue toward the front in the same native gauge.
     Back([f64; 2]),
+    /// Both actual original endpoint charts, still proposals rather than proof.
+    Both {
+        /// Original chart at the ascending native range's front.
+        front: [f64; 2],
+        /// Original chart at its back, without a gauge or period shift.
+        back: [f64; 2],
+    },
 }
 
 impl ValidatedFacePlaneSourceAnchor {
+    fn finite(self) -> bool {
+        match self {
+            Self::Front(chart) | Self::Back(chart) => chart.into_iter().all(f64::is_finite),
+            Self::Both { front, back } => front.into_iter().chain(back).all(f64::is_finite),
+        }
+    }
     fn chart(self) -> [f64; 2] {
         match self {
             Self::Front(chart) | Self::Back(chart) => chart,
+            Self::Both { front, .. } => front,
         }
     }
 }
@@ -1496,6 +1590,18 @@ pub struct ValidatedFacePlaneSource<'a> {
 /// An actual original trim-root chart proposal avoids choosing an unrelated
 /// periodic sheet through nearest-point inversion at either native endpoint.
 /// The proposal never substitutes for the same whole-range interval proof.
+///
+/// Generated coordinate proposals may combine adjacent guide-knot spans.
+/// Guide jets only condition those proposals: original-carrier inclusion,
+/// anchor continuity and final whole-face coverage remain mandatory. A refused
+/// coarse continuation retries the original knot coordinates with the same
+/// budget; original-master preparation is unchanged.
+///
+/// For a transverse original extrusion with genuinely bounded profile support,
+/// two actual endpoint chart proposals can instead certify a complete
+/// affine-profile graph by invertible plane
+/// coefficients. Its jets and coverage borrow the same owned source; this is
+/// distinct authority, not a fictitious interior four-variable inclusion.
 pub fn prepared_face_plane_curve(
     guide: &Curve,
     source: ValidatedFacePlaneSource<'_>,
@@ -1520,7 +1626,7 @@ pub fn prepared_face_plane_curve(
         || options.parameter_radius <= 0.0
         || !options.endpoint_tolerance.is_finite()
         || options.endpoint_tolerance <= 0.0
-        || anchor.is_some_and(|anchor| !anchor.chart().into_iter().all(f64::is_finite))
+        || anchor.is_some_and(|anchor| !anchor.finite())
         || endpoint_coordinate_planes
             .into_iter()
             .flatten()
@@ -1565,7 +1671,17 @@ pub fn prepared_face_plane_curve(
         .max_retained_bytes
         .checked_sub(bytes)
         .ok_or(ValidatedGeometryError::ResourceLimit)?;
-    if bounded.max_retained_bytes < size_of::<PreparedValidatedCurve<'_>>() {
+    let mut minimum = size_of::<PreparedValidatedCurve<'_>>();
+    if matches!(surface, Surface::ExtrusionSurface(source)
+        if extrusion::bounded_profile_domain(source.entity_curve()).is_ok())
+        && matches!(anchor, Some(ValidatedFacePlaneSourceAnchor::Both { .. }))
+    {
+        minimum = minimum
+            .checked_add(size_of::<extrusion::Graph>())
+            .and_then(|bytes| bytes.checked_add(size_of::<ValidatedCurvePiece>()))
+            .ok_or(ValidatedGeometryError::ResourceLimit)?;
+    }
+    if bounded.max_retained_bytes < minimum {
         return Err(ValidatedGeometryError::ResourceLimit);
     }
     budget.charge(4, cancel)?;
@@ -1580,22 +1696,60 @@ pub fn prepared_face_plane_curve(
     // generated query's numerical proposal to the unchanged continuation.
     curve_owned_bytes(&owned, usize::MAX, budget, cancel)?;
     validate_preparation_range(&owned, range, &bounded, false, 0, budget, cancel)?;
+    if let Some((graph, pieces)) =
+        extrusion::prepare(&owned, range, anchor, &bounded, budget, cancel)?
+    {
+        let bytes = bytes
+            .checked_add(size_of::<extrusion::Graph>())
+            .ok_or(ValidatedGeometryError::ResourceLimit)?;
+        budget.charge(2, cancel)?;
+        return Ok(PreparedValidatedCurve {
+            source: PreparedSource::Owned {
+                curve: Box::new(owned),
+                bytes,
+                authority: OwnedSourceAuthority::Extrusion(Box::new(graph)),
+            },
+            range,
+            pieces,
+            options: *options,
+            mapped: None,
+        });
+    }
+    let preparation = SourcePreparation {
+        anchor,
+        endpoint_coordinate_planes,
+        coalesce_coordinates: true,
+    };
+    let prepared =
+        match prepare_unmapped_curve(&owned, range, &bounded, preparation, budget, cancel) {
+            Ok(prepared) => prepared,
+            Err(error)
+                if retryable(error)
+                    || matches!(
+                        error,
+                        ValidatedGeometryError::AmbiguousBranch | ValidatedGeometryError::NonSmooth
+                    ) =>
+            {
+                prepare_unmapped_curve(
+                    &owned,
+                    range,
+                    &bounded,
+                    SourcePreparation {
+                        coalesce_coordinates: false,
+                        ..preparation
+                    },
+                    budget,
+                    cancel,
+                )?
+            }
+            Err(error) => return Err(error),
+        };
     let PreparedValidatedCurve {
         source,
         pieces,
         mapped,
         ..
-    } = prepare_unmapped_curve(
-        &owned,
-        range,
-        &bounded,
-        SourcePreparation {
-            anchor,
-            endpoint_coordinate_planes,
-        },
-        budget,
-        cancel,
-    )?;
+    } = prepared;
     drop(mapped);
     drop(source);
     budget.charge(1, cancel)?;
@@ -1603,6 +1757,7 @@ pub fn prepared_face_plane_curve(
         source: PreparedSource::Owned {
             curve: Box::new(owned),
             bytes,
+            authority: OwnedSourceAuthority::Original,
         },
         range,
         pieces,
@@ -1645,13 +1800,45 @@ struct System {
     plane: PlaneJet,
 }
 struct Tube {
-    system: System,
-    surfaces: [ValidatedSurfaceJet; 2],
+    authority: TubeAuthority,
     domain: [ValidatedInterval; 4],
     rooted_domain: [ValidatedInterval; 4],
-    inverse: [[f64; 4]; 4],
-    defect: [[ValidatedInterval; 4]; 4],
-    rho: f64,
+}
+
+// Proof alternatives stay on the stack; boxing would allocate on every query.
+#[allow(clippy::large_enum_variant)]
+enum TubeAuthority {
+    Krawczyk {
+        system: System,
+        inverse: [[f64; 4]; 4],
+        defect: [[ValidatedInterval; 4]; 4],
+        rho: f64,
+    },
+    Constructive(ValidatedCurveJet),
+}
+impl Tube {
+    fn position(&self) -> Result<[ValidatedInterval; 3], ValidatedGeometryError> {
+        match &self.authority {
+            TubeAuthority::Krawczyk { system, .. } => {
+                intersect3(system.surfaces[0].position, system.surfaces[1].position)
+            }
+            TubeAuthority::Constructive(jet) => Ok(jet.position),
+        }
+    }
+    fn contraction_bound(&self) -> f64 {
+        match &self.authority {
+            TubeAuthority::Krawczyk { rho, .. } => *rho,
+            TubeAuthority::Constructive(_) => 0.0,
+        }
+    }
+    fn surface_residual(&self) -> [ValidatedInterval; 3] {
+        match &self.authority {
+            TubeAuthority::Krawczyk { system, .. } => {
+                subtract3(system.surfaces[0].position, system.surfaces[1].position)
+            }
+            TubeAuthority::Constructive(_) => [ZERO; 3],
+        }
+    }
 }
 
 fn carriers(curve: &Curve) -> Result<(&Surface, &Surface, &Curve), ValidatedGeometryError> {
@@ -1783,13 +1970,14 @@ fn certify(
     // Inclusion encloses the exact branch in the Krawczyk image as well.
     let rooted = system(curve, projection, parameter, krawczyk, budget, cancel)?;
     Ok(Tube {
-        system: rooted,
-        surfaces: rooted.surfaces,
+        authority: TubeAuthority::Krawczyk {
+            system: rooted,
+            inverse,
+            defect,
+            rho,
+        },
         domain,
         rooted_domain: krawczyk,
-        inverse,
-        defect,
-        rho,
     })
 }
 
@@ -1798,6 +1986,9 @@ fn root_image_padding(image: ValidatedInterval) -> f64 {
 }
 
 fn root_image_domain(tube: &Tube) -> Result<[ValidatedInterval; 4], ValidatedGeometryError> {
+    if matches!(tube.authority, TubeAuthority::Constructive(_)) {
+        return Ok(tube.rooted_domain);
+    }
     let mut next = tube.domain;
     for (i, bound) in next.iter_mut().enumerate() {
         let image = tube.rooted_domain[i];
@@ -1810,7 +2001,7 @@ fn root_image_domain(tube: &Tube) -> Result<[ValidatedInterval; 4], ValidatedGeo
 }
 
 fn refine_implicit_jet(
-    curve: &Curve,
+    source: Certification<'_, '_>,
     projection: Projection,
     parameter: ValidatedInterval,
     domain: [ValidatedInterval; 4],
@@ -1818,7 +2009,7 @@ fn refine_implicit_jet(
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<ValidatedCurveJet, ValidatedGeometryError> {
-    let mut tube = certify(curve, projection, parameter, domain, budget, cancel)?;
+    let mut tube = source.certify(projection, parameter, domain, budget, cancel)?;
     let mut jet = implicit_jet(&tube)?;
     for _ in 1..options.max_iterations {
         budget.charge(1, cancel)?;
@@ -1835,7 +2026,7 @@ fn refine_implicit_jet(
         // The image contains the SAME selected roots for every real parameter
         // in this whole span. The new domain remains inside the old uniqueness
         // tube, and independent inclusion must succeed before its jet is used.
-        let refined = match certify(curve, projection, parameter, next, budget, cancel) {
+        let refined = match source.certify(projection, parameter, next, budget, cancel) {
             Ok(tube) => tube,
             Err(error) if retryable(error) => break,
             Err(error) => return Err(error),
@@ -1854,7 +2045,7 @@ fn refine_implicit_jet(
 }
 
 fn refine_endpoint(
-    curve: &Curve,
+    source: Certification<'_, '_>,
     projection: Projection,
     parameter: ValidatedInterval,
     mut domain: [ValidatedInterval; 4],
@@ -1864,7 +2055,7 @@ fn refine_endpoint(
 ) -> Result<([ValidatedInterval; 4], [ValidatedInterval; 3]), ValidatedGeometryError> {
     for _ in 0..options.max_iterations {
         budget.charge(1, cancel)?;
-        let tube = certify(curve, projection, parameter, domain, budget, cancel)?;
+        let tube = source.certify(projection, parameter, domain, budget, cancel)?;
         // A successful Krawczyk inclusion already bounds this same exact root.
         // Keep a relative interior margin when contracting: reducing an affine
         // coordinate to one ulp while a nonlinear coordinate still converges
@@ -1882,7 +2073,7 @@ fn refine_endpoint(
                     .min(domain[i].upper),
             }
         });
-        let position = intersect3(tube.surfaces[0].position, tube.surfaces[1].position)?;
+        let position = tube.position()?;
         if position
             .into_iter()
             .all(|interval| interval.width() <= options.endpoint_tolerance)
@@ -1894,8 +2085,12 @@ fn refine_endpoint(
 }
 
 fn implicit_jet(tube: &Tube) -> Result<ValidatedCurveJet, ValidatedGeometryError> {
-    let [s0, s1] = tube.surfaces;
-    let plane = tube.system.plane;
+    let system = match &tube.authority {
+        TubeAuthority::Krawczyk { system, .. } => system,
+        TubeAuthority::Constructive(jet) => return Ok(*jet),
+    };
+    let [s0, s1] = system.surfaces;
+    let plane = system.plane;
     let position = intersect3(s0.position, s1.position)?;
     let ft = dot3(plane.first, position) - plane.offset_first;
     let q1 = solve_interval(tube, [ZERO, ZERO, ZERO, -ft])?;
@@ -1963,14 +2158,23 @@ fn solve_interval(
     tube: &Tube,
     rhs: [ValidatedInterval; 4],
 ) -> Result<[ValidatedInterval; 4], ValidatedGeometryError> {
-    let base = matrix_vector(tube.inverse, rhs);
+    let TubeAuthority::Krawczyk {
+        inverse,
+        defect,
+        rho,
+        ..
+    } = &tube.authority
+    else {
+        return Err(ValidatedGeometryError::InvalidInput);
+    };
+    let base = matrix_vector(*inverse, rhs);
     let maximum = base
         .into_iter()
         .map(ValidatedInterval::magnitude)
         .fold(0.0, f64::max);
-    let correction = (ValidatedInterval::point(tube.rho)
+    let correction = (ValidatedInterval::point(*rho)
         * ValidatedInterval::point(maximum)
-        * (ONE - ValidatedInterval::point(tube.rho)).reciprocal()?)
+        * (ONE - ValidatedInterval::point(*rho)).reciprocal()?)
     .upper;
     let error = ValidatedInterval {
         lower: -correction,
@@ -1978,7 +2182,7 @@ fn solve_interval(
     };
     let mut result = base.map(|entry| entry + error);
     for _ in 0..3 {
-        let residual = interval_matrix_vector(tube.defect, result);
+        let residual = interval_matrix_vector(*defect, result);
         result = std::array::from_fn(|i| {
             result[i]
                 .intersection(base[i] + residual[i])
@@ -2654,6 +2858,7 @@ fn projection_jet(
                     + dot3(guide.first, guide.second) * ValidatedInterval::point(3.0),
             })
         }
+        Projection::SourceProfile => Err(ValidatedGeometryError::InvalidInput),
         Projection::BetweenPlanes {
             parameter: range,
             planes: [first, last],
@@ -2718,17 +2923,19 @@ fn coordinate_spans(
     leader: &Curve,
     range: [f64; 2],
     memory_limit: usize,
-    endpoint_coordinate_planes: [Option<CoordinatePlane>; 2],
+    source_preparation: &SourcePreparation,
+    max_depth: usize,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<Vec<([f64; 2], Projection)>, ValidatedGeometryError> {
+) -> Result<(CoordinateSpans, bool), ValidatedGeometryError> {
+    let endpoint_coordinate_planes = &source_preparation.endpoint_coordinate_planes;
     match check_leader_knots(leader, interval_range(range)?, budget, cancel) {
         Ok(()) if endpoint_coordinate_planes.iter().all(Option::is_none) => {
             budget.charge(1, cancel)?;
             let mut result = Vec::new();
             reserve_native_vec(&mut result, memory_limit, 0, budget, cancel)?;
             result.push((range, Projection::Native));
-            return Ok(result);
+            return Ok((result, false));
         }
         Err(ValidatedGeometryError::NonSmooth) => {}
         Ok(()) => {}
@@ -2800,7 +3007,131 @@ fn coordinate_spans(
         ));
         previous = next;
     }
-    Ok(result)
+    let previous_count = result.len();
+    if source_preparation.coalesce_coordinates && previous_count > 1 {
+        let live = knots
+            .capacity()
+            .checked_mul(size_of::<f64>())
+            .and_then(|bytes| {
+                result
+                    .capacity()
+                    .checked_mul(size_of::<([f64; 2], Projection)>())
+                    .and_then(|spans| bytes.checked_add(spans))
+            })
+            .and_then(|bytes| bytes.checked_add(COARSE_COORDINATE_SCRATCH_BYTES));
+        // Coalescing is optional: retain the original admissible partition if
+        // its additional bounded stack cannot coexist with these same buffers.
+        if live.is_some_and(|bytes| bytes <= memory_limit) {
+            coalesce_coordinate_spans(leader, &mut result, max_depth, budget, cancel)?;
+        }
+    }
+    let coalesced = result.len() < previous_count;
+    Ok((result, coalesced))
+}
+
+const COARSE_COORDINATE_SCRATCH_BYTES: usize = size_of::<[(usize, usize, usize); 49]>()
+    + size_of::<(usize, usize, usize)>()
+    + 2 * size_of::<ValidatedCurveJet>()
+    + 4 * size_of::<CoordinatePlane>()
+    + 2 * size_of::<([f64; 2], Projection)>()
+    + 3 * size_of::<Projection>()
+    + size_of::<[f64; 2]>();
+
+fn coalesce_coordinate_spans(
+    leader: &Curve,
+    spans: &mut CoordinateSpans,
+    max_depth: usize,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<(), ValidatedGeometryError> {
+    let mut pending = [(0usize, 0usize, 0usize); 49];
+    pending[0] = (0, spans.len(), 0);
+    let mut length = 1;
+    let mut output = 0;
+    while length != 0 {
+        budget.charge(1, cancel)?;
+        length -= 1;
+        let (start, end, depth) = pending[length];
+        if end - start == 1 || depth == max_depth {
+            budget.charge(end - start, cancel)?;
+            if output != start {
+                spans.copy_within(start..end, output);
+            }
+            output += end - start;
+            continue;
+        }
+        let first = spans[start];
+        let last = spans[end - 1];
+        let range = [first.0[0], last.0[1]];
+        let proposal = coarse_coordinate_proposal(leader, range, [first.1, last.1], budget, cancel);
+        match proposal {
+            Ok(Some(projection)) => {
+                spans[output] = (range, projection);
+                output += 1;
+            }
+            Err(
+                error @ (ValidatedGeometryError::Cancelled | ValidatedGeometryError::ResourceLimit),
+            ) => {
+                return Err(error);
+            }
+            Ok(None) | Err(_) => {
+                let middle = start + (end - start) / 2;
+                budget.charge(2, cancel)?;
+                pending[length] = (middle, end, depth + 1);
+                pending[length + 1] = (start, middle, depth + 1);
+                length += 2;
+            }
+        }
+    }
+    budget.charge(1, cancel)?;
+    spans.truncate(output);
+    Ok(())
+}
+
+fn coarse_coordinate_proposal(
+    leader: &Curve,
+    range: [f64; 2],
+    projections: [Projection; 2],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<Projection>, ValidatedGeometryError> {
+    let [
+        Projection::BetweenPlanes {
+            planes: [first, _], ..
+        },
+        Projection::BetweenPlanes {
+            planes: [_, last], ..
+        },
+    ] = projections
+    else {
+        return Ok(None);
+    };
+    let positive_dot = |a: [f64; 3], b: [f64; 3]| {
+        let dot = (0..3).map(|axis| a[axis] * b[axis]).sum::<f64>();
+        dot.is_finite() && dot > 0.0
+    };
+    if first == last || !positive_dot(first.normal, last.normal) {
+        return Ok(None);
+    }
+    // Do not turn opposite natural tangent directions into an apparently
+    // mergeable proposal merely by negating equivalent plane coefficients.
+    let natural_first = coordinate_plane(leader, range[0], None, budget, cancel)?;
+    let natural_last = coordinate_plane(leader, range[1], None, budget, cancel)?;
+    if !positive_dot(natural_first.normal, natural_last.normal) {
+        return Ok(None);
+    }
+    let guide = validated_curve_piecewise_jet(leader, range, budget, cancel)?;
+    if !guide
+        .first
+        .into_iter()
+        .any(|value| value.lower > 0.0 || value.upper < 0.0)
+    {
+        return Ok(None);
+    }
+    Ok(Some(Projection::BetweenPlanes {
+        parameter: range,
+        planes: [first, last],
+    }))
 }
 
 fn coordinate_plane(
@@ -3260,8 +3591,8 @@ mod continuation_regressions {
                 parameter: [0.0, 1.0],
                 jet: old_jet,
                 source_parameters: Some(unflatten(tube.domain)),
-                contraction_bound: tube.rho,
-                surface_residual: subtract3(tube.surfaces[0].position, tube.surfaces[1].position),
+                contraction_bound: tube.contraction_bound(),
+                surface_residual: tube.surface_residual(),
                 projection,
             }],
             options,
@@ -3590,6 +3921,208 @@ mod continuation_regressions {
         }
         assert!(matches!(
             prepared_validated_curve_owned(deep, [0.0, 1.0], &options, &mut budget, &cancel,),
+            Err(ValidatedGeometryError::ResourceLimit)
+        ));
+    }
+
+    fn generated_circle_fixture(points: Vec<Point3>) -> (Surface, Plane, Curve) {
+        let profile = Curve::Line(Line(
+            Point3::new(2.0, 0.0, -1.0),
+            Point3::new(2.0, 0.0, 0.0),
+        ));
+        let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+            profile,
+            Point3::new(0.0, 0.0, 0.0),
+            crate::Vector3::unit_z(),
+        )))
+        .inverse();
+        let plane = Plane::new(
+            Point3::new(0.0, 0.0, 6.0),
+            Point3::new(1.0, 0.0, 6.0),
+            Point3::new(0.0, 1.0, 6.0),
+        );
+        let count = points.len() - 1;
+        let mut knots = vec![10.0];
+        knots.extend((0..=count).map(|index| 10.0 + 4.0 * index as f64 / count as f64));
+        knots.push(14.0);
+        let guide = Curve::BsplineCurve(crate::BsplineCurve::new(KnotVector::from(knots), points));
+        (surface, plane, guide)
+    }
+
+    #[test]
+    fn generated_dense_circle_coordinates_keep_physical_area_and_original_master_gauge() {
+        use std::f64::consts::{FRAC_PI_2, PI};
+        let (surface, plane, guide) = generated_circle_fixture(
+            (0..=64)
+                .map(|index| {
+                    let angle = FRAC_PI_2 * f64::from(index) / 64.0;
+                    Point3::new(2.0 * angle.cos(), 2.0 * angle.sin(), 6.0)
+                })
+                .collect(),
+        );
+        let original = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+            Box::new(surface.clone()),
+            Box::new(Surface::Plane(plane)),
+            Box::new(guide.clone()),
+            None,
+            None,
+        ));
+        let cancel = AtomicBool::new(false);
+        let options = ValidatedCurveOptions::default();
+        let mut master_work = ValidatedGeometryBudget::new(2_000_000);
+        let master =
+            prepared_validated_curve(&original, [10.0, 14.0], &options, &mut master_work, &cancel)
+                .unwrap();
+        let original_middle = master
+            .evaluate(12.0, &mut master_work, &cancel)
+            .unwrap()
+            .error;
+        let mut work = ValidatedGeometryBudget::new(2_000_000);
+        let generated = prepared_face_plane_curve(
+            &guide,
+            ValidatedFacePlaneSource {
+                surface: &surface,
+                anchor: Some(ValidatedFacePlaneSourceAnchor::Front([0.0, 7.0])),
+                endpoint_coordinate_planes: [None; 2],
+            },
+            &plane,
+            [10.0, 14.0],
+            &options,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(generated.range(), [10.0, 14.0]);
+        let mut area = ZERO;
+        let mut covered = 10.0;
+        for piece in generated.pieces() {
+            assert_eq!(piece.parameter[0], covered);
+            covered = piece.parameter[1];
+            let jet = generated.jet(piece.parameter, &mut work, &cancel).unwrap();
+            assert!(jet.position[2].lower <= 6.0 && 6.0 <= jet.position[2].upper);
+            let radius_squared = jet.position[0].square() + jet.position[1].square();
+            assert!(radius_squared.lower <= 4.0 && 4.0 <= radius_squared.upper);
+            let width = ValidatedInterval::point(piece.parameter[1])
+                - ValidatedInterval::point(piece.parameter[0]);
+            area = area
+                + (jet.position[0] * jet.first[1] - jet.position[1] * jet.first[0])
+                    * width
+                    * ValidatedInterval::point(0.5);
+        }
+        assert_eq!(covered, 14.0);
+        assert!(area.lower > 0.0);
+        assert!(
+            area.lower <= PI && PI <= area.upper,
+            "quarter-circle Green integral"
+        );
+        for (parameter, expected) in [(10.0, [2.0, 0.0, 6.0]), (14.0, [0.0, 2.0, 6.0])] {
+            let point = generated.evaluate(parameter, &mut work, &cancel).unwrap();
+            for (axis, expected) in expected.into_iter().enumerate() {
+                assert!(point.error[axis].lower <= expected && expected <= point.error[axis].upper);
+            }
+        }
+        // Original-master knot coordinates remain authoritative, not the
+        // generated candidate's optional coarser numerical parameterization.
+        for parameter in [10.0, 11.0, 12.0, 13.0, 14.0] {
+            let angle = FRAC_PI_2 * (parameter - 10.0) / 4.0;
+            let point = master
+                .evaluate(parameter, &mut master_work, &cancel)
+                .unwrap();
+            for (axis, expected) in [2.0 * angle.cos(), 2.0 * angle.sin(), 6.0]
+                .into_iter()
+                .enumerate()
+            {
+                assert!(point.error[axis].lower <= expected && expected <= point.error[axis].upper);
+            }
+        }
+        assert_eq!(
+            master
+                .evaluate(12.0, &mut master_work, &cancel)
+                .unwrap()
+                .error,
+            original_middle,
+        );
+    }
+
+    #[test]
+    fn rejected_coarse_circle_proposal_keeps_original_knot_fallback_and_limits() {
+        let (surface, plane, guide) = generated_circle_fixture(vec![
+            Point3::new(2.0, 0.0, 6.0),
+            Point3::new(0.0, 2.0, 6.0),
+            Point3::new(-2.0, 0.0, 6.0),
+        ]);
+        let options = ValidatedCurveOptions::default();
+        let cancel = AtomicBool::new(false);
+        let source = ValidatedFacePlaneSource {
+            surface: &surface,
+            anchor: Some(ValidatedFacePlaneSourceAnchor::Front([0.0, 7.0])),
+            endpoint_coordinate_planes: [None; 2],
+        };
+        let mut work = ValidatedGeometryBudget::new(2_000_000);
+        let prepared = prepared_face_plane_curve(
+            &guide,
+            source,
+            &plane,
+            [10.0, 14.0],
+            &options,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let midpoint = prepared.evaluate(12.0, &mut work, &cancel).unwrap();
+        for (axis, expected) in [0.0, 2.0, 6.0].into_iter().enumerate() {
+            assert!(
+                midpoint.error[axis].lower <= expected && expected <= midpoint.error[axis].upper
+            );
+        }
+        for parameter in [11.0, 13.0] {
+            let point = prepared.evaluate(parameter, &mut work, &cancel).unwrap();
+            let radius_squared = point.error[0].square() + point.error[1].square();
+            assert!(radius_squared.lower <= 4.0 && 4.0 <= radius_squared.upper);
+            assert!(point.error[2].lower <= 6.0 && 6.0 <= point.error[2].upper);
+            assert!(
+                point.error[1].lower > 0.0,
+                "retain the original upper semicircle"
+            );
+        }
+        assert!(matches!(
+            prepared_face_plane_curve(
+                &guide,
+                source,
+                &plane,
+                [10.0, 14.0],
+                &options,
+                &mut ValidatedGeometryBudget::new(0),
+                &cancel,
+            ),
+            Err(ValidatedGeometryError::ResourceLimit)
+        ));
+        assert!(matches!(
+            prepared_face_plane_curve(
+                &guide,
+                source,
+                &plane,
+                [10.0, 14.0],
+                &options,
+                &mut work,
+                &AtomicBool::new(true),
+            ),
+            Err(ValidatedGeometryError::Cancelled)
+        ));
+        let no_storage = ValidatedCurveOptions {
+            max_retained_bytes: 0,
+            ..options
+        };
+        assert!(matches!(
+            prepared_face_plane_curve(
+                &guide,
+                source,
+                &plane,
+                [10.0, 14.0],
+                &no_storage,
+                &mut work,
+                &cancel,
+            ),
             Err(ValidatedGeometryError::ResourceLimit)
         ));
     }

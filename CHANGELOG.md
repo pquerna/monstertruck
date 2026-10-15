@@ -44,13 +44,27 @@ monstertruck 0.4.0.
   area contributions. Closure defaults to disabled, retains the subdivision cap,
   and charges receipt storage and work with cooperative cancellation. Missing
   candidates, wrong original identities and omitted hole roots remain refusals.
-- Generated face/plane curve preparation accepts an optional original `Front`
-  or `Back` chart proposal with its borrowed carrier. Back-anchored continuation
+- Generated face/plane curve preparation accepts original `Front`, `Back`
+  or `Both` chart proposals with its borrowed carrier. Back-anchored continuation
   traverses original spans backward and returns ascending pieces without changing
   their parameters, projections or derivative signs. The trim-root helper shares
   the complete original/UV root census and exact retained-source association with
   endpoint coverage. Original masters, continuation, endpoint, work, storage and
   cancellation bounds remain unchanged; no guessed period shift is introduced.
+- Generated face/plane coordinate proposals coalesce across guide knots only
+  under bounded conditioning checks; original-carrier continuation, source
+  support and complete coverage remain authoritative. Numerical proposal
+  failure retries the original partition on the same consumed-work budget.
+- Transverse extrusion/plane sections may use a typed constructive original-
+  profile graph, with independently bound original endpoint charts, a complete
+  bounded profile image and outward position/derivative transport. This includes
+  varying profile height and genuine finite profile endpoints without extending
+  source support or fabricating a four-variable uniqueness tube. Bare LINE
+  drawing intervals are not original trims; original-root coverage and endpoint
+  seals remain mandatory.
+- Public `validated_surface_piecewise_jet` retains continuous-source images and
+  one-sided derivatives. It rejects positional discontinuities and does not
+  grant C1, normal, regularity or Hessian/Taylor authority; strict jets are unchanged.
 - Complete plane coverage uses original-surface interval-Newton zero contraction
   and defers trim winding until whole-cell zero/tube proofs need it. Correlated
   axial/radial Rodrigues coefficients avoid artificial full-period height motion;

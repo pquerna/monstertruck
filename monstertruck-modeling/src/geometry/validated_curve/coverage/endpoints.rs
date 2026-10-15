@@ -916,7 +916,9 @@ pub(super) fn endpoint_covers(
     } else {
         [plane_chart[0], plane_chart[1], chart[0], chart[1]]
     };
-    if let Some(axis) = (0..4).find(|&i| !contains(box4[i], q[i])) {
+    if (source_index != 0 || candidate.source.graph().is_none())
+        && let Some(axis) = (0..4).find(|&i| !contains(box4[i], q[i]))
+    {
         if let Some(diagnostic) = diagnostic.as_deref_mut() {
             *diagnostic =
                 endpoint_tube_witness(candidate, &binding, source_index, axis, box4[axis], q[axis]);
@@ -977,106 +979,131 @@ pub(super) fn endpoint_covers(
             ValidatedGeometryError::Unresolved,
         ));
     }
-    let coordinate = position[axis]
-        .hull(original_root[axis])
-        .hull(nominal_root[axis])
-        .hull(nominal_end[axis]);
-    if coordinate.lower >= coordinate.upper {
-        return Ok(EndpointCoverage::Refused(
-            "endpoint / nondegenerate fixed coordinate",
-            ValidatedGeometryError::Unresolved,
-        ));
-    }
-    let mut direction = [0.0; 3];
-    direction[axis] = 1.0;
-    let projection = Projection::BetweenPlanes {
-        parameter: [coordinate.lower, coordinate.upper],
-        planes: [
-            CoordinatePlane {
-                normal: direction,
-                offset: coordinate.lower,
-            },
-            CoordinatePlane {
-                normal: direction,
-                offset: coordinate.upper,
-            },
-        ],
-    };
-    // This is a new coordinate on the SAME original carrier intersection. It
-    // must certify throughout the old uniqueness tube, containing the actual
-    // old endpoint and every original root enclosure. It is not guide growth.
-    let root_chart = plane_parameters(
-        plane,
-        std::array::from_fn(|i| original_root[i].hull(nominal_root[i])),
-    )?;
-    let root_q = if source_index == 0 {
-        [uv[0], uv[1], root_chart[0], root_chart[1]]
+    let (jet, arc_length) = if let Some(graph) =
+        candidate.source.graph().filter(|_| source_index == 0)
+    {
+        // The original profile stays inside its genuine finite support. The
+        // invertible coefficient system proves the unique plane zero for every
+        // u here, including the actual original trim root. No extended carrier
+        // or fictitious interior Krawczyk box is introduced at a finite end.
+        let endpoint_u = graph.profile_endpoint(binding.endpoint_is_back);
+        let endpoint_span = uv[0].hull(ValidatedInterval::point(endpoint_u));
+        let span = chart[0].hull(endpoint_span);
+        let (jet, _) = match graph.profile_jet(candidate.source.curve()?, span, budget, cancel) {
+            Ok(jet) => jet,
+            Err(error) if splittable(error) => {
+                return Ok(EndpointCoverage::Refused(
+                    "endpoint / original finite profile graph",
+                    error,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let arc_length = (norm_upper(jet.first)? * endpoint_span.width()).next_up();
+        (jet, arc_length)
     } else {
-        [root_chart[0], root_chart[1], uv[0], uv[1]]
-    };
-    if let Some(axis) = (0..4).find(|&i| !contains(box4[i], root_q[i])) {
-        if let Some(diagnostic) = diagnostic {
-            *diagnostic = endpoint_tube_witness(
-                candidate,
-                &binding,
-                source_index,
-                axis,
-                box4[axis],
-                root_q[axis],
-            );
-        }
-        return Ok(EndpointCoverage::Refused(
-            "endpoint / original trim root in original uniqueness tube",
-            ValidatedGeometryError::Unresolved,
-        ));
-    }
-    let mut tube = match certify(
-        candidate.source.curve()?,
-        projection,
-        coordinate,
-        box4,
-        budget,
-        cancel,
-    ) {
-        Ok(tube) => tube,
-        Err(error) if splittable(error) => {
+        let coordinate = position[axis]
+            .hull(original_root[axis])
+            .hull(nominal_root[axis])
+            .hull(nominal_end[axis]);
+        if coordinate.lower >= coordinate.upper {
             return Ok(EndpointCoverage::Refused(
-                "endpoint / fixed-coordinate uniqueness certification",
-                error,
+                "endpoint / nondegenerate fixed coordinate",
+                ValidatedGeometryError::Unresolved,
             ));
         }
-        Err(error) => return Err(error),
-    };
-    for _ in 0..8 {
-        let next = std::array::from_fn(|i| {
-            let root = tube.rooted_domain[i];
-            let radius =
-                (root.width() * 0.51 + 64.0 * f64::EPSILON * (1.0 + root.magnitude())).next_up();
-            box4[i]
-                .intersection(ValidatedInterval {
-                    lower: (root.midpoint() - radius).next_down(),
-                    upper: (root.midpoint() + radius).next_up(),
-                })
-                .unwrap_or(box4[i])
-        });
-        match certify(
+        let mut direction = [0.0; 3];
+        direction[axis] = 1.0;
+        let projection = Projection::BetweenPlanes {
+            parameter: [coordinate.lower, coordinate.upper],
+            planes: [
+                CoordinatePlane {
+                    normal: direction,
+                    offset: coordinate.lower,
+                },
+                CoordinatePlane {
+                    normal: direction,
+                    offset: coordinate.upper,
+                },
+            ],
+        };
+        // This is a new coordinate on the SAME original carrier intersection. It
+        // must certify throughout the old uniqueness tube, containing the actual
+        // old endpoint and every original root enclosure. It is not guide growth.
+        let root_chart = plane_parameters(
+            plane,
+            std::array::from_fn(|i| original_root[i].hull(nominal_root[i])),
+        )?;
+        let root_q = if source_index == 0 {
+            [uv[0], uv[1], root_chart[0], root_chart[1]]
+        } else {
+            [root_chart[0], root_chart[1], uv[0], uv[1]]
+        };
+        if let Some(axis) = (0..4).find(|&i| !contains(box4[i], root_q[i])) {
+            if let Some(diagnostic) = diagnostic {
+                *diagnostic = endpoint_tube_witness(
+                    candidate,
+                    &binding,
+                    source_index,
+                    axis,
+                    box4[axis],
+                    root_q[axis],
+                );
+            }
+            return Ok(EndpointCoverage::Refused(
+                "endpoint / original trim root in original uniqueness tube",
+                ValidatedGeometryError::Unresolved,
+            ));
+        }
+        let mut tube = match certify(
             candidate.source.curve()?,
             projection,
             coordinate,
-            next,
+            box4,
             budget,
             cancel,
         ) {
-            Ok(refined) => tube = refined,
-            Err(error) if splittable(error) => break,
+            Ok(tube) => tube,
+            Err(error) if splittable(error) => {
+                return Ok(EndpointCoverage::Refused(
+                    "endpoint / fixed-coordinate uniqueness certification",
+                    error,
+                ));
+            }
             Err(error) => return Err(error),
+        };
+        for _ in 0..8 {
+            let next = std::array::from_fn(|i| {
+                let root = tube.rooted_domain[i];
+                let radius = (root.width() * 0.51 + 64.0 * f64::EPSILON * (1.0 + root.magnitude()))
+                    .next_up();
+                box4[i]
+                    .intersection(ValidatedInterval {
+                        lower: (root.midpoint() - radius).next_down(),
+                        upper: (root.midpoint() + radius).next_up(),
+                    })
+                    .unwrap_or(box4[i])
+            });
+            match certify(
+                candidate.source.curve()?,
+                projection,
+                coordinate,
+                next,
+                budget,
+                cancel,
+            ) {
+                Ok(refined) => tube = refined,
+                Err(error) if splittable(error) => break,
+                Err(error) => return Err(error),
+            }
         }
-    }
-    let jet = implicit_jet(&tube)?;
-    let endpoint_coordinate = nominal_end[axis]
-        .hull(original_root[axis])
-        .hull(nominal_root[axis]);
-    let arc_length = (norm_upper(jet.first)? * endpoint_coordinate.width()).next_up();
+        let jet = implicit_jet(&tube)?;
+        let endpoint_coordinate = nominal_end[axis]
+            .hull(original_root[axis])
+            .hull(nominal_root[axis]);
+        let arc_length = (norm_upper(jet.first)? * endpoint_coordinate.width()).next_up();
+        (jet, arc_length)
+    };
     let source_displacement =
         norm_upper(std::array::from_fn(|i| original_root[i] - nominal_root[i]))?;
     let extension = (arc_length + source_displacement).next_up();

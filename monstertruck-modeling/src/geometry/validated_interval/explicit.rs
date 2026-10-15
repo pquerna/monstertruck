@@ -198,10 +198,12 @@ pub fn validated_surface_jet(
     surface_jet_with_policy(surface, range, false, budget, cancel)
 }
 
-/// Encloses continuous piecewise-smooth sources for contraction-only root
-/// proofs. First jets bound all one-sided Jacobians; Hessian unions are not
-/// Taylor bounds unless the retained source box separately qualifies as C1.
-pub(crate) fn validated_surface_piecewise_jet(
+/// Encloses continuous piecewise-smooth sources and their one-sided jets.
+/// Position and first-derivative ranges support continuous-source image and
+/// first-order mean-value bounds. Hessian unions are not Taylor bounds or a
+/// gradient Jacobian without a separately qualified C1 source box. Successful
+/// evaluation grants neither regularity nor a unique normal at a crease.
+pub fn validated_surface_piecewise_jet(
     surface: &Surface,
     range: [[f64; 2]; 2],
     budget: &mut ValidatedGeometryBudget,

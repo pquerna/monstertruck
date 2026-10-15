@@ -77,12 +77,27 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   extension, arc-length, position and plane-error bounds for independent chord and
   signed-area accounting, under the same work, storage and cancellation limits.
   Missing branches, unrelated endpoints and omitted hole roots refuse coverage.
-  Generated face/plane preparation can receive an actual original endpoint chart
-  through `ValidatedFacePlaneSourceAnchor::Front` or `Back`. Back anchoring
+  Generated face/plane preparation can receive actual original endpoint charts
+  through `ValidatedFacePlaneSourceAnchor::Front`, `Back` or `Both`. Back anchoring
   continues in the original gauge toward the front, retaining ascending output
   intervals and native derivative signs. These are numerical proposals only:
   whole-curve continuation, original endpoint ownership and complete all-domain
   coverage remain mandatory. Original prepared masters are not reselected.
+- Generated face/plane guides may coalesce conditioned coordinate proposals
+  across retained guide knots. Fresh original-carrier continuation and complete
+  coverage still certify every result; a failed proposal retries the original
+  partition without resetting consumed work. Original-master gauges are unchanged.
+- A transverse extrusion/plane section with two original endpoint charts can
+  prescribe a bounded original profile parameter and solve the remaining linear
+  coordinates constructively, including varying profile height and genuine
+  finite endpoints. The retained typed authority is not an open four-variable
+  Krawczyk tube. Original source coefficients, complete trimmed coverage and
+  endpoint genealogy remain mandatory; nominal bare-LINE drawing ranges do not
+  authorize finite profile support.
+- `validated_surface_piecewise_jet` exposes continuous-source positions and
+  one-sided derivative ranges, rejecting positional jumps. Hessian/Taylor,
+  gradient-Jacobian, regularity and normal claims require their own premises;
+  the strict `validated_surface_jet` contract is unchanged.
 - Complete plane coverage contracts cells by necessary interval-Newton root
   bounds on the original surface before subdivision. Whole-cell plane exclusion
   or validated candidate tubes can discharge a cell before trim winding.
