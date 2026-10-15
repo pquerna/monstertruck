@@ -25,6 +25,12 @@ monstertruck 0.4.0.
   area contributions. Closure defaults to disabled, retains the subdivision cap,
   and charges receipt storage and work with cooperative cancellation. Missing
   candidates, wrong original identities and omitted hole roots remain refusals.
+- Generated face/plane curve preparation accepts an optional original-front
+  chart proposal with its borrowed carrier. The trim-root chart helper shares
+  the complete independent original/UV root census and exact retained-source
+  association with endpoint coverage. This avoids closed-endpoint inverse-sheet
+  ambiguity without guessed period shifts, original master reselection or
+  relaxed continuation, endpoint, work or storage bounds.
 
 - STEP `SURFACE_CURVE` and `SEAM_CURVE` retain their original explicit leader,
   kind, declared master and associated geometry, including closed restrictions.

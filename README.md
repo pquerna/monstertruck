@@ -72,6 +72,11 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   extension, arc-length, position and plane-error bounds for independent chord and
   signed-area accounting, under the same work, storage and cancellation limits.
   Missing branches, unrelated endpoints and omitted hole roots refuse coverage.
+  Generated face/plane preparation can receive an actual original front-root
+  chart midpoint through `ValidatedFacePlaneSource`. The numerical proposal
+  avoids a nearest-point inverse choosing another chart sheet at a closed
+  endpoint, while unchanged whole-curve continuation and all-domain coverage
+  remain mandatory. Original prepared master branches are not reselected.
 
 **Meshing**
 - Triangulation/tessellation pipeline rewritten; CDT trim-constraint handling rebuilt across [`b60b1604`](https://github.com/virtualritz/monstertruck/commit/b60b1604)/[`46b21f9f`](https://github.com/virtualritz/monstertruck/commit/46b21f9f)/[`f35d3b6d`](https://github.com/virtualritz/monstertruck/commit/f35d3b6d)/[`7c5ce2d2`](https://github.com/virtualritz/monstertruck/commit/7c5ce2d2) (skip conflicting, avoid invalid, preserve split, split through vertices).

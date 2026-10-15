@@ -240,6 +240,230 @@ pub(super) struct CoverageCell {
     pub(super) uv: [[f64; 2]; 2],
     pub(super) position: [ValidatedInterval; 3],
 }
+impl<'a, 'd> FacePlaneContext<'a, 'd> {
+    pub(super) fn new(
+        domain: &'a PreparedFaceParameterDomain<'d>,
+        surface: &'a Surface,
+        plane: &'a Plane,
+        maximum_extension: f64,
+    ) -> Result<Self, ValidatedGeometryError> {
+        if !(0..3).all(|axis| plane.origin()[axis].is_finite()) {
+            return Err(ValidatedGeometryError::InvalidInput);
+        }
+        let (a, b) = plane_axes(plane);
+        let normal = super::super::cross3(a, b);
+        let norm = normal
+            .into_iter()
+            .fold(super::super::ZERO, |sum, value| sum + value.square());
+        if !norm.is_finite() || !normal.into_iter().all(ValidatedInterval::is_finite) {
+            return Err(ValidatedGeometryError::ConditioningFailure);
+        }
+        if norm.lower <= 0.0 {
+            return Err(ValidatedGeometryError::Singular);
+        }
+        let origin = std::array::from_fn(|i| ValidatedInterval::point(plane.origin()[i]));
+        Ok(Self {
+            domain,
+            surface,
+            plane,
+            normal,
+            origin,
+            maximum_extension,
+        })
+    }
+}
+
+fn validate_binding_input(
+    domain: &PreparedFaceParameterDomain<'_>,
+    binding: &ValidatedPlaneTrimEndpointBinding<'_>,
+) -> Result<(), ValidatedGeometryError> {
+    let coedge = domain
+        .coedges()
+        .get(binding.coedge_index)
+        .ok_or(ValidatedGeometryError::InvalidInput)?;
+    if coedge.identity.edge_id != binding.original_edge_id
+        || !binding.boundary_scale.is_finite()
+        || binding.boundary_scale <= 0.0
+        || !binding.source_cut_parameter.is_finite()
+        || !binding.source_chart_error_mm.is_finite()
+        || binding.source_chart_error_mm < 0.0
+    {
+        return Err(ValidatedGeometryError::InvalidInput);
+    }
+    let retained_range = binding.boundary.range();
+    interval_range(binding.boundary_range)?;
+    if binding.boundary_range[0] >= binding.boundary_range[1]
+        || binding.boundary_range[0] < retained_range[0]
+        || binding.boundary_range[1] > retained_range[1]
+        || binding.source_cut_parameter < binding.boundary_range[0]
+        || binding.source_cut_parameter > binding.boundary_range[1]
+    {
+        return Err(ValidatedGeometryError::ParameterOutOfRange);
+    }
+    Ok(())
+}
+
+fn validate_binding_source(
+    domain: &PreparedFaceParameterDomain<'_>,
+    binding: &ValidatedPlaneTrimEndpointBinding<'_>,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<(), ValidatedGeometryError> {
+    let coedge = domain
+        .coedges()
+        .get(binding.coedge_index)
+        .ok_or(ValidatedGeometryError::InvalidInput)?;
+    let edge = domain
+        .face()
+        .absolute_boundaries()
+        .get(coedge.identity.wire_index)
+        .and_then(|wire| wire.get(coedge.identity.coedge_index))
+        .ok_or(ValidatedGeometryError::InvalidInput)?;
+    if edge.id() != binding.original_edge_id
+        || !edge.with_curve(|actual| {
+            source_identity::retains_original_curve(
+                binding.boundary,
+                actual,
+                binding.boundary_range,
+                binding.boundary_scale,
+                budget,
+                cancel,
+            )
+        })?
+    {
+        return Err(ValidatedGeometryError::InvalidInput);
+    }
+    Ok(())
+}
+
+struct TrimRoots {
+    chart: Vec<Root>,
+    original: Vec<Root>,
+    retained_bytes: usize,
+}
+
+fn isolate_trim_roots(
+    context: &FacePlaneContext<'_, '_>,
+    index: usize,
+    binding: &ValidatedPlaneTrimEndpointBinding<'_>,
+    maximum_bytes: usize,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<TrimRoots, ValidatedGeometryError> {
+    let range = context
+        .domain
+        .coedges()
+        .get(index)
+        .ok_or(ValidatedGeometryError::InvalidInput)?
+        .curve
+        .range_tuple();
+    let chart = isolate_roots(
+        [range.0, range.1],
+        maximum_bytes,
+        |range, budget| Ok(chart_jet(context, index, range, budget, cancel)?.0),
+        budget,
+        cancel,
+    )?;
+    let chart_bytes = chart
+        .capacity()
+        .checked_mul(size_of::<Root>())
+        .ok_or(ValidatedGeometryError::ResourceLimit)?;
+    let remaining = maximum_bytes
+        .checked_sub(chart_bytes)
+        .ok_or(ValidatedGeometryError::ResourceLimit)?;
+    let scale = ValidatedInterval::point(binding.boundary_scale);
+    let original = isolate_roots(
+        binding.boundary_range,
+        remaining,
+        |range, budget| {
+            let jet = binding.boundary.jet(range, budget, cancel)?;
+            Ok(ValidatedScalarCurveJet {
+                position: dot3(
+                    context.normal,
+                    subtract3(jet.position.map(|x| x * scale), context.origin),
+                ),
+                first: dot3(context.normal, jet.first.map(|x| x * scale)),
+                second: dot3(context.normal, jet.second.map(|x| x * scale)),
+            })
+        },
+        budget,
+        cancel,
+    )?;
+    if original.len() != chart.len() {
+        return Err(ValidatedGeometryError::Unresolved);
+    }
+    for (chart, original) in chart.iter().zip(&original) {
+        budget.charge(1, cancel)?;
+        if sign(chart.derivative) != sign(original.derivative) {
+            return Err(ValidatedGeometryError::NonTransverse);
+        }
+    }
+    let retained_bytes = original
+        .capacity()
+        .checked_mul(size_of::<Root>())
+        .and_then(|bytes| bytes.checked_add(chart_bytes))
+        .ok_or(ValidatedGeometryError::ResourceLimit)?;
+    Ok(TrimRoots {
+        chart,
+        original,
+        retained_bytes,
+    })
+}
+
+/// Encloses an actual original trim/plane root in its retained source chart.
+///
+/// This uses the cut genealogy's native parameter only to select among complete
+/// original and chart root inventories; their gauges are never identified.
+/// The returned chart box is a numerical hint for generated face/plane curve
+/// preparation, not a branch, endpoint or whole-face coverage certificate.
+/// Candidate index and endpoint side do not participate in this hint operation.
+/// Call outside an original face carrier or edge-curve mutex callback.
+pub fn validated_plane_trim_root_chart(
+    domain: &PreparedFaceParameterDomain<'_>,
+    plane: &Plane,
+    binding: &ValidatedPlaneTrimEndpointBinding<'_>,
+    max_retained_bytes: usize,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<[ValidatedInterval; 2], ValidatedGeometryError> {
+    budget.charge(1, cancel)?;
+    validate_binding_input(domain, binding)?;
+    validate_binding_source(domain, binding, budget, cancel)?;
+    let remaining = max_retained_bytes
+        .min(32 * 1024 * 1024)
+        .checked_sub(COVERAGE_STACK_BYTES)
+        .ok_or(ValidatedGeometryError::ResourceLimit)?;
+    domain
+        .face()
+        .with_surface(|surface| {
+            let context = FacePlaneContext::new(domain, surface, plane, 0.0)?;
+            let roots = isolate_trim_roots(
+                &context,
+                binding.coedge_index,
+                binding,
+                remaining,
+                budget,
+                cancel,
+            )?;
+            let mut selected = None;
+            for (&chart, original) in roots.chart.iter().zip(&roots.original) {
+                budget.charge(1, cancel)?;
+                if binding.source_cut_parameter < original.witness[0]
+                    || binding.source_cut_parameter > original.witness[1]
+                {
+                    continue;
+                }
+                if selected.is_some() {
+                    return Err(ValidatedGeometryError::AmbiguousBranch);
+                }
+                selected = Some(
+                    root_chart_enclosure(&context, binding.coedge_index, chart, budget, cancel)?.0,
+                );
+            }
+            selected.ok_or(ValidatedGeometryError::Unresolved)
+        })
+        .map_err(|error| coverage_context(error, "original trim chart / generated candidate start"))
+}
 
 pub(super) fn prepare_endpoints<'a>(
     context: &FacePlaneContext<'_, '_>,
@@ -251,8 +475,6 @@ pub(super) fn prepare_endpoints<'a>(
 ) -> Result<Vec<PreparedEndpoint<'a>>, ValidatedGeometryError> {
     let &FacePlaneContext {
         domain,
-        normal,
-        origin,
         maximum_extension,
         ..
     } = context;
@@ -288,54 +510,15 @@ pub(super) fn prepare_endpoints<'a>(
     }
     for (binding_index, binding) in bindings.iter().enumerate() {
         budget.charge(1, cancel)?;
-        let boundary = domain
-            .coedges()
-            .get(binding.coedge_index)
-            .ok_or(ValidatedGeometryError::InvalidInput)?;
-        if binding.candidate_index >= candidates.len()
-            || boundary.identity.edge_id != binding.original_edge_id
-            || !binding.boundary_scale.is_finite()
-            || binding.boundary_scale <= 0.0
-            || !binding.source_cut_parameter.is_finite()
-            || !binding.source_chart_error_mm.is_finite()
-            || binding.source_chart_error_mm < 0.0
-        {
+        if binding.candidate_index >= candidates.len() {
             return Err(ValidatedGeometryError::InvalidInput);
         }
-        let retained_range = binding.boundary.range();
-        interval_range(binding.boundary_range)?;
-        if binding.boundary_range[0] >= binding.boundary_range[1]
-            || binding.boundary_range[0] < retained_range[0]
-            || binding.boundary_range[1] > retained_range[1]
-            || binding.source_cut_parameter < binding.boundary_range[0]
-            || binding.source_cut_parameter > binding.boundary_range[1]
-        {
-            return Err(ValidatedGeometryError::ParameterOutOfRange);
-        }
+        validate_binding_input(domain, binding)?;
         let use_ = uses
             .get_mut(&binding.original_edge_id)
             .ok_or(ValidatedGeometryError::InvalidInput)?;
         if *use_ == usize::MAX {
-            let edge = domain
-                .face()
-                .absolute_boundaries()
-                .get(boundary.identity.wire_index)
-                .and_then(|wire| wire.get(boundary.identity.coedge_index))
-                .ok_or(ValidatedGeometryError::InvalidInput)?;
-            if edge.id() != binding.original_edge_id
-                || !edge.with_curve(|actual| {
-                    source_identity::retains_original_curve(
-                        binding.boundary,
-                        actual,
-                        binding.boundary_range,
-                        binding.boundary_scale,
-                        budget,
-                        cancel,
-                    )
-                })?
-            {
-                return Err(ValidatedGeometryError::InvalidInput);
-            }
+            validate_binding_source(domain, binding, budget, cancel)?;
             *use_ = binding_index;
         } else {
             let first = &bindings[*use_];
@@ -348,7 +531,6 @@ pub(super) fn prepare_endpoints<'a>(
         }
     }
     for (index, boundary) in domain.coedges().iter().enumerate() {
-        let range = boundary.curve.range_tuple();
         let &first_index = uses
             .get(&boundary.identity.edge_id)
             .ok_or(ValidatedGeometryError::InvalidInput)?;
@@ -365,45 +547,12 @@ pub(super) fn prepare_endpoints<'a>(
         let root_allowance = maximum_bytes
             .checked_sub(occupied)
             .ok_or(ValidatedGeometryError::ResourceLimit)?;
-        let roots = isolate_roots(
-            [range.0, range.1],
-            root_allowance,
-            |range, budget| Ok(chart_jet(context, index, range, budget, cancel)?.0),
-            budget,
-            cancel,
-        )?;
-        let root_bytes = roots
-            .capacity()
-            .checked_mul(size_of::<Root>())
-            .ok_or(ValidatedGeometryError::ResourceLimit)?;
-        let original_allowance = root_allowance
-            .checked_sub(root_bytes)
-            .ok_or(ValidatedGeometryError::ResourceLimit)?;
+        let roots = isolate_trim_roots(context, index, first, root_allowance, budget, cancel)?;
         let scale = ValidatedInterval::point(first.boundary_scale);
-        let original_roots = isolate_roots(
-            first.boundary_range,
-            original_allowance,
-            |range, budget| {
-                let jet = first.boundary.jet(range, budget, cancel)?;
-                Ok(ValidatedScalarCurveJet {
-                    position: dot3(normal, subtract3(jet.position.map(|x| x * scale), origin)),
-                    first: dot3(normal, jet.first.map(|x| x * scale)),
-                    second: dot3(normal, jet.second.map(|x| x * scale)),
-                })
-            },
-            budget,
-            cancel,
-        )?;
-        if original_roots.len() != roots.len() {
-            return Err(ValidatedGeometryError::Unresolved);
-        }
-        for (&root, &original) in roots.iter().zip(&original_roots) {
+        for (&root, &original) in roots.chart.iter().zip(&roots.original) {
             // Native and UV gauges are independently retained. Pair complete
             // root inventories by the original oriented coedge order, never
             // by an invented affine parameter map or nearest-point match.
-            if sign(root.derivative) != sign(original.derivative) {
-                return Err(ValidatedGeometryError::NonTransverse);
-            }
             let mut selected = None;
             for &binding in bindings {
                 budget.charge(1, cancel)?;
@@ -444,14 +593,7 @@ pub(super) fn prepare_endpoints<'a>(
             {
                 return Err(ValidatedGeometryError::Unresolved);
             }
-            let temporary = root_bytes
-                .checked_add(
-                    original_roots
-                        .capacity()
-                        .checked_mul(size_of::<Root>())
-                        .ok_or(ValidatedGeometryError::ResourceLimit)?,
-                )
-                .ok_or(ValidatedGeometryError::ResourceLimit)?;
+            let temporary = roots.retained_bytes;
             super::super::reserve_native_vec(
                 &mut result,
                 maximum_bytes,

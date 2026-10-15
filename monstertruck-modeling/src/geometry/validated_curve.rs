@@ -36,7 +36,7 @@ mod coverage;
 pub use coverage::{
     ValidatedPlaneCoverage, ValidatedPlaneCoverageOptions, ValidatedPlaneTrimEndpoint,
     ValidatedPlaneTrimEndpointBinding, validated_face_plane_coverage,
-    validated_same_surface_coefficients,
+    validated_plane_trim_root_chart, validated_same_surface_coefficients,
 };
 
 /// Bounded continuation and certified endpoint refinement policy.
@@ -788,7 +788,7 @@ fn prepare_owned_leaf(
     // slot. Move the proven pieces unchanged, then replace that borrowed slot
     // with the very same owned native object, without another root search.
     let (range, pieces) = {
-        let prepared = prepare_unmapped_curve(&curve, range, &proof_options, budget, cancel)?;
+        let prepared = prepare_unmapped_curve(&curve, range, &proof_options, None, budget, cancel)?;
         (prepared.range, prepared.pieces)
     };
     Ok(PreparedValidatedCurve {
@@ -905,13 +905,14 @@ fn prepare_validated_curve<'a>(
     {
         return prepare_mapped_curve(curve, range, options, depth, budget, cancel);
     }
-    prepare_unmapped_curve(curve, range, options, budget, cancel)
+    prepare_unmapped_curve(curve, range, options, None, budget, cancel)
 }
 
 fn prepare_unmapped_curve<'a>(
     curve: &'a Curve,
     range: [f64; 2],
     options: &ValidatedCurveOptions,
+    initial_source_chart: Option<[f64; 2]>,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<PreparedValidatedCurve<'a>, ValidatedGeometryError> {
@@ -955,7 +956,10 @@ fn prepare_unmapped_curve<'a>(
         validated_projection_leader_jet(leader, [range[0], range[0]], budget, cancel)?
             .position
             .map(ValidatedInterval::midpoint);
-    let seed0 = nearest_seed(surface0, leader_start, options, budget, cancel)?;
+    let seed0 = match initial_source_chart {
+        Some(seed) => seed,
+        None => nearest_seed(surface0, leader_start, options, budget, cancel)?,
+    };
     let seed1 = nearest_seed(surface1, leader_start, options, budget, cancel)?;
     let center = numerical_root(
         curve,
@@ -1375,15 +1379,31 @@ fn transform_prepared_jet(
     })
 }
 
+/// Borrowed original carrier and optional numerical start for a generated query.
+#[derive(Clone, Copy, Debug)]
+pub struct ValidatedFacePlaneSource<'a> {
+    /// The actual immutable source-face carrier.
+    pub surface: &'a Surface,
+    /// Original front trim-root chart midpoint, used only as a numerical proposal.
+    ///
+    /// This does not certify a branch or replace full continuation and coverage.
+    /// In particular it does not modify any retained original master selection.
+    pub initial_chart: Option<[f64; 2]>,
+}
+
 /// Binds a native guide to its authoritative source-face and section-plane roots.
 ///
 /// The guide supplies native parameters and coordinate proposals, not geometric
 /// containment. The returned binding owns bounded coefficient clones, so it can
 /// escape a topology carrier-lock callback. All allocation sizes are counted
 /// before cloning. Sampling and all-domain coverage must share this same binding.
+///
+/// An actual original trim-root chart proposal avoids choosing an unrelated
+/// periodic sheet through nearest-point inversion at a closed guide endpoint.
+/// The proposal never substitutes for the same whole-range interval proof.
 pub fn prepared_face_plane_curve(
     guide: &Curve,
-    surface: &Surface,
+    source: ValidatedFacePlaneSource<'_>,
     plane: &Plane,
     range: [f64; 2],
     options: &ValidatedCurveOptions,
@@ -1391,6 +1411,10 @@ pub fn prepared_face_plane_curve(
     cancel: &AtomicBool,
 ) -> Result<PreparedValidatedCurve<'static>, ValidatedGeometryError> {
     budget.charge(1, cancel)?;
+    let ValidatedFacePlaneSource {
+        surface,
+        initial_chart,
+    } = source;
     let interval = interval_range(range)?;
     if interval.lower >= interval.upper
         || options.max_depth > 48
@@ -1400,6 +1424,7 @@ pub fn prepared_face_plane_curve(
         || options.parameter_radius <= 0.0
         || !options.endpoint_tolerance.is_finite()
         || options.endpoint_tolerance <= 0.0
+        || initial_chart.is_some_and(|chart| !chart.into_iter().all(f64::is_finite))
     {
         return Err(ValidatedGeometryError::InvalidInput);
     }
@@ -1447,12 +1472,16 @@ pub fn prepared_face_plane_curve(
         None,
         None,
     ));
+    // Preserve the generic source/range admission before supplying the
+    // generated query's numerical proposal to the unchanged continuation.
+    curve_owned_bytes(&owned, usize::MAX, budget, cancel)?;
+    validate_preparation_range(&owned, range, &bounded, false, 0, budget, cancel)?;
     let PreparedValidatedCurve {
         source,
         pieces,
         mapped,
         ..
-    } = prepared_validated_curve(&owned, range, &bounded, budget, cancel)?;
+    } = prepare_unmapped_curve(&owned, range, &bounded, initial_chart, budget, cancel)?;
     drop(mapped);
     drop(source);
     budget.charge(1, cancel)?;

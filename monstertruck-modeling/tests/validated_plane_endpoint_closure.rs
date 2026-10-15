@@ -2,6 +2,7 @@
 
 use monstertruck_modeling::*;
 use monstertruck_topology::trimmed::TrimmedFace;
+use std::f64::consts::{PI, TAU};
 use std::sync::atomic::AtomicBool;
 
 const CHART_ERROR: f64 = 1.0e-7;
@@ -135,7 +136,10 @@ fn coverage(
     let curve_options = ValidatedCurveOptions::default();
     let candidate = prepared_face_plane_curve(
         &guide,
-        &surface,
+        ValidatedFacePlaneSource {
+            surface: &surface,
+            initial_chart: None,
+        },
         &plane,
         range,
         &curve_options,
@@ -301,6 +305,286 @@ fn normalized_original_source_matches_native_builder_scaled_edge() {
 #[test]
 fn normalized_original_source_preserves_active_raw_restriction_when_scaled() {
     assert_physical_receipts(1.0 / 3.0, Case::ScaledRawBoundaryGauge);
+}
+
+#[test]
+fn periodic_original_seam_root_seeds_complete_closed_face_coverage() {
+    let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+        Curve::Line(Line(
+            Point3::new(1.0, 0.0, -2.0),
+            Point3::new(1.0, 0.0, 2.0),
+        )),
+        Point3::origin(),
+        Vector3::unit_z(),
+    )));
+    let bottom: Wire = primitive::circle(
+        Point3::new(1.0, 0.0, -2.0),
+        Point3::new(0.0, 0.0, -2.0),
+        Vector3::unit_z(),
+        2,
+    );
+    let top: Wire = primitive::circle(
+        Point3::new(1.0, 0.0, 2.0),
+        Point3::new(0.0, 0.0, 2.0),
+        Vector3::unit_z(),
+        2,
+    );
+    // The native seam gauge is `[2, 6]`, independent of both stored UV gauges.
+    let seam_curve = Curve::TrimmedCurve(Processor::new(TrimmedCurve::new(
+        Box::new(Curve::Line(Line(
+            Point3::new(1.0, 0.0, -4.0),
+            Point3::new(1.0, 0.0, -3.0),
+        ))),
+        (2.0, 6.0),
+    )));
+    let seam = Edge::new(bottom[0].front(), top[0].front(), seam_curve.clone());
+    let wire: Wire = [
+        seam.clone(),
+        top[0].clone(),
+        top[1].clone(),
+        seam.inverse(),
+        bottom[1].inverse(),
+        bottom[0].inverse(),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(wire[0].id(), wire[3].id());
+    assert_ne!(wire[0].orientation(), wire[3].orientation());
+    // Stored curves are per-use and in absolute edge direction, including the
+    // two distinct covering-chart copies of the same authoritative seam edge.
+    let trims = [
+        [Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)],
+        [Point2::new(1.0, 0.0), Point2::new(1.0, PI)],
+        [Point2::new(1.0, PI), Point2::new(1.0, TAU)],
+        [Point2::new(0.0, TAU), Point2::new(1.0, TAU)],
+        [Point2::new(0.0, PI), Point2::new(0.0, TAU)],
+        [Point2::new(0.0, 0.0), Point2::new(0.0, PI)],
+    ]
+    .map(|[front, back]| Some(Curve2D::Line(Line(front, back))))
+    .to_vec();
+    let trimmed = TrimmedFace::new(Face::new(vec![wire], surface.clone()), vec![trims]);
+    let cancel = AtomicBool::new(false);
+    let mut preparation = ValidatedGeometryBudget::new(2_000_000);
+    let domain = prepare_face_parameter_domain_with_uncertainty(
+        &trimmed,
+        [CHART_ERROR; 2],
+        TrimDomainLimits {
+            max_coedges: 16,
+            max_subdivisions: 65_536,
+            max_retained_bytes: 32 * 1024 * 1024,
+        },
+        &mut preparation,
+        &cancel,
+    )
+    .expect("authoritative full-period revolution chart with opposite shared seam uses");
+    assert_eq!(domain.uncertainty_uv(), [CHART_ERROR; 2]);
+    assert_eq!(domain.coedges().len(), 6);
+    assert_eq!(domain.coedges()[0].identity.edge_id, seam.id());
+    assert_eq!(domain.coedges()[3].identity.edge_id, seam.id());
+    let plane = Plane::new(
+        Point3::origin(),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    );
+    let curve_options = ValidatedCurveOptions::default();
+    let boundary_range = [2.0, 6.0];
+    let source_cut_parameter = 4.0;
+    let cut_vertex = builder::vertex(seam_curve.evaluate(source_cut_parameter));
+    let (before_cut, after_cut) = seam
+        .cut_with_parameter(&cut_vertex, source_cut_parameter)
+        .expect("actual shared original edge cuts at the section plane");
+    assert_eq!(before_cut.back(), after_cut.front());
+    assert_eq!(
+        before_cut.curve().range_tuple(),
+        (2.0, source_cut_parameter)
+    );
+    assert_eq!(after_cut.curve().range_tuple(), (source_cut_parameter, 6.0));
+    let master = prepared_validated_curve(
+        &seam_curve,
+        boundary_range,
+        &curve_options,
+        &mut preparation,
+        &cancel,
+    )
+    .expect("immutable original raw-gauge seam master, prepared without a query seed");
+    let original_cut = master
+        .evaluate(source_cut_parameter, &mut preparation, &cancel)
+        .expect("original source cut before generated-query preparation")
+        .error;
+    let initial_binding = ValidatedPlaneTrimEndpointBinding {
+        coedge_index: 3,
+        original_edge_id: seam.id(),
+        boundary: &master,
+        boundary_range,
+        boundary_scale: 1.0,
+        candidate_index: 0,
+        endpoint_is_back: false,
+        source_cut_parameter,
+        source_chart_error_mm: CHART_ERROR,
+    };
+    let bindings = [
+        initial_binding,
+        ValidatedPlaneTrimEndpointBinding {
+            coedge_index: 0,
+            endpoint_is_back: true,
+            ..initial_binding
+        },
+    ];
+    let initial_chart = validated_plane_trim_root_chart(
+        &domain,
+        &plane,
+        &bindings[0],
+        32 * 1024 * 1024,
+        &mut preparation,
+        &cancel,
+    )
+    .expect("complete original and nominal root censuses select the actual seam occurrence");
+    assert!(initial_chart[0].lower <= 0.5 && 0.5 <= initial_chart[0].upper);
+    assert!(initial_chart[1].lower <= TAU && TAU <= initial_chart[1].upper);
+    let unrelated_candidate_tags = ValidatedPlaneTrimEndpointBinding {
+        candidate_index: usize::MAX,
+        endpoint_is_back: true,
+        ..bindings[0]
+    };
+    assert_eq!(
+        validated_plane_trim_root_chart(
+            &domain,
+            &plane,
+            &unrelated_candidate_tags,
+            32 * 1024 * 1024,
+            &mut preparation,
+            &cancel,
+        )
+        .expect("a source-chart proposal does not depend on generated candidate tags"),
+        initial_chart
+    );
+    // This is a clockwise closed physical section, shortened only at its back.
+    // A tiny signed start-coordinate roundoff lies on the wrong inverse sheet
+    // near zero, instead of the actual original seam use at the end of a period.
+    let guide = Curve::BsplineCurve(BsplineCurve::new(
+        KnotVector::from(
+            (0_usize..=34)
+                .map(|index| index.saturating_sub(1).min(32) as f64)
+                .collect::<Vec<_>>(),
+        ),
+        (0..=32)
+            .map(|index| {
+                let angle = -(TAU - SHORTENING) * index as f64 / 32.0;
+                Point3::new(
+                    angle.cos(),
+                    if index == 0 { 1.0e-14 } else { angle.sin() },
+                    0.0,
+                )
+            })
+            .collect(),
+    ));
+    let range = [0.0, 32.0];
+    let mut unseeded_preparation = ValidatedGeometryBudget::new(2_000_000);
+    let unseeded = prepared_face_plane_curve(
+        &guide,
+        ValidatedFacePlaneSource {
+            surface: &surface,
+            initial_chart: None,
+        },
+        &plane,
+        range,
+        &curve_options,
+        &mut unseeded_preparation,
+        &cancel,
+    )
+    .expect("unseeded numerical continuation exists on a different periodic sheet");
+    let unseeded_chart = unseeded.pieces()[0]
+        .source_parameters
+        .expect("original carrier uniqueness tube")[0];
+    assert!(unseeded_chart[1].upper < PI);
+    let candidate = prepared_face_plane_curve(
+        &guide,
+        ValidatedFacePlaneSource {
+            surface: &surface,
+            initial_chart: Some(initial_chart.map(ValidatedInterval::midpoint)),
+        },
+        &plane,
+        range,
+        &curve_options,
+        &mut preparation,
+        &cancel,
+    )
+    .expect("actual original coedge root proposes the generated continuation's initial sheet");
+    let candidate_chart = candidate.pieces()[0]
+        .source_parameters
+        .expect("same original carrier, certified with the actual seam-use start")[0];
+    assert!(candidate_chart[1].lower > PI);
+    let options = ValidatedPlaneCoverageOptions {
+        maximum_endpoint_extension_mm: EXTENSION_LIMIT,
+        ..ValidatedPlaneCoverageOptions::default()
+    };
+    let mut wrong_sheet_budget = ValidatedGeometryBudget::new(2_000_000);
+    assert!(
+        validated_face_plane_coverage(
+            &domain,
+            &plane,
+            &[&unseeded],
+            &bindings,
+            &options,
+            &mut wrong_sheet_budget,
+            &cancel,
+        )
+        .is_err()
+    );
+    let mut budget = ValidatedGeometryBudget::new(2_000_000);
+    let proof = validated_face_plane_coverage(
+        &domain,
+        &plane,
+        &[&candidate],
+        &bindings,
+        &options,
+        &mut budget,
+        &cancel,
+    )
+    .expect("complete physical periodic-face coverage with sealed original seam endpoints");
+    assert!(proof.covered_cells > 0);
+    assert_eq!(proof.endpoint_strata.len(), 2);
+    for binding in bindings {
+        let receipt = proof
+            .endpoint_strata
+            .iter()
+            .find(|receipt| receipt.endpoint_is_back() == binding.endpoint_is_back)
+            .expect("each actual opposite seam use seals its own endpoint");
+        assert_eq!(receipt.candidate_index(), 0);
+        assert_eq!(receipt.coedge_index(), binding.coedge_index);
+        assert_eq!(receipt.original_edge_id(), seam.id());
+        let native_root = receipt.source_root_parameter();
+        assert!(native_root[0] <= source_cut_parameter && source_cut_parameter <= native_root[1]);
+        for (axis, coordinate) in [1.0, 0.0, 0.0].into_iter().enumerate() {
+            let position = receipt.position_bounds()[axis];
+            assert!(position.lower <= coordinate && coordinate <= position.upper);
+        }
+        assert!(receipt.maximum_extension_mm() >= 0.0);
+        assert!(receipt.maximum_extension_mm() <= EXTENSION_LIMIT);
+        assert!(receipt.maximum_arc_length_mm() >= 0.0);
+        assert!(receipt.maximum_arc_length_mm() <= EXTENSION_LIMIT);
+        assert!(receipt.maximum_plane_error_mm() >= 0.0);
+        assert!(receipt.maximum_plane_error_mm() <= EXTENSION_LIMIT);
+        if binding.endpoint_is_back {
+            assert!(receipt.maximum_extension_mm() >= SHORTENING * (1.0 - 1.0e-8));
+            assert!(receipt.maximum_arc_length_mm() >= SHORTENING * (1.0 - 1.0e-8));
+        }
+        let max_norm = receipt
+            .position_bounds()
+            .iter()
+            .map(|value| value.lower.abs().max(value.upper.abs()).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!(0.5 * max_norm * receipt.maximum_arc_length_mm() <= 0.0001);
+    }
+    assert_eq!(master.range(), boundary_range);
+    assert_eq!(
+        master
+            .evaluate(source_cut_parameter, &mut preparation, &cancel)
+            .expect("generated-query seeding leaves the retained original master unchanged")
+            .error,
+        original_cut
+    );
 }
 
 #[test]

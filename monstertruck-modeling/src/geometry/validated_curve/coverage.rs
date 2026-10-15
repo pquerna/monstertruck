@@ -10,7 +10,9 @@ use std::sync::atomic::AtomicBool;
 
 mod endpoints;
 mod source_identity;
-pub use endpoints::{ValidatedPlaneTrimEndpoint, ValidatedPlaneTrimEndpointBinding};
+pub use endpoints::{
+    ValidatedPlaneTrimEndpoint, ValidatedPlaneTrimEndpointBinding, validated_plane_trim_root_chart,
+};
 
 const COVERAGE_STACK_BYTES: usize = 16 * 1024;
 
@@ -95,32 +97,15 @@ pub fn validated_face_plane_coverage(
     if axes.into_iter().any(|axis| axis.lower >= axis.upper) {
         return Err(ValidatedGeometryError::InvalidInput);
     }
-    let origin = plane.origin();
-    if !(0..3).all(|i| origin[i].is_finite()) {
-        return Err(ValidatedGeometryError::InvalidInput);
-    }
-    let (a, b) = plane_axes(plane);
-    let normal = super::cross3(a, b);
-    let norm = normal
-        .map(ValidatedInterval::square)
-        .into_iter()
-        .fold(super::ZERO, |a, b| a + b);
-    if !norm.is_finite() || !normal.into_iter().all(ValidatedInterval::is_finite) {
-        return Err(ValidatedGeometryError::ConditioningFailure);
-    }
-    if norm.lower <= 0.0 {
-        return Err(ValidatedGeometryError::Singular);
-    }
-    let origin = std::array::from_fn(|i| ValidatedInterval::point(origin[i]));
     domain.face().with_surface(|surface| {
-        let context = endpoints::FacePlaneContext {
+        let context = endpoints::FacePlaneContext::new(
             domain,
             surface,
             plane,
-            normal,
-            origin,
-            maximum_extension: options.maximum_endpoint_extension_mm,
-        };
+            options.maximum_endpoint_extension_mm,
+        )?;
+        let normal = context.normal;
+        let origin = context.origin;
         let mut matches = Vec::new();
         for (candidate_index, candidate) in candidates.iter().enumerate() {
             budget.charge(1, cancel)?;
