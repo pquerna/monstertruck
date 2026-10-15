@@ -90,11 +90,13 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   Unresolved plane coverage retains the actual original parameter box when a
   single failing cell exists, without rewrapping its chart or changing the
   resource, cancellation or conditioning error category.
-  At terminal subdivision depth, an optional fixed-size candidate witness names
-  the actual candidate and contiguous piece group, failed containment/monotonicity/
-  bracket inequality, coordinate, and raw decisive bounds. It records existing
-  proof attempts only: no rerun, allocation, ordinary-cell tracing or geometry
-  authority. Census failures without an attempted cell retain no witness.
+  At terminal subdivision depth, an optional fixed-size witness identifies an
+  actual candidate/piece rejection or common-junction refusal. Junction evidence
+  names the candidate ends, failed proposal/tube/path/uniqueness stage, retryable
+  proof condition, and available raw bounds, including separated original UV
+  tubes. These are not period shifts or geometry receipts. Only existing proof
+  attempts are recorded: no rerun, allocation or ordinary-cell tracing. Census
+  failures without an attempted cell retain no witness.
 - Generated face/plane endpoints may share a proposed `CoordinatePlane` through
   `ValidatedFacePlaneSource.endpoint_coordinate_planes`. Exact common-coordinate
   root uniqueness, strict path monotonicity and complete joined continuation

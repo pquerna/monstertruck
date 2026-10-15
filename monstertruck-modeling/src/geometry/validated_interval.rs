@@ -54,7 +54,7 @@ pub enum ValidatedPlaneCoverageRejection {
 ///
 /// This is a refusal diagnostic, never a geometry or continuation receipt.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ValidatedPlaneCoverageWitness {
+pub struct ValidatedPlaneCandidateWitness {
     /// Index in the original query's unchanged candidate enumeration.
     pub candidate_index: usize,
     /// First piece in the actual attempted contiguous prepared-piece group.
@@ -68,6 +68,86 @@ pub struct ValidatedPlaneCoverageWitness {
     /// Tube rejection: offending query bound, then original tube bound.
     /// Other stages: the raw derivative or endpoint residual interval bounds.
     pub bounds: [f64; 2],
+}
+
+/// Failed stage of an existing terminal-depth common-junction proof.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValidatedPlaneJunctionRejection {
+    /// The first end has no retained shared coordinate.
+    MissingFirstCoordinate,
+    /// The second end has no retained shared coordinate.
+    MissingSecondCoordinate,
+    /// The two stored endpoint planes are not coefficientwise equal up to sign.
+    DifferentCoordinates,
+    /// Query lower bound lies below the common original tube.
+    TubeLower,
+    /// Query upper bound lies above the common original tube.
+    TubeUpper,
+    /// The first sealed path is not strictly monotone in this world coordinate.
+    FirstMonotonicity,
+    /// The second sealed path is not strictly monotone in this world coordinate.
+    SecondMonotonicity,
+    /// Both paths move in the same direction away from their proposed junction.
+    SameAwayDirection,
+    /// The cell's selected world-coordinate interval is degenerate.
+    DegenerateCoordinate,
+    /// The actual lower outer endpoint does not bracket the cell.
+    OuterLowerBracket,
+    /// The actual upper outer endpoint does not bracket the cell.
+    OuterUpperBracket,
+    /// Fresh shared-original-root uniqueness refused.
+    SharedRootUniqueness,
+    /// Fresh whole-cell fixed-coordinate uniqueness refused.
+    CoordinateUniqueness,
+}
+
+/// Typed retryable refusal from a fresh original-junction certificate.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValidatedPlaneJunctionCondition {
+    /// Inclusion was not established.
+    Unresolved,
+    /// Interval conditioning failed.
+    ConditioningFailure,
+    /// Original surfaces were not certified transverse.
+    NonTransverse,
+    /// A source Jacobian was singular.
+    Singular,
+    /// A rational denominator met zero.
+    DenominatorContainsZero,
+    /// An admitted parameter range was exceeded.
+    ParameterOutOfRange,
+    /// A source knot was nonsmooth.
+    NonSmooth,
+}
+
+/// Compact evidence from an actual terminal-depth junction attempt.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ValidatedPlaneJunctionWitness {
+    /// Original candidate enumeration; retained query caps bound indices to u32.
+    pub candidate_indices: [u32; 2],
+    /// Front=false, back=true; None when that end was not reached.
+    pub ends: [Option<bool>; 2],
+    /// The failed precondition or fresh original certificate.
+    pub rejection: ValidatedPlaneJunctionRejection,
+    /// Source-system axis for tube failures; world axis for path failures.
+    /// Shared-root failure uses the original UV axis when its old tubes separate.
+    pub coordinate: Option<u8>,
+    /// Raw deciding bounds, or None when the stage has no scalar bounds.
+    /// Shared-root failure reports old UV tube separation, never a period shift.
+    pub bounds: Option<[f64; 2]>,
+    /// The actual retryable fresh-certificate refusal, if one was attempted.
+    pub condition: Option<ValidatedPlaneJunctionCondition>,
+}
+
+/// Fixed-size evidence from an existing terminal-depth coverage attempt.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ValidatedPlaneCoverageWitness {
+    /// An individual candidate or contiguous prepared-piece group refused.
+    Candidate(ValidatedPlaneCandidateWitness),
+    /// A proposed joined continuation refused.
+    Junction(ValidatedPlaneJunctionWitness),
 }
 
 /// Failure to establish a native interval geometry certificate.
@@ -102,7 +182,7 @@ pub enum ValidatedGeometryError {
     Unresolved,
     /// Complete original-plane coverage remained unresolved at a named proof operation.
     #[error(
-        "validated plane coverage unresolved during {operation}; original parameter box {parameter_box:?}; terminal candidate witness {witness:?}"
+        "validated plane coverage unresolved during {operation}; original parameter box {parameter_box:?}; terminal coverage witness {witness:?}"
     )]
     PlaneCoverageUnresolved {
         /// The bounded proof operation that failed, without changing its classification.
@@ -110,7 +190,7 @@ pub enum ValidatedGeometryError {
         /// Actual unresolved closed box in the unchanged original covering chart.
         /// Absent when the failing proof has no single original source cell.
         parameter_box: Option<[[f64; 2]; 2]>,
-        /// Best-progress actual candidate attempt, collected only at terminal depth.
+        /// Best-progress actual candidate or junction attempt, only at terminal depth.
         witness: Option<ValidatedPlaneCoverageWitness>,
     },
     /// Continuation could not establish a single connected local branch.

@@ -49,9 +49,9 @@ monstertruck 0.4.0.
   parameter-only trims may use carrier projection; a refused original spatial
   trim tries direct retained-chart sampling instead of silently changing charts.
 - Complete plane-coverage refusals retain an optional fixed-size original
-  parameter box. Terminal-depth candidate witnesses identify the actual
-  prepared-piece group, failed inequality and existing raw bounds, without
-  extra proof work, allocation or changes to numerical limits/classification.
+  parameter box. Terminal-depth candidate/junction witnesses identify the actual
+  prepared-piece group or endpoint pair, failed inequality and existing raw
+  bounds, without extra proof work, allocation or changes to limits/classification.
 - Nested periodic trim inverse queries lift the basis parameter by its declared
   period into the original raw trim range before clipping or rejection, keeping
   shifted original charts rather than selecting the wrong endpoint.

@@ -6,7 +6,9 @@ use super::{
 use crate::{
     Conic2D, Curve, Curve2D, ParameterBoxClassification, Plane, PreparedFaceParameterDomain,
     Surface, TrimDomainError, ValidatedGeometryBudget, ValidatedGeometryError, ValidatedInterval,
-    ValidatedPlaneCoverageRejection, ValidatedPlaneCoverageWitness,
+    ValidatedPlaneCandidateWitness, ValidatedPlaneCoverageRejection, ValidatedPlaneCoverageWitness,
+    ValidatedPlaneJunctionCondition, ValidatedPlaneJunctionRejection,
+    ValidatedPlaneJunctionWitness,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -281,8 +283,15 @@ pub fn validated_face_plane_coverage(
                         }
                     }
                     if !covered {
-                        covered =
-                            junction_covers(&matches, root_cell, position, plane, budget, cancel)?;
+                        covered = junction_covers(
+                            &matches,
+                            root_cell,
+                            position,
+                            plane,
+                            budget,
+                            cancel,
+                            (depth == options.max_depth).then_some(&mut witness),
+                        )?;
                     }
                 }
                 Err(error) if splittable(error) => {}
@@ -447,22 +456,92 @@ impl CandidateDiagnostics<'_> {
             R::CoordinateMonotonicity => 1,
             _ => 2,
         };
-        if self.witness.is_some_and(|previous| {
-            progress(previous.rejection) > progress(rejection)
-                || (progress(previous.rejection) == progress(rejection)
-                    && usize::from(previous.piece_count) >= group.1)
+        if self.witness.is_some_and(|previous| match previous {
+            ValidatedPlaneCoverageWitness::Candidate(previous) => {
+                progress(previous.rejection) > progress(rejection)
+                    || (progress(previous.rejection) == progress(rejection)
+                        && usize::from(previous.piece_count) >= group.1)
+            }
+            ValidatedPlaneCoverageWitness::Junction(_) => true,
         }) {
             return;
         }
-        *self.witness = Some(ValidatedPlaneCoverageWitness {
-            candidate_index: self.candidate_index,
-            first_piece_index: group.0,
-            piece_count: group.1 as u8,
-            rejection,
-            coordinate,
-            bounds,
-        });
+        *self.witness = Some(ValidatedPlaneCoverageWitness::Candidate(
+            ValidatedPlaneCandidateWitness {
+                candidate_index: self.candidate_index,
+                first_piece_index: group.0,
+                piece_count: group.1 as u8,
+                rejection,
+                coordinate,
+                bounds,
+            },
+        ));
     }
+}
+
+struct JunctionDiagnostics<'a> {
+    candidate_indices: [u32; 2],
+    ends: [Option<bool>; 2],
+    uv_separation: Option<(u8, [f64; 2])>,
+    witness: &'a mut Option<ValidatedPlaneCoverageWitness>,
+}
+
+impl JunctionDiagnostics<'_> {
+    fn record(
+        &mut self,
+        rejection: ValidatedPlaneJunctionRejection,
+        coordinate: Option<u8>,
+        bounds: Option<[f64; 2]>,
+        condition: Option<ValidatedPlaneJunctionCondition>,
+    ) {
+        use ValidatedPlaneJunctionRejection as R;
+        let progress = |stage| match stage {
+            R::MissingFirstCoordinate => 0,
+            R::MissingSecondCoordinate => 1,
+            R::DifferentCoordinates => 2,
+            R::TubeLower | R::TubeUpper => 3,
+            R::FirstMonotonicity
+            | R::SecondMonotonicity
+            | R::SameAwayDirection
+            | R::DegenerateCoordinate => 4,
+            R::OuterLowerBracket | R::OuterUpperBracket => 5,
+            R::SharedRootUniqueness => 6,
+            R::CoordinateUniqueness => 7,
+        };
+        if self.witness.is_some_and(|previous| match previous {
+            ValidatedPlaneCoverageWitness::Junction(previous) => {
+                progress(previous.rejection) >= progress(rejection)
+            }
+            ValidatedPlaneCoverageWitness::Candidate(_) => false,
+        }) {
+            return;
+        }
+        *self.witness = Some(ValidatedPlaneCoverageWitness::Junction(
+            ValidatedPlaneJunctionWitness {
+                candidate_indices: self.candidate_indices,
+                ends: self.ends,
+                rejection,
+                coordinate,
+                bounds,
+                condition,
+            },
+        ));
+    }
+}
+
+fn junction_condition(error: ValidatedGeometryError) -> Option<ValidatedPlaneJunctionCondition> {
+    use ValidatedGeometryError as E;
+    use ValidatedPlaneJunctionCondition as C;
+    Some(match error {
+        E::Unresolved => C::Unresolved,
+        E::ConditioningFailure => C::ConditioningFailure,
+        E::NonTransverse => C::NonTransverse,
+        E::Singular => C::Singular,
+        E::DenominatorContainsZero => C::DenominatorContainsZero,
+        E::ParameterOutOfRange => C::ParameterOutOfRange,
+        E::NonSmooth => C::NonSmooth,
+        _ => return None,
+    })
 }
 
 fn candidate_covers(
@@ -623,15 +702,42 @@ fn junction_covers(
     plane: &Plane,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
+    mut diagnostic: Option<&mut Option<ValidatedPlaneCoverageWitness>>,
 ) -> Result<bool, ValidatedGeometryError> {
     let plane_uv = plane_parameters(plane, position)?;
     let source_uv = [interval_range(cell[0])?, interval_range(cell[1])?];
-    for (first_index, &(_, first, first_source)) in matches.iter().enumerate() {
-        for (second_offset, &(_, second, second_source)) in
+    for (first_index, &(first_candidate, first, first_source)) in matches.iter().enumerate() {
+        for (second_offset, &(second_candidate, second, second_source)) in
             matches[first_index..].iter().enumerate()
         {
+            let mut pair_diagnostic = diagnostic.as_deref_mut().and_then(|witness| {
+                Some(JunctionDiagnostics {
+                    candidate_indices: [
+                        u32::try_from(first_candidate).ok()?,
+                        u32::try_from(second_candidate).ok()?,
+                    ],
+                    ends: [None; 2],
+                    uv_separation: None,
+                    witness,
+                })
+            });
             for first_back in [false, true] {
+                if second_offset == 0 && first_back {
+                    continue;
+                }
+                if let Some(diagnostic) = pair_diagnostic.as_mut() {
+                    diagnostic.ends = [Some(first_back), None];
+                    diagnostic.uv_separation = None;
+                }
                 let Some((first_piece, coordinate)) = endpoint_coordinate(first, first_back) else {
+                    if let Some(diagnostic) = pair_diagnostic.as_mut() {
+                        diagnostic.record(
+                            ValidatedPlaneJunctionRejection::MissingFirstCoordinate,
+                            None,
+                            None,
+                            None,
+                        );
+                    }
                     continue;
                 };
                 for second_back in [false, true] {
@@ -642,11 +748,30 @@ fn junction_covers(
                         continue;
                     }
                     budget.charge(1, cancel)?;
+                    if let Some(diagnostic) = pair_diagnostic.as_mut() {
+                        diagnostic.ends[1] = Some(second_back);
+                    }
                     let Some((second_piece, other)) = endpoint_coordinate(second, second_back)
                     else {
+                        if let Some(diagnostic) = pair_diagnostic.as_mut() {
+                            diagnostic.record(
+                                ValidatedPlaneJunctionRejection::MissingSecondCoordinate,
+                                None,
+                                None,
+                                None,
+                            );
+                        }
                         continue;
                     };
                     if !coordinate.same_plane(other) {
+                        if let Some(diagnostic) = pair_diagnostic.as_mut() {
+                            diagnostic.record(
+                                ValidatedPlaneJunctionRejection::DifferentCoordinates,
+                                None,
+                                Some([coordinate.offset, other.offset]),
+                                None,
+                            );
+                        }
                         continue;
                     }
                     let first_box = flatten(
@@ -671,7 +796,43 @@ fn junction_covers(
                     if !(0..4)
                         .all(|i| domain[i].lower <= q[i].lower && q[i].upper <= domain[i].upper)
                     {
+                        if let Some(diagnostic) = pair_diagnostic.as_mut()
+                            && let Some(axis) = (0..4).find(|&i| {
+                                domain[i].lower > q[i].lower || q[i].upper > domain[i].upper
+                            })
+                        {
+                            let (rejection, bounds) = if domain[axis].lower > q[axis].lower {
+                                (
+                                    ValidatedPlaneJunctionRejection::TubeLower,
+                                    [q[axis].lower, domain[axis].lower],
+                                )
+                            } else {
+                                (
+                                    ValidatedPlaneJunctionRejection::TubeUpper,
+                                    [q[axis].upper, domain[axis].upper],
+                                )
+                            };
+                            diagnostic.record(rejection, Some(axis as u8), Some(bounds), None);
+                        }
                         continue;
+                    }
+                    if let Some(diagnostic) = pair_diagnostic.as_mut() {
+                        let source_start = if first_source == 0 { 0 } else { 2 };
+                        for axis in 0..2 {
+                            let first = first_box[source_start + axis];
+                            let second = second_box[source_start + axis];
+                            let bounds = if first.upper < second.lower {
+                                Some([first.upper, second.lower])
+                            } else if second.upper < first.lower {
+                                Some([second.upper, first.lower])
+                            } else {
+                                None
+                            };
+                            if let Some(bounds) = bounds {
+                                diagnostic.uv_separation = Some((axis as u8, bounds));
+                                break;
+                            }
+                        }
                     }
                     if joined_paths_cover(
                         (first, first_piece, first_back),
@@ -679,8 +840,8 @@ fn junction_covers(
                         coordinate,
                         domain,
                         position,
-                        budget,
-                        cancel,
+                        (&mut *budget, cancel),
+                        pair_diagnostic.as_mut(),
                     )? {
                         return Ok(true);
                     }
@@ -713,9 +874,10 @@ fn joined_paths_cover(
     coordinate: CoordinatePlane,
     domain: [ValidatedInterval; 4],
     position: [ValidatedInterval; 3],
-    budget: &mut ValidatedGeometryBudget,
-    cancel: &AtomicBool,
+    execution: (&mut ValidatedGeometryBudget, &AtomicBool),
+    mut diagnostic: Option<&mut JunctionDiagnostics<'_>>,
 ) -> Result<bool, ValidatedGeometryError> {
+    let (budget, cancel) = execution;
     let (first_curve, first_piece, first_back) = first;
     let (second_curve, second_piece, second_back) = second;
     for axis in 0..3 {
@@ -730,13 +892,50 @@ fn joined_paths_cover(
                 None
             }
         };
-        let (Some(first_positive), Some(second_positive)) = (
-            away(first_piece, first_back),
-            away(second_piece, second_back),
-        ) else {
+        let first_away = away(first_piece, first_back);
+        let second_away = away(second_piece, second_back);
+        let (Some(first_positive), Some(second_positive)) = (first_away, second_away) else {
+            if let Some(diagnostic) = diagnostic.as_deref_mut() {
+                let (rejection, derivative) = if first_away.is_none() {
+                    (
+                        ValidatedPlaneJunctionRejection::FirstMonotonicity,
+                        first_piece.jet.first[axis],
+                    )
+                } else {
+                    (
+                        ValidatedPlaneJunctionRejection::SecondMonotonicity,
+                        second_piece.jet.first[axis],
+                    )
+                };
+                diagnostic.record(
+                    rejection,
+                    Some(axis as u8),
+                    Some([derivative.lower, derivative.upper]),
+                    None,
+                );
+            }
             continue;
         };
-        if first_positive == second_positive || position[axis].lower >= position[axis].upper {
+        if first_positive == second_positive {
+            if let Some(diagnostic) = diagnostic.as_deref_mut() {
+                diagnostic.record(
+                    ValidatedPlaneJunctionRejection::SameAwayDirection,
+                    Some(axis as u8),
+                    None,
+                    None,
+                );
+            }
+            continue;
+        }
+        if position[axis].lower >= position[axis].upper {
+            if let Some(diagnostic) = diagnostic.as_deref_mut() {
+                diagnostic.record(
+                    ValidatedPlaneJunctionRejection::DegenerateCoordinate,
+                    Some(axis as u8),
+                    Some([position[axis].lower, position[axis].upper]),
+                    None,
+                );
+            }
             continue;
         }
         let first_outer = first_curve
@@ -758,7 +957,26 @@ fn joined_paths_cover(
         } else {
             (first_outer, second_outer)
         };
-        if lower.upper > position[axis].lower || position[axis].upper > upper.lower {
+        if lower.upper > position[axis].lower {
+            if let Some(diagnostic) = diagnostic.as_deref_mut() {
+                diagnostic.record(
+                    ValidatedPlaneJunctionRejection::OuterLowerBracket,
+                    Some(axis as u8),
+                    Some([lower.upper, position[axis].lower]),
+                    None,
+                );
+            }
+            continue;
+        }
+        if position[axis].upper > upper.lower {
+            if let Some(diagnostic) = diagnostic.as_deref_mut() {
+                diagnostic.record(
+                    ValidatedPlaneJunctionRejection::OuterUpperBracket,
+                    Some(axis as u8),
+                    Some([position[axis].upper, upper.lower]),
+                    None,
+                );
+            }
             continue;
         }
         // Both old endpoint roots lie in this common domain and satisfy these
@@ -777,7 +995,20 @@ fn joined_paths_cover(
             cancel,
         ) {
             Ok(_) => {}
-            Err(error) if splittable(error) => continue,
+            Err(error) if splittable(error) => {
+                if let Some(diagnostic) = diagnostic.as_deref_mut() {
+                    let (coordinate, bounds) = diagnostic
+                        .uv_separation
+                        .map_or((None, None), |(axis, bounds)| (Some(axis), Some(bounds)));
+                    diagnostic.record(
+                        ValidatedPlaneJunctionRejection::SharedRootUniqueness,
+                        coordinate,
+                        bounds,
+                        junction_condition(error),
+                    );
+                }
+                continue;
+            }
             Err(error) => return Err(error),
         }
         let mut normal = [0.0; 3];
@@ -800,7 +1031,16 @@ fn joined_paths_cover(
             cancel,
         ) {
             Ok(_) => return Ok(true),
-            Err(error) if splittable(error) => {}
+            Err(error) if splittable(error) => {
+                if let Some(diagnostic) = diagnostic.as_deref_mut() {
+                    diagnostic.record(
+                        ValidatedPlaneJunctionRejection::CoordinateUniqueness,
+                        Some(axis as u8),
+                        Some([position[axis].lower, position[axis].upper]),
+                        junction_condition(error),
+                    );
+                }
+            }
             Err(error) => return Err(error),
         }
     }
@@ -1245,6 +1485,7 @@ mod plane_zero_cell_regressions {
                 &plane,
                 &mut budget,
                 &cancel,
+                None,
             )
             .unwrap(),
             "the two ends require an actual shared original-root proof"
@@ -1280,6 +1521,7 @@ mod plane_zero_cell_regressions {
                 &plane,
                 &mut budget,
                 &cancel,
+                None,
             )
             .unwrap(),
             "closed guide endpoints are not original continuation authority"
@@ -1374,7 +1616,9 @@ mod plane_zero_cell_regressions {
         assert_ne!(first_coordinate, second_coordinate);
         assert!(first_coordinate.same_plane(second_coordinate));
         let matches = [(0, &curves[0], 0), (1, &curves[1], 0)];
-        assert!(junction_covers(&matches, cell, position, &plane, &mut budget, &cancel,).unwrap());
+        assert!(
+            junction_covers(&matches, cell, position, &plane, &mut budget, &cancel, None).unwrap()
+        );
         for (allowance, cancelled, expected) in [
             (0, false, ValidatedGeometryError::ResourceLimit),
             (2_000_000, true, ValidatedGeometryError::Cancelled),
@@ -1387,6 +1631,7 @@ mod plane_zero_cell_regressions {
                     &plane,
                     &mut ValidatedGeometryBudget::new(allowance),
                     &AtomicBool::new(cancelled),
+                    None,
                 )
                 .unwrap_err(),
                 expected
@@ -1421,6 +1666,7 @@ mod plane_zero_cell_regressions {
                 &plane,
                 &mut budget,
                 &cancel,
+                None,
             )
             .unwrap(),
             "proximity and overlapping uniqueness tubes cannot close an actual gap"
@@ -1490,6 +1736,7 @@ mod plane_zero_cell_regressions {
                 &plane,
                 &mut budget,
                 &cancel,
+                None,
             )
             .unwrap(),
             "the common original uniqueness proof must exclude a second component"
