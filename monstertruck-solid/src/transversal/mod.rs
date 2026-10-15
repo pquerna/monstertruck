@@ -4,10 +4,20 @@
 // points in `integrate` return `ShapeOpsError::NoBackend`.
 #[cfg(feature = "marching-ssi")]
 mod classic;
+mod edge_lineage;
 mod integrate;
 mod prepared;
+pub use edge_lineage::{
+    BooleanCoedgeOrigin, BooleanCoedgeProvenance, BooleanCutSide, BooleanEdgeDerivation,
+};
+mod provenance;
 pub use prepared::{
-    BooleanWorkLimits, PreparedBooleanSource, and_prepared, prepare_boolean_source,
+    BooleanWorkBudget, BooleanWorkLimits, PreparedBooleanSource, and_prepared,
+    and_prepared_counted, prepare_boolean_source, prepare_boolean_source_counted,
+};
+pub use provenance::{
+    BooleanFaceOrigin, BooleanFaceProvenance, BooleanOperand, BooleanWithProvenance,
+    and_prepared_with_provenance, and_prepared_with_provenance_counted,
 };
 // Marching-SSI polyline chaining support consumed by the classic backend.
 #[cfg(feature = "marching-ssi")]

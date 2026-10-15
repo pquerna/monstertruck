@@ -32,8 +32,40 @@ mod content_hash;
 mod curve;
 mod domain_projection;
 mod parameter_curves;
+mod storage;
 mod surface;
+/// Immutable validated implicit-curve continuation.
+pub mod validated_curve;
+/// Outward-rounded native source-geometry enclosures.
+pub mod validated_interval;
+mod validated_phase;
+mod validated_trim;
+
+pub use validated_trim::{
+    ExtrusionChartCurve, NativeSurfaceBoundary, NativeTrimCurve, NaturalBoundaryJointEvidence,
+    ParameterBoxClassification, PreparedFaceParameterDomain, PreparedTrimCoedge, PreparedTrimJoint,
+    SphericalPole, TrimDomainError, TrimDomainLimits, TrimJointKind,
+    certified_affine_surface_parameter_curve, certified_curve2d_endpoint_coordinate,
+    certified_curve2d_is_straight_regular, certified_extrusion_parameter_curve,
+    certified_planar_parameter_curve, certified_surface_boundary_parameter_curve,
+    certified_surface_isocurve_parameter_curve, prepare_face_parameter_domain,
+    prepare_face_parameter_domain_with_natural_boundaries,
+    prepare_face_parameter_domain_with_uncertainty,
+};
 
 pub use curve::{Conic2D, Curve, Curve2D};
 pub use parameter_curves::{ToCompressedTrimmedParameterCurves, ToTrimmedParameterCurves};
+pub use storage::{MAX_NATIVE_GEOMETRY_NESTING, curve_owned_bytes, surface_owned_bytes};
 pub use surface::Surface;
+pub use validated_curve::{
+    PreparedValidatedCurve, ValidatedCurveOptions, ValidatedCurvePiece, ValidatedCurvePoint,
+    ValidatedPlaneCoverage, ValidatedPlaneCoverageOptions, prepared_face_plane_curve,
+    prepared_validated_curve, validated_face_plane_coverage, validated_same_surface_coefficients,
+};
+pub use validated_interval::{
+    ValidatedCurveJet, ValidatedCurveJet2D, ValidatedGeometryBudget, ValidatedGeometryError,
+    ValidatedInterval, ValidatedScalarCurveJet, ValidatedSurfaceJet, validated_boundary_jet,
+    validated_curve_jet, validated_curve_projected_jet, validated_curve2d_jet, validated_sin_cos,
+    validated_surface_jet,
+};
+pub use validated_phase::{validated_asin, validated_atan2};

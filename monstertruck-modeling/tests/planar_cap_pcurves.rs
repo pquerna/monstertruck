@@ -99,6 +99,7 @@ fn curve_kind(curve: &Curve) -> &'static str {
         Curve::NurbsCurve(_) => "NurbsCurve",
         Curve::ParameterCurve(_) => "ParameterCurve",
         Curve::IntersectionCurve(_) => "IntersectionCurve",
+        Curve::TrimmedCurve(_) => "TrimmedCurve",
     }
 }
 

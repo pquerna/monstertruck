@@ -22,17 +22,21 @@ mod faces_classification;
 mod intersection_curve;
 mod loops_store;
 
+use super::edge_lineage::{BooleanCoedgeOrigin, BooleanCoedgeProvenance, EdgeTrace, PairEdgeTrace};
 use super::integrate::{
     InvalidOutputEdgeIncidenceData, InvalidOutputShellConditionData, ShapeOpsCurve, ShapeOpsError,
     ShapeOpsSurface,
 };
 use super::prepared::{BooleanWork, MeshShell, PreparedBooleanSource};
+use super::provenance::{
+    BooleanFaceOrigin, BooleanFaceProvenance, BooleanOperand, BooleanWithProvenance, FaceLineage,
+};
 use crate::alternative::Alternative;
 use monstertruck_geometry::prelude::*;
 use monstertruck_meshing::prelude::*;
 use monstertruck_topology::*;
 use rustc_hash::FxHashMap as HashMap;
-use std::iter;
+use std::{iter, mem::size_of};
 
 type ClassicResult<T> = std::result::Result<T, ShapeOpsError>;
 
@@ -137,6 +141,53 @@ fn process_shell_pair<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     retain_or: bool,
     work: Option<&BooleanWork<'_>>,
 ) -> ClassicResult<[Shell<Point3, C, S>; 2]> {
+    process_shell_pair_with_origins(
+        [
+            ShellInput {
+                native: shell0,
+                mesh: poly_shell0,
+            },
+            ShellInput {
+                native: shell1,
+                mesh: poly_shell1,
+            },
+        ],
+        tol,
+        retain_or,
+        work,
+        None,
+        None,
+    )
+    .map(|(shells, _)| shells)
+}
+
+#[derive(Debug)]
+struct ShellInput<'a, C, S> {
+    native: &'a Shell<Point3, C, S>,
+    mesh: &'a MeshShell,
+}
+
+type ShellPairWithOrigins<C, S> = ([Shell<Point3, C, S>; 2], Vec<BooleanFaceOrigin<S>>);
+
+fn process_shell_pair_with_origins<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
+    inputs: [ShellInput<'_, C, S>; 2],
+    tol: f64,
+    retain_or: bool,
+    work: Option<&BooleanWork<'_>>,
+    input_origins: Option<[&[BooleanFaceOrigin<S>]; 2]>,
+    mut edge_trace: Option<&mut EdgeTrace<C>>,
+) -> ClassicResult<ShellPairWithOrigins<C, S>> {
+    let [
+        ShellInput {
+            native: shell0,
+            mesh: poly_shell0,
+        },
+        ShellInput {
+            native: shell1,
+            mesh: poly_shell1,
+        },
+    ] = inputs;
+    let mut lineage = input_origins.map(|_| FaceLineage::new());
     if let Some(work) = work {
         work.check()?;
     }
@@ -144,40 +195,95 @@ fn process_shell_pair<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
         shell0.mapped(|x| *x, |c| Alternative::FirstType(c.clone()), Clone::clone);
     let altshell1: AltCurveShell<C, S> =
         shell1.mapped(|x| *x, |c| Alternative::FirstType(c.clone()), Clone::clone);
+    let mut pair_edges = PairEdgeTrace::new();
+    if let (Some(trace), Some(work)) = (edge_trace.as_deref_mut(), work) {
+        for (native, mapped) in [(shell0, &altshell0), (shell1, &altshell1)] {
+            for (old, new) in native.iter().zip(mapped.iter()) {
+                for (old, new) in old
+                    .absolute_boundaries()
+                    .iter()
+                    .zip(new.absolute_boundaries())
+                {
+                    for (old, new) in old.iter().zip(new.iter()) {
+                        work.check()?;
+                        if let Some(index) = trace.index(old.id()) {
+                            pair_edges.bind(new.id(), index, work)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let loop_result = if let (Some(trace), Some(work)) = (edge_trace.as_deref_mut(), work) {
+        let mut record = |old, new: &Edge<Point3, AltCurve<C, S>>, cut| {
+            pair_edges.rewrite(trace, old, new, cut, work)
+        };
+        loops_store::create_loops_stores(
+            &altshell0,
+            poly_shell0,
+            &altshell1,
+            poly_shell1,
+            tol,
+            Some(work),
+            Some(&mut record),
+        )
+    } else {
+        loops_store::create_loops_stores(
+            &altshell0,
+            poly_shell0,
+            &altshell1,
+            poly_shell1,
+            tol,
+            work,
+            None,
+        )
+    };
+    if let Some(error) = pair_edges.error.take() {
+        return Err(error);
+    }
     let loops_store::LoopsStoreQuadruple {
         geom_loops_store0: loops_store0,
         geom_loops_store1: loops_store1,
         ..
-    } = loops_store::create_loops_stores(
-        &altshell0,
-        poly_shell0,
-        &altshell1,
-        poly_shell1,
-        tol,
-        work,
-    )?;
+    } = loop_result?;
     if let Some(work) = work {
         work.check()?;
     }
     let mut curve_divisions = divide_face::CurveDivisionCache::new(tol);
-    let mut cls0 = divide_face::divide_faces(
+    let mut cls0 = divide_face::divide_faces_recording(
         &altshell0,
         &loops_store0,
         tol,
         0,
         &mut curve_divisions,
         work,
+        &mut |index, face| {
+            if let (Some(origins), Some(lineage), Some(work)) =
+                (input_origins, lineage.as_mut(), work)
+            {
+                lineage.insert(face, origins[0][index], work)?;
+            }
+            Ok(())
+        },
     )?;
     if !cls0.integrate_by_component() {
         return Err(ShapeOpsError::UnknownClassificationFailed { shell_index: 0 });
     }
-    let mut cls1 = divide_face::divide_faces(
+    let mut cls1 = divide_face::divide_faces_recording(
         &altshell1,
         &loops_store1,
         tol,
         1,
         &mut curve_divisions,
         work,
+        &mut |index, face| {
+            if let (Some(origins), Some(lineage), Some(work)) =
+                (input_origins, lineage.as_mut(), work)
+            {
+                lineage.insert(face, origins[1][index], work)?;
+            }
+            Ok(())
+        },
     )?;
     if !cls1.integrate_by_component() {
         return Err(ShapeOpsError::UnknownClassificationFailed { shell_index: 1 });
@@ -235,7 +341,31 @@ fn process_shell_pair<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
             Shell::default()
         },
     ];
-    Ok(converted)
+    if let (Some(trace), Some(work)) = (edge_trace, work) {
+        for (old, new) in and0.iter().zip(converted[0].iter()) {
+            for (old, new) in old
+                .absolute_boundaries()
+                .iter()
+                .zip(new.absolute_boundaries())
+            {
+                for (old, new) in old.iter().zip(new.iter()) {
+                    work.check()?;
+                    if let Some(index) = pair_edges.index(old.id()) {
+                        trace.bind_native(new.id(), index, work)?;
+                    }
+                }
+            }
+        }
+        trace.prune_shell(&converted[0], work)?;
+    }
+    let origins = if let Some(lineage) = lineage {
+        and0.iter()
+            .map(|face| lineage.origin(face.id()))
+            .collect::<ClassicResult<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    Ok((converted, origins))
 }
 
 fn finalize<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
@@ -366,6 +496,7 @@ pub(crate) fn and_prepared<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     )?;
     for (shell, mesh) in sources.chain(others) {
         work.check()?;
+        work.charge(result.len())?;
         let result_mesh = result.triangulation(tolerance);
         work.check()?;
         work.intermediate(&result_mesh)?;
@@ -381,9 +512,219 @@ pub(crate) fn and_prepared<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
         result = next;
     }
     work.output(&result)?;
+    work.check()?;
     let result = finalize("and", result)?;
     work.check()?;
     Ok(result)
+}
+
+pub(crate) fn and_prepared_with_provenance<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
+    prepared: &PreparedBooleanSource<'_, C, S>,
+    other: &Solid<Point3, C, S>,
+    other_meshes: &[MeshShell],
+    work: &BooleanWork<'_>,
+) -> ClassicResult<BooleanWithProvenance<C, S>> {
+    let other_solid = other;
+    let mut edge_trace = EdgeTrace::new();
+    edge_trace.admit(prepared.source, work)?;
+    edge_trace.admit(other, work)?;
+    let origins = |shell: &Shell<Point3, C, S>, operand, shell_index| {
+        work.limit(
+            "face_lineage_bytes",
+            shell
+                .len()
+                .saturating_mul(size_of::<BooleanFaceOrigin<S>>()),
+            work.limits.max_intermediate_prepared_bytes,
+        )?;
+        shell
+            .iter()
+            .enumerate()
+            .map(|(face_index, face)| {
+                work.check()?;
+                Ok(BooleanFaceOrigin {
+                    operand,
+                    face_id: face.id(),
+                    shell_index,
+                    face_index,
+                    orientation: face.orientation(),
+                })
+            })
+            .collect::<ClassicResult<Vec<_>>>()
+    };
+    let mut sources = prepared
+        .source
+        .boundaries()
+        .iter()
+        .zip(&prepared.meshes)
+        .enumerate()
+        .map(|(index, (shell, mesh))| (BooleanOperand::Source, index, shell, mesh));
+    let mut others = other
+        .boundaries()
+        .iter()
+        .zip(other_meshes)
+        .enumerate()
+        .map(|(index, (shell, mesh))| (BooleanOperand::Other, index, shell, mesh));
+    let (_, source_index, source, source_mesh) = sources
+        .next()
+        .ok_or(ShapeOpsError::EmptyOutputShell { operation: "and" })?;
+    let (_, other_index, other, other_mesh) = others
+        .next()
+        .ok_or(ShapeOpsError::EmptyOutputShell { operation: "and" })?;
+    let source_origins = origins(source, BooleanOperand::Source, source_index)?;
+    let other_origins = origins(other, BooleanOperand::Other, other_index)?;
+    let ([mut result, _], mut result_origins) = process_shell_pair_with_origins(
+        [
+            ShellInput {
+                native: source,
+                mesh: source_mesh,
+            },
+            ShellInput {
+                native: other,
+                mesh: other_mesh,
+            },
+        ],
+        prepared.tolerance,
+        false,
+        Some(work),
+        Some([&source_origins, &other_origins]),
+        Some(&mut edge_trace),
+    )?;
+    for (operand, shell_index, shell, mesh) in sources.chain(others) {
+        work.check()?;
+        work.charge(result.len())?;
+        let result_mesh = result.triangulation(prepared.tolerance);
+        work.check()?;
+        work.intermediate(&result_mesh)?;
+        let shell_origins = origins(shell, operand, shell_index)?;
+        let ([next, _], next_origins) = process_shell_pair_with_origins(
+            [
+                ShellInput {
+                    native: &result,
+                    mesh: &result_mesh,
+                },
+                ShellInput {
+                    native: shell,
+                    mesh,
+                },
+            ],
+            prepared.tolerance,
+            false,
+            Some(work),
+            Some([&result_origins, &shell_origins]),
+            Some(&mut edge_trace),
+        )?;
+        result = next;
+        result_origins = next_origins;
+    }
+    work.output(&result)?;
+    let mut selected = FaceLineage::new();
+    result
+        .iter()
+        .zip(result_origins)
+        .try_for_each(|(face, origin)| selected.insert(face.id(), origin, work))?;
+    work.check()?;
+    let solid = finalize("and", result)?;
+    work.limit(
+        "face_provenance_bytes",
+        solid
+            .face_iter()
+            .count()
+            .saturating_mul(size_of::<BooleanFaceProvenance<S>>()),
+        work.limits.max_intermediate_prepared_bytes,
+    )?;
+    let face_origins = solid
+        .face_iter()
+        .map(|face| {
+            work.check()?;
+            Ok(BooleanFaceProvenance {
+                output_face: face.id(),
+                source: selected.origin(face.id())?,
+            })
+        })
+        .collect::<ClassicResult<Vec<_>>>()?;
+    let coedge_count = solid
+        .face_iter()
+        .map(|face| {
+            face.absolute_boundaries()
+                .iter()
+                .map(|wire| wire.len())
+                .sum::<usize>()
+        })
+        .sum::<usize>();
+    work.limit(
+        "coedge_provenance_bytes",
+        coedge_count.saturating_mul(size_of::<BooleanCoedgeProvenance<C, S>>()),
+        work.limits.max_intermediate_prepared_bytes,
+    )?;
+    let mut coedge_origins = Vec::with_capacity(coedge_count);
+    for face in solid.face_iter() {
+        let origin = selected.origin(face.id())?;
+        let original_solid = match origin.operand {
+            BooleanOperand::Source => prepared.source,
+            BooleanOperand::Other => other_solid,
+        };
+        let original_face = original_solid
+            .boundaries()
+            .get(origin.shell_index)
+            .and_then(|shell| shell.get(origin.face_index))
+            .ok_or(ShapeOpsError::MissingFaceLineage)?;
+        for (wire_index, wire) in face.absolute_boundaries().iter().enumerate() {
+            for (coedge_index, edge) in wire.iter().enumerate() {
+                work.check()?;
+                let source = if let Some(derivation) = edge_trace.index(edge.id()) {
+                    let root = edge_trace.root(derivation, work)?;
+                    let mut occurrence = None;
+                    let mut ambiguous = false;
+                    for (source_wire, wire) in
+                        original_face.absolute_boundaries().iter().enumerate()
+                    {
+                        for (source_coedge, old) in wire.iter().enumerate() {
+                            work.check()?;
+                            if old.id() == root && old.orientation() == edge.orientation() {
+                                if occurrence.is_some() {
+                                    ambiguous = true;
+                                }
+                                occurrence = Some((source_wire, source_coedge));
+                            }
+                        }
+                    }
+                    if ambiguous {
+                        BooleanCoedgeOrigin::AmbiguousOriginalUse {
+                            face: origin,
+                            edge_id: root,
+                        }
+                    } else if let Some((wire_index, coedge_index)) = occurrence {
+                        BooleanCoedgeOrigin::Original {
+                            face: origin,
+                            wire_index,
+                            coedge_index,
+                            edge_id: root,
+                            orientation: edge.orientation() == origin.orientation,
+                            derivation,
+                        }
+                    } else {
+                        return Err(ShapeOpsError::MissingFaceLineage);
+                    }
+                } else {
+                    BooleanCoedgeOrigin::GeneratedIntersection { face: origin }
+                };
+                coedge_origins.push(BooleanCoedgeProvenance {
+                    output_face: face.id(),
+                    wire_index,
+                    coedge_index,
+                    output_edge: edge.id(),
+                    orientation: edge.orientation() == face.orientation(),
+                    source,
+                });
+            }
+        }
+    }
+    Ok(BooleanWithProvenance {
+        solid,
+        face_origins,
+        coedge_origins,
+        edge_derivations: edge_trace.nodes,
+    })
 }
 
 /// OR operation between two solids (classic backend).

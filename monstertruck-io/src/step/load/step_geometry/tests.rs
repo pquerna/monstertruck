@@ -9,7 +9,7 @@ use super::*;
 fn surface_curve_rejects_invalid_pcurve_on_identical_surface() {
     let surface = Surface::ElementarySurface(ElementarySurface::Plane(Plane::xy()));
     let leader = Curve3D::Line(Line(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)));
-    let invalid_trim = ParameterCurve::new(
+    let invalid_trim = StepParameterCurve::new(
         Box::new(Curve2D::Line(Line(
             Point2::new(0.0, 1.0),
             Point2::new(1.0, 1.0),
@@ -32,7 +32,7 @@ fn surface_curve_rejects_invalid_pcurve_on_identical_surface() {
 #[test]
 fn public_parameter_curve_api_uses_descriptive_names() {
     let surface = Surface::ElementarySurface(ElementarySurface::Plane(Plane::xy()));
-    let trim: StepParameterCurve = ParameterCurve::new(
+    let trim: StepParameterCurve = StepParameterCurve::new(
         Box::new(Curve2D::Line(Line(
             Point2::new(0.0, 0.0),
             Point2::new(1.0, 0.0),

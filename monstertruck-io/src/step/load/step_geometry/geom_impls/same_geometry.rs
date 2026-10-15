@@ -58,11 +58,15 @@ impl IncludeCurve<Curve3D> for Plane {
                 .iter()
                 .all(|p| self.search_parameter(*p, None, 1).is_some()),
             Curve3D::ParameterCurve(curve) => matches!(
-                curve.surface().as_ref(),
+                curve.surface(),
                 Surface::ElementarySurface(ElementarySurface::Plane(surface)) if self == surface
             ),
             Curve3D::SurfaceCurve(curve) => self.include(curve.leader()),
             Curve3D::IntersectionCurve(curve) => self.include(curve.leader().as_ref()),
+            Curve3D::TrimmedCurve(curve) => curve.transform().invert().is_some_and(|transform| {
+                self.transformed(transform)
+                    .include(curve.entity().curve().as_ref())
+            }),
         }
     }
 }
@@ -77,7 +81,12 @@ impl ToSameGeometry<Surface> for Plane {
 impl ToSameGeometry<Surface> for ExtrusionSurface<Curve3D, Vector3> {
     #[inline]
     fn to_same_geometry(&self) -> Surface {
-        Surface::SweepSurface(SweepSurface::ExtrusionSurface(self.clone()))
+        Surface::SweepSurface(SweepSurface::ExtrusionSurface(
+            ExtrusionSurface::by_extrusion(
+                Box::new(self.entity_curve().clone()),
+                self.extruding_vector(),
+            ),
+        ))
     }
 }
 
@@ -86,7 +95,11 @@ impl ToSameGeometry<Surface> for RevolutionSurface<Curve3D> {
     fn to_same_geometry(&self) -> Surface {
         let default = || {
             let (curve, origin, axis) = (self.entity_curve().inverse(), self.origin(), self.axis());
-            let processor = Processor::new(RevolutionSurface::by_revolution(curve, origin, axis));
+            let processor = Processor::new(RevolutionSurface::by_revolution(
+                Box::new(curve),
+                origin,
+                axis,
+            ));
             Surface::SweepSurface(SweepSurface::RevolutionSurface(processor))
         };
         match self.entity_curve() {

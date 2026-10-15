@@ -5,7 +5,7 @@
 #[cfg(feature = "marching-ssi")]
 use super::classic;
 use monstertruck_geometry::prelude::*;
-use monstertruck_meshing::tessellation::{ExactTrimBoundary2D, Parallelizable};
+use monstertruck_meshing::tessellation::Parallelizable;
 use monstertruck_topology::{errors::Error as TopologyError, shell::ShellCondition, *};
 use thiserror::Error;
 
@@ -150,6 +150,9 @@ pub enum ShapeOpsError {
     /// Cooperative native Boolean work was cancelled.
     #[error("native Boolean work was cancelled.")]
     Cancelled,
+    /// Native face construction lost its original oriented operand identity.
+    #[error("prepared Boolean output is missing native face genealogy.")]
+    MissingFaceLineage,
     /// A prepared source or query exceeded its explicit work admission.
     #[error("native Boolean resource `{resource}` exceeded {limit}: {actual}.")]
     WorkLimitExceeded {

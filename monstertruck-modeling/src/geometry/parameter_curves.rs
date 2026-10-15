@@ -71,7 +71,7 @@ fn linear_curve2d_boundary(curve: &Curve2D, tolerance: f64) -> Option<Line<Point
             .collect::<Option<Vec<_>>>()
             .filter(|points| points_are_linear_2d(points.iter().copied(), start, end, tolerance))
             .map(|_| Line(start, end)),
-        Curve2D::Conic(_) => None,
+        Curve2D::Conic(_) | Curve2D::TrimmedCurve(_) => None,
     }
 }
 

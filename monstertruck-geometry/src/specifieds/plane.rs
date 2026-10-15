@@ -8,17 +8,39 @@ impl Plane {
             o: origin,
             p: one,
             q: another,
+            axes: None,
         }
     }
+    /// Creates an affine plane without losing axes through translated point sums.
+    #[inline(always)]
+    pub fn from_origin_vectors(origin: Point3, u: Vector3, v: Vector3) -> Self {
+        Self {
+            o: origin,
+            p: origin + u,
+            q: origin + v,
+            axes: Some([u, v]),
+        }
+    }
+    /// Returns original axis coefficients for a vector-defined affine frame.
+    ///
+    /// For a three-point frame, use outward differences of `defining_points`.
+    #[inline(always)]
+    pub const fn stored_axes(&self) -> Option<[Vector3; 2]> { self.axes }
     /// Returns the origin
     #[inline(always)]
     pub const fn origin(&self) -> Point3 { self.o }
+    /// Returns stored frame points without arithmetic.
+    ///
+    /// When `stored_axes` is present, those vectors are authoritative; these
+    /// translated points are only rounded constructions, not exact coefficients.
+    #[inline(always)]
+    pub const fn defining_points(&self) -> [Point3; 3] { [self.o, self.p, self.q] }
     /// Returns the u-axis
     #[inline(always)]
-    pub fn axis_u(&self) -> Vector3 { self.p - self.o }
+    pub fn axis_u(&self) -> Vector3 { self.axes.map_or_else(|| self.p - self.o, |axes| axes[0]) }
     /// Returns the v-axis
     #[inline(always)]
-    pub fn axis_v(&self) -> Vector3 { self.q - self.o }
+    pub fn axis_v(&self) -> Vector3 { self.axes.map_or_else(|| self.q - self.o, |axes| axes[1]) }
     /// Deprecated alias for [`axis_u`](Plane::axis_u).
     ///
     /// Renamed for `<property>_<direction>` consistency with `derivative_u`,
@@ -81,6 +103,7 @@ impl Plane {
             o: Point3::new(0.0, 0.0, 0.0),
             p: Point3::new(1.0, 0.0, 0.0),
             q: Point3::new(0.0, 1.0, 0.0),
+            axes: None,
         }
     }
     /// yz-plane
@@ -90,6 +113,7 @@ impl Plane {
             o: Point3::new(0.0, 0.0, 0.0),
             p: Point3::new(0.0, 1.0, 0.0),
             q: Point3::new(0.0, 0.0, 1.0),
+            axes: None,
         }
     }
     /// zx-plane
@@ -99,6 +123,7 @@ impl Plane {
             o: Point3::new(0.0, 0.0, 0.0),
             p: Point3::new(0.0, 0.0, 1.0),
             q: Point3::new(1.0, 0.0, 0.0),
+            axes: None,
         }
     }
 }
@@ -117,19 +142,19 @@ impl ParametricSurface for Plane {
     fn derivative_mn(&self, m: usize, n: usize, u: f64, v: f64) -> Self::Vector {
         match (m, n) {
             (0, 0) => self.evaluate(u, v).to_vec(),
-            (1, 0) => self.p - self.o,
-            (0, 1) => self.q - self.o,
+            (1, 0) => self.axis_u(),
+            (0, 1) => self.axis_v(),
             _ => Vector3::zero(),
         }
     }
     #[inline(always)]
     fn evaluate(&self, u: f64, v: f64) -> Point3 {
-        self.o + u * (self.p - self.o) + v * (self.q - self.o)
+        self.o + u * (self.axis_u()) + v * (self.axis_v())
     }
     #[inline(always)]
-    fn derivative_u(&self, _: f64, _: f64) -> Vector3 { self.p - self.o }
+    fn derivative_u(&self, _: f64, _: f64) -> Vector3 { self.axis_u() }
     #[inline(always)]
-    fn derivative_v(&self, _: f64, _: f64) -> Vector3 { self.q - self.o }
+    fn derivative_v(&self, _: f64, _: f64) -> Vector3 { self.axis_v() }
     #[inline(always)]
     fn derivative_uu(&self, _: f64, _: f64) -> Vector3 { Vector3::zero() }
     #[inline(always)]
@@ -211,6 +236,7 @@ impl Invertible for Plane {
             o: self.o,
             p: self.q,
             q: self.p,
+            axes: self.axes.map(|[u, v]| [v, u]),
         }
     }
     #[inline(always)]
@@ -269,14 +295,15 @@ impl<T: Transform3<Scalar = f64>> Transformed<T> for Plane {
         self.o = trans.transform_point(self.o);
         self.p = trans.transform_point(self.p);
         self.q = trans.transform_point(self.q);
+        self.axes = self
+            .axes
+            .map(|axes| axes.map(|axis| trans.transform_vector(axis)));
     }
     #[inline(always)]
     fn transformed(&self, trans: T) -> Self {
-        Plane {
-            o: trans.transform_point(self.o),
-            p: trans.transform_point(self.p),
-            q: trans.transform_point(self.q),
-        }
+        let mut result = *self;
+        result.transform_by(trans);
+        result
     }
 }
 
@@ -312,7 +339,12 @@ impl SearchNearestParameter<SurfaceParameter> for Plane {
 }
 
 impl From<Plane> for BsplineSurface<Point3> {
-    fn from(Plane { o, p, q }: Plane) -> Self {
+    fn from(plane: Plane) -> Self {
+        let [o, p, q] = plane.defining_points();
+        let [p, q] = match plane.stored_axes() {
+            Some([u, v]) => [o + u, o + v],
+            None => [p, q],
+        };
         BsplineSurface::debug_new(
             (KnotVector::bezier_knot(1), KnotVector::bezier_knot(1)),
             vec![vec![o, q], vec![p, p + (q - o)]],
@@ -335,12 +367,12 @@ impl v2::ParametricSurface for Plane {
 
     #[inline(always)]
     fn evaluate(&self, u: f64, v: f64) -> Point3 {
-        self.o + u * (self.p - self.o) + v * (self.q - self.o)
+        self.o + u * (self.axis_u()) + v * (self.axis_v())
     }
     #[inline(always)]
-    fn derivative_u(&self, _: f64, _: f64) -> Vector3 { self.p - self.o }
+    fn derivative_u(&self, _: f64, _: f64) -> Vector3 { self.axis_u() }
     #[inline(always)]
-    fn derivative_v(&self, _: f64, _: f64) -> Vector3 { self.q - self.o }
+    fn derivative_v(&self, _: f64, _: f64) -> Vector3 { self.axis_v() }
     #[inline(always)]
     fn derivative_uu(&self, _: f64, _: f64) -> Vector3 { Vector3::zero() }
     #[inline(always)]

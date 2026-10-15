@@ -70,6 +70,15 @@ impl save::StepLength for SurfaceCurve3D {
 
 impl save::StepCurve for SurfaceCurve3D {
     fn same_sense(&self) -> bool { self.leader().same_sense() }
+    fn step_parameter_chart(&self) -> Option<crate::step::ParameterChart> {
+        save::StepCurve::step_parameter_chart(self.leader())
+    }
+    fn step_reversed_parameter_chart(&self) -> Option<crate::step::ParameterChart> {
+        save::StepCurve::step_reversed_parameter_chart(self.leader())
+    }
+    fn step_parameter_period(&self) -> Option<f64> {
+        save::StepCurve::step_parameter_period(self.leader())
+    }
 }
 
 impl save::ConstStepLength for Processor<Sphere, Matrix4> {
@@ -213,5 +222,41 @@ impl save::StepFormat for GeometricCurveSet {
             }
         }
         Ok(())
+    }
+}
+
+macro_rules! source_step_surface {
+    ($ty:ident; $($variant:ident),+ $(,)?) => {
+        impl save::StepSurface for $ty {
+            fn same_sense(&self) -> bool {
+                match self { $(Self::$variant(surface) => save::StepSurface::same_sense(surface),)+ }
+            }
+            fn step_parameter_chart(&self) -> Option<crate::step::SurfaceParameterChart> {
+                match self {
+                    $(Self::$variant(surface) => save::StepSurface::step_parameter_chart(surface),)+
+                }
+            }
+        }
+    };
+}
+
+source_step_surface!(ElementarySurface; Plane, Sphere, CylindricalSurface, ConicalSurface, ToroidalSurface);
+source_step_surface!(SweepSurface; ExtrusionSurface, RevolutionSurface);
+impl save::StepSurface for Surface {
+    fn same_sense(&self) -> bool {
+        match self {
+            Self::ElementarySurface(surface) => save::StepSurface::same_sense(surface),
+            Self::SweepSurface(surface) => save::StepSurface::same_sense(surface),
+            Self::BsplineSurface(surface) => save::StepSurface::same_sense(surface),
+            Self::NurbsSurface(surface) => save::StepSurface::same_sense(surface),
+        }
+    }
+    fn step_parameter_chart(&self) -> Option<crate::step::SurfaceParameterChart> {
+        match self {
+            Self::ElementarySurface(surface) => save::StepSurface::step_parameter_chart(surface),
+            Self::SweepSurface(surface) => save::StepSurface::step_parameter_chart(surface),
+            Self::BsplineSurface(surface) => save::StepSurface::step_parameter_chart(surface),
+            Self::NurbsSurface(surface) => save::StepSurface::step_parameter_chart(surface),
+        }
     }
 }

@@ -84,13 +84,80 @@ pub struct Vector {
     pub orientation: Direction,
     pub magnitude: f64,
 }
-impl From<&Vector> for Vector2 {
-    #[inline(always)]
-    fn from(vec: &Vector) -> Self { Self::from(&vec.orientation) * vec.magnitude }
+/// Invalid STEP direction, geometric vector or two-dimensional placement data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum VectorSemanticError {
+    /// A geometric entity and its consuming geometry have different dimensions.
+    #[error("STEP geometric entity has dimension {actual}; expected {expected}.")]
+    InvalidDimension { expected: usize, actual: usize },
+    /// A direction ratio, magnitude or placement coordinate is nonfinite.
+    #[error("STEP direction, vector or placement contains a nonfinite coefficient.")]
+    NonFinite,
+    /// All direction ratios vanish.
+    #[error("STEP geometric DIRECTION has no orientation.")]
+    ZeroDirection,
+    /// A geometric vector has no positive magnitude.
+    #[error("STEP geometric VECTOR requires a positive magnitude.")]
+    NonPositiveMagnitude,
 }
-impl From<&Vector> for Vector3 {
-    #[inline(always)]
-    fn from(vec: &Vector) -> Self { Self::from(&vec.orientation) * vec.magnitude }
+
+fn unit_direction<const N: usize>(direction: &Direction) -> Result<[f64; N], VectorSemanticError> {
+    let ratios = &direction.direction_ratios;
+    if ratios.len() != N {
+        return Err(VectorSemanticError::InvalidDimension {
+            expected: N,
+            actual: ratios.len(),
+        });
+    }
+    if ratios.iter().any(|ratio| !ratio.is_finite()) {
+        return Err(VectorSemanticError::NonFinite);
+    }
+    let scale = ratios
+        .iter()
+        .fold(0.0f64, |max, value| max.max(value.abs()));
+    if scale == 0.0 {
+        return Err(VectorSemanticError::ZeroDirection);
+    }
+    // DIRECTION ratios specify orientation, not vector length. Scaling first
+    // keeps normalization finite for legal subnormal and very large ratios.
+    let mut result = [0.0; N];
+    for (target, ratio) in result.iter_mut().zip(ratios) {
+        *target = ratio / scale;
+    }
+    let norm = result.iter().map(|value| value * value).sum::<f64>().sqrt();
+    for value in &mut result {
+        *value /= norm;
+    }
+    Ok(result)
+}
+
+fn geometric_vector<const N: usize>(vector: &Vector) -> Result<[f64; N], VectorSemanticError> {
+    if !vector.magnitude.is_finite() {
+        return Err(VectorSemanticError::NonFinite);
+    }
+    if vector.magnitude <= 0.0 {
+        return Err(VectorSemanticError::NonPositiveMagnitude);
+    }
+    let mut result = unit_direction::<N>(&vector.orientation)?;
+    for value in &mut result {
+        *value *= vector.magnitude;
+    }
+    Ok(result)
+}
+
+impl TryFrom<&Vector> for Vector2 {
+    type Error = VectorSemanticError;
+    fn try_from(vector: &Vector) -> Result<Self, Self::Error> {
+        let [x, y] = geometric_vector::<2>(vector)?;
+        Ok(Self::new(x, y))
+    }
+}
+impl TryFrom<&Vector> for Vector3 {
+    type Error = VectorSemanticError;
+    fn try_from(vector: &Vector) -> Result<Self, Self::Error> {
+        let [x, y, z] = geometric_vector::<3>(vector)?;
+        Ok(Self::new(x, y, z))
+    }
 }
 
 /// `placement`
@@ -151,8 +218,12 @@ impl TryFrom<&Axis2Placement> for Matrix3 {
     fn try_from(axis: &Axis2Placement) -> Result<Self, StepConvertingError> {
         use Axis2Placement::*;
         match axis {
-            Axis2Placement2d(axis) => Ok(Matrix3::from(axis)),
-            Axis2Placement3d(_) => Err("This is not a 2D axis placement.".into()),
+            Axis2Placement2d(axis) => Ok(Matrix3::try_from(axis)?),
+            Axis2Placement3d(_) => Err(VectorSemanticError::InvalidDimension {
+                expected: 2,
+                actual: 3,
+            }
+            .into()),
         }
     }
 }
@@ -181,16 +252,37 @@ pub struct Axis2Placement2d {
     pub ref_direction: Option<Direction>,
 }
 
-impl From<&Axis2Placement2d> for Matrix3 {
-    #[inline(always)]
-    fn from(axis: &Axis2Placement2d) -> Self {
+impl TryFrom<&Axis2Placement2d> for Matrix3 {
+    type Error = VectorSemanticError;
+    fn try_from(axis: &Axis2Placement2d) -> Result<Self, Self::Error> {
+        if axis.location.coordinates.len() != 2 {
+            return Err(VectorSemanticError::InvalidDimension {
+                expected: 2,
+                actual: axis.location.coordinates.len(),
+            });
+        }
+        if axis
+            .location
+            .coordinates
+            .iter()
+            .any(|value| !value.is_finite())
+        {
+            return Err(VectorSemanticError::NonFinite);
+        }
         let z = Point2::from(&axis.location);
         let x = match &axis.ref_direction {
-            Some(axis) => Vector2::from(axis),
+            Some(direction) => {
+                let [x, y] = unit_direction::<2>(direction)?;
+                Vector2::new(x, y)
+            }
             None => Vector2::unit_x(),
         };
         let y = Vector2::new(-x.y, x.x);
-        Matrix3::from_cols(x.extend(0.0), y.extend(0.0), z.to_vec().extend(1.0))
+        Ok(Matrix3::from_cols(
+            x.extend(0.0),
+            y.extend(0.0),
+            z.to_vec().extend(1.0),
+        ))
     }
 }
 
@@ -243,5 +335,64 @@ impl From<&Axis2Placement3d> for Matrix4 {
             z.extend(0.0),
             w.to_vec().extend(1.0),
         )
+    }
+}
+
+#[cfg(test)]
+mod step_vector_semantic_regressions {
+    use super::*;
+
+    fn vector(ratios: &[f64], magnitude: f64) -> Vector {
+        Vector {
+            label: String::new(),
+            orientation: Direction {
+                label: String::new(),
+                direction_ratios: ratios.to_vec(),
+            },
+            magnitude,
+        }
+    }
+
+    #[test]
+    fn declared_magnitude_is_independent_of_direction_ratio_length() {
+        for ratio in [2.0, f64::MAX, f64::from_bits(1)] {
+            assert_eq!(
+                Vector3::try_from(&vector(&[0.0, 0.0, ratio], 3.0)).unwrap(),
+                Vector3::new(0.0, 0.0, 3.0)
+            );
+            assert_eq!(
+                Vector2::try_from(&vector(&[0.0, ratio], 3.0)).unwrap(),
+                Vector2::new(0.0, 3.0)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_geometric_vectors_have_typed_failures() {
+        assert_eq!(
+            Vector3::try_from(&vector(&[0.0, 0.0, 0.0], 3.0)),
+            Err(VectorSemanticError::ZeroDirection)
+        );
+        assert_eq!(
+            Vector3::try_from(&vector(&[0.0, 0.0, f64::INFINITY], 3.0)),
+            Err(VectorSemanticError::NonFinite)
+        );
+        assert_eq!(
+            Vector2::try_from(&vector(&[0.0, 1.0], f64::NAN)),
+            Err(VectorSemanticError::NonFinite)
+        );
+        for magnitude in [0.0, -3.0] {
+            assert_eq!(
+                Vector3::try_from(&vector(&[0.0, 0.0, 2.0], magnitude)),
+                Err(VectorSemanticError::NonPositiveMagnitude)
+            );
+        }
+        assert_eq!(
+            Vector2::try_from(&vector(&[0.0, 0.0, 2.0], 3.0)),
+            Err(VectorSemanticError::InvalidDimension {
+                expected: 2,
+                actual: 3
+            })
+        );
     }
 }

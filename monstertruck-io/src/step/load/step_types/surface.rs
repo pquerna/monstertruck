@@ -16,6 +16,23 @@ pub enum SurfaceAny {
     SweptSurface(Box<SweptSurfaceAny>),
 }
 
+impl SurfaceAny {
+    pub(crate) fn validate_curve_nesting(&self, depth: usize) -> Result<(), ExactConversionError> {
+        validate_source_nesting_depth(depth)?;
+        match self {
+            Self::SweptSurface(surface) => match surface.as_ref() {
+                SweptSurfaceAny::SurfaceOfLinearExtrusion(surface) => {
+                    validate_owned_curve_nesting(&surface.swept_curve, depth + 1)
+                }
+                SweptSurfaceAny::SurfaceOfRevolution(surface) => {
+                    validate_owned_curve_nesting(&surface.swept_curve, depth + 1)
+                }
+            },
+            Self::ElementarySurface(_) | Self::BsplineSurface(_) => Ok(()),
+        }
+    }
+}
+
 impl TryFrom<&SurfaceAny> for Surface {
     type Error = StepConvertingError;
     #[inline(always)]
@@ -88,9 +105,7 @@ impl From<&Plane> for geom::Plane {
     fn from(plane: &Plane) -> Self {
         let mat = Matrix4::from(&plane.position);
         let o = Point3::from_homogeneous(mat[3]);
-        let p = o + mat[0].truncate();
-        let q = o + mat[1].truncate();
-        Self::new(o, p, q)
+        Self::from_origin_vectors(o, mat[0].truncate(), mat[1].truncate())
     }
 }
 
@@ -333,7 +348,11 @@ impl TryFrom<&DegenerateToroidalSurface> for step_geometry::ToroidalSurface {
     }
 }
 
-/// `conical_surface`
+/// STEP `conical_surface`.
+///
+/// Geometry conversion requires `semi_angle` in radians. The importing
+/// representation context owns declared plane-angle unit normalization; no
+/// magnitude-based unit inference is performed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Holder)]
 #[holder(table = Table)]
 #[holder(field = conical_surface)]
@@ -344,14 +363,6 @@ pub struct ConicalSurface {
     position: Axis2Placement3d,
     radius: f64,
     semi_angle: f64,
-}
-
-fn normalize_conical_semi_angle(semi_angle: f64) -> f64 {
-    if semi_angle.abs() > PI {
-        semi_angle.to_radians()
-    } else {
-        semi_angle
-    }
 }
 
 impl From<&ConicalSurface> for step_geometry::ConicalSurface {
@@ -365,8 +376,7 @@ impl From<&ConicalSurface> for step_geometry::ConicalSurface {
     ) -> Self {
         let mat = Matrix4::from(position);
         let p = Point3::new(*radius, 0.0, 0.0);
-        let semi_angle = normalize_conical_semi_angle(*semi_angle);
-        let v = Vector3::new(f64::tan(semi_angle), 0.0, 1.0);
+        let v = Vector3::new(f64::tan(*semi_angle), 0.0, 1.0);
         let rev =
             RevolutionSurface::by_revolution(Line(p, p + v), Point3::origin(), Vector3::unit_z());
         let mut processor = Processor::new(rev);
@@ -671,8 +681,8 @@ impl TryFrom<&SurfaceOfLinearExtrusion> for StepExtrusionSurface {
     #[inline(always)]
     fn try_from(sr: &SurfaceOfLinearExtrusion) -> Result<Self, Self::Error> {
         let curve = Curve3D::try_from(&sr.swept_curve)?;
-        let vector = Vector3::from(&sr.extrusion_axis);
-        Ok(ExtrusionSurface::by_extrusion(curve, vector))
+        let vector = Vector3::try_from(&sr.extrusion_axis)?;
+        Ok(ExtrusionSurface::by_extrusion(Box::new(curve), vector))
     }
 }
 
@@ -696,7 +706,11 @@ impl TryFrom<&SurfaceOfRevolution> for StepRevolutionSurface {
         let curve = Curve3D::try_from(&sr.swept_curve)?;
         let origin = Point3::from(&sr.axis_position.location);
         let axis = sr.axis_position.direction().normalize();
-        let mut rev = Processor::new(RevolutionSurface::by_revolution(curve, origin, axis));
+        let mut rev = Processor::new(RevolutionSurface::by_revolution(
+            Box::new(curve),
+            origin,
+            axis,
+        ));
         rev.invert();
         Ok(rev)
     }

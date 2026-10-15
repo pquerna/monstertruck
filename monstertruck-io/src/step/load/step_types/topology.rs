@@ -61,12 +61,13 @@ impl EdgeCurve {
     ) -> Result<Curve2D, StepConvertingError> {
         let mut curve = match curve {
             CurveAny::Line(line) => {
-                let line = geom::Line::<Point2>::from(line.as_ref());
+                let line = geom::Line::<Point2>::try_from(line.as_ref())?;
                 let p = line.projection(p);
                 let q = line.projection(q);
                 Curve2D::Line(Line(p, q))
             }
             CurveAny::BoundedCurve(b) => b.as_ref().try_into()?,
+            CurveAny::TrimmedCurve(curve) => curve.as_ref().try_into()?,
             CurveAny::Conic(curve) => match curve.as_ref() {
                 Conic::Circle(circle) => {
                     let mat =
@@ -166,6 +167,7 @@ impl EdgeCurve {
         if !same_sense {
             curve.invert();
         }
+        curve.raw_parameter_gauge()?;
         Ok(curve)
     }
     pub fn parse_curve3d(&self) -> Result<Curve3D, StepConvertingError> {
@@ -184,8 +186,14 @@ impl EdgeCurve {
         same_sense: bool,
     ) -> Result<Curve3D, StepConvertingError> {
         let mut curve = match curve {
-            CurveAny::Line(_) => Curve3D::Line(Line(p, q)),
+            CurveAny::Line(line) => {
+                // This legacy edge path parameterizes its declared endpoints,
+                // but must not silently admit an invalid source VECTOR.
+                let _ = Vector3::try_from(&line.dir)?;
+                Curve3D::Line(Line(p, q))
+            }
             CurveAny::BoundedCurve(b) => b.as_ref().try_into()?,
+            CurveAny::TrimmedCurve(curve) => curve.as_ref().try_into()?,
             CurveAny::Conic(curve) => match curve.as_ref() {
                 Conic::Circle(circle) => {
                     let mat =
@@ -293,6 +301,15 @@ impl EdgeCurve {
                 let v = surface
                     .search_nearest_parameter(q, None, 100)
                     .ok_or_else(|| "the point is not on surface".to_string())?;
+                let chart = surface.raw_surface_parameter_chart()?.inverse().ok_or(
+                    step_geometry::ExactConversionError::UnrepresentableTrimParameterChart,
+                )?;
+                let u = chart.nominal([u.0, u.1]).ok_or(
+                    step_geometry::ExactConversionError::UnrepresentableTrimParameterChart,
+                )?;
+                let v = chart.nominal([v.0, v.1]).ok_or(
+                    step_geometry::ExactConversionError::UnrepresentableTrimParameterChart,
+                )?;
                 let curve2d = c
                     .reference_to_curve
                     .representation_item
@@ -300,19 +317,43 @@ impl EdgeCurve {
                     .ok_or("no representation item")?;
                 let curve2d = Self::sub_parse_2d(
                     curve2d,
-                    Point2::new(u.0, u.1),
-                    Point2::new(v.0, v.1),
+                    Point2::new(u[0], u[1]),
+                    Point2::new(v[0], v[1]),
                     true,
                 )?;
-                Curve3D::ParameterCurve(geom::ParameterCurve::new(
+                Curve3D::ParameterCurve(step_geometry::StepParameterCurve::try_from_raw(
                     Box::new(curve2d),
                     Box::new(surface),
-                ))
+                )?)
             }
             CurveAny::SurfaceCurve(c) => {
-                if p.near(&q) {
-                    return Self::sub_parse_curve3d(&c.curve_3d, p, q, same_sense);
-                }
+                let leader = Self::sub_parse_curve3d(&c.curve_3d, p, q, true)?;
+                let closed_range = p.near(&q).then(|| leader.range_tuple());
+                let declared_parameter_curve = |source: &Pcurve| -> Result<
+                    step_geometry::StepParameterCurve,
+                    StepConvertingError,
+                > {
+                    let converted: step_geometry::StepParameterCurve = source.try_into()?;
+                    let Some(range) = closed_range else {
+                        return Ok(converted);
+                    };
+                    // STEP LINE and conic bases have no declared finite domain.
+                    // Their native convenience ranges are not trimming authority.
+                    // Keep the original basis, not a cut/reanchored approximation;
+                    // declared association is still not a correspondence proof.
+                    let unbounded = matches!(
+                        source.reference_to_curve.representation_item.first(),
+                        Some(CurveAny::Line(_) | CurveAny::Conic(_))
+                    );
+                    if !unbounded {
+                        return Ok(converted);
+                    }
+                    Ok(converted.map_curve(|uv| {
+                        Box::new(Curve2D::TrimmedCurve(SourceTrimmedCurve::internal(
+                            Processor::new(TrimmedCurve::new(uv, range)),
+                        )))
+                    }))
+                };
                 let associated_surface = |entry: &PcurveOrSurface| -> Result<
                     step_geometry::Surface,
                     StepConvertingError,
@@ -326,9 +367,7 @@ impl EdgeCurve {
                     .associated_geometry
                     .iter()
                     .map(|entry| match entry {
-                        PcurveOrSurface::Pcurve(curve) => curve
-                            .as_ref()
-                            .try_into()
+                        PcurveOrSurface::Pcurve(curve) => declared_parameter_curve(curve)
                             .map(step_geometry::SurfaceCurveAssociatedGeometry::ParameterCurve),
                         PcurveOrSurface::Surface(surface) => surface
                             .as_ref()
@@ -357,8 +396,8 @@ impl EdgeCurve {
                         step_geometry::SurfaceCurveRepresentation::ParameterCurve1
                     }
                 };
-                let leader = Self::sub_parse_curve3d(&c.curve_3d, p, q, true)?;
-                if associated_geometry.len() >= 2
+                if closed_range.is_none()
+                    && associated_geometry.len() >= 2
                     && associated_geometry.iter().all(|entry| {
                         matches!(
                             entry,
@@ -392,6 +431,7 @@ impl EdgeCurve {
         if !same_sense {
             curve.invert();
         }
+        curve.raw_parameter_gauge()?;
         Ok(curve)
     }
 }

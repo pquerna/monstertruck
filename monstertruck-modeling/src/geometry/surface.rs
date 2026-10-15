@@ -26,6 +26,8 @@ pub enum Surface {
     /// revoluted curve
     #[serde(alias = "RevolutedCurve")]
     RevolutionSurface(Processor<RevolutionSurface<Curve>, Matrix4>),
+    /// Exact linear extrusion of its original profile.
+    ExtrusionSurface(ExtrusionSurface<Curve, Vector3>),
     /// T-spline surface
     TsplineSurface(Tmesh<Point3>),
     /// Analytic sphere, posed by the processor's transform.
@@ -47,6 +49,7 @@ macro_rules! derive_surface_method {
             Self::BsplineSurface(got) => $method(got, $($ver), *),
             Self::NurbsSurface(got) => $method(got, $($ver), *),
             Self::RevolutionSurface(got) => $method(got, $($ver), *),
+            Self::ExtrusionSurface(got) => $method(got, $($ver), *),
             Self::TsplineSurface(got) => $method(got, $($ver), *),
             Self::SphericalSurface(got) => $method(got, $($ver), *),
             Self::ToroidalSurface(got) => $method(got, $($ver), *),
@@ -61,6 +64,7 @@ macro_rules! derive_surface_self_method {
             Self::BsplineSurface(got) => Self::BsplineSurface($method(got, $($ver), *)),
             Self::NurbsSurface(got) => Self::NurbsSurface($method(got, $($ver), *)),
             Self::RevolutionSurface(got) => Self::RevolutionSurface($method(got, $($ver), *)),
+            Self::ExtrusionSurface(got) => Self::ExtrusionSurface($method(got, $($ver), *)),
             Self::TsplineSurface(got) => Self::TsplineSurface($method(got, $($ver), *)),
             Self::SphericalSurface(got) => Self::SphericalSurface($method(got, $($ver), *)),
             Self::ToroidalSurface(got) => Self::ToroidalSurface($method(got, $($ver), *)),
@@ -129,6 +133,10 @@ where S: ParametricSurface3D + SearchParameter<SurfaceParameter, Point = Point3>
         }
         Curve::BsplineCurve(spline) => include_knots(spline.knot_vector(), spline.degree()),
         Curve::NurbsCurve(spline) => include_knots(spline.knot_vector(), spline.degree()),
+        Curve::TrimmedCurve(trimmed) => {
+            let (start, end) = trimmed.range_tuple();
+            include_span(start, end, 8)
+        }
         Curve::ParameterCurve(parameter) => match parameter.curve() {
             Curve2D::Line(line) => {
                 let (start, end) = line.range_tuple();
@@ -142,6 +150,10 @@ where S: ParametricSurface3D + SearchParameter<SurfaceParameter, Point = Point3>
             Curve2D::Conic(conic) => {
                 let (start, end) = conic.range_tuple();
                 include_span(start, end, 4)
+            }
+            Curve2D::TrimmedCurve(trimmed) => {
+                let (start, end) = trimmed.range_tuple();
+                include_span(start, end, 8)
             }
             Curve2D::BsplineCurve(spline) => include_knots(spline.knot_vector(), spline.degree()),
             Curve2D::NurbsCurve(spline) => include_knots(spline.knot_vector(), spline.degree()),
@@ -164,7 +176,7 @@ impl IncludeCurve<Curve> for Surface {
     fn include(&self, curve: &Curve) -> bool {
         if let Curve::ParameterCurve(curve) = curve {
             same_surface(curve.surface().as_ref(), self)
-        } else if matches!(curve, Curve::IntersectionCurve(_)) {
+        } else if matches!(curve, Curve::IntersectionCurve(_) | Curve::TrimmedCurve(_)) {
             sampled_surface_includes_curve(self, curve)
         } else {
             match self {
@@ -172,19 +184,25 @@ impl IncludeCurve<Curve> for Surface {
                     &Curve::Line(curve) => surface.include(&BsplineCurve::from(curve)),
                     Curve::BsplineCurve(curve) => surface.include(curve),
                     Curve::NurbsCurve(curve) => surface.include(curve),
-                    Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => unreachable!(),
+                    Curve::IntersectionCurve(_)
+                    | Curve::ParameterCurve(_)
+                    | Curve::TrimmedCurve(_) => unreachable!(),
                 },
                 Surface::NurbsSurface(surface) => match curve {
                     &Curve::Line(curve) => surface.include(&BsplineCurve::from(curve)),
                     Curve::BsplineCurve(curve) => surface.include(curve),
                     Curve::NurbsCurve(curve) => surface.include(curve),
-                    Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => unreachable!(),
+                    Curve::IntersectionCurve(_)
+                    | Curve::ParameterCurve(_)
+                    | Curve::TrimmedCurve(_) => unreachable!(),
                 },
                 Surface::Plane(surface) => match curve {
                     &Curve::Line(curve) => surface.include(&BsplineCurve::from(curve)),
                     Curve::BsplineCurve(curve) => surface.include(curve),
                     Curve::NurbsCurve(curve) => surface.include(curve),
-                    Curve::IntersectionCurve(_) | Curve::ParameterCurve(_) => unreachable!(),
+                    Curve::IntersectionCurve(_)
+                    | Curve::ParameterCurve(_)
+                    | Curve::TrimmedCurve(_) => unreachable!(),
                 },
                 Surface::TsplineSurface(surface) => {
                     curve.lift_up().control_points().iter().all(|v| {
@@ -204,6 +222,9 @@ impl IncludeCurve<Curve> for Surface {
                     sampled_surface_includes_curve(surface, curve)
                 }
                 Surface::ToroidalSurface(surface) => sampled_surface_includes_curve(surface, curve),
+                Surface::ExtrusionSurface(surface) => {
+                    sampled_surface_includes_curve(surface, curve)
+                }
                 // Preserve the posed original carrier. Reconstructing from its
                 // entity curve drops the Processor's transform and inversion.
                 Surface::RevolutionSurface(surface) => {
@@ -396,6 +417,9 @@ impl SearchNearestParameter<SurfaceParameter> for Surface {
                 bspsurface.search_nearest_parameter(point, hint, trials)
             }
             Surface::NurbsSurface(surface) => surface.search_nearest_parameter(point, hint, trials),
+            Surface::ExtrusionSurface(surface) => {
+                surface.search_nearest_parameter(point, hint, trials)
+            }
             Surface::TsplineSurface(surface) => {
                 surface.search_nearest_parameter(point, hint, trials)
             }
@@ -442,6 +466,16 @@ impl TryIntoBsplineSurface for Surface {
             Surface::BsplineSurface(b) => b.try_into_bspline_surface(),
             Surface::NurbsSurface(n) => n.try_into_bspline_surface(),
             Surface::RevolutionSurface(_) => None,
+            Surface::ExtrusionSurface(surface) => {
+                let curve = match surface.entity_curve() {
+                    Curve::Line(line) => BsplineCurve::from(*line),
+                    Curve::BsplineCurve(curve) => curve.clone(),
+                    _ => return None,
+                };
+                let translated =
+                    curve.transformed(Matrix4::from_translation(surface.extruding_vector()));
+                Some(BsplineSurface::homotopy(curve, translated))
+            }
             Surface::TsplineSurface(_) => None,
             // No exact NON-rational net exists for either; the exact form is
             // the homogeneous one below.
@@ -457,6 +491,7 @@ impl TryIntoHomogeneousBsplineSurface for Surface {
             Surface::BsplineSurface(b) => b.try_into_homogeneous_bspline_surface(),
             Surface::NurbsSurface(n) => n.try_into_homogeneous_bspline_surface(),
             Surface::RevolutionSurface(r) => r.try_into_homogeneous_bspline_surface(),
+            Surface::ExtrusionSurface(surface) => surface.try_into_homogeneous_bspline_surface(),
             Surface::TsplineSurface(_) => None,
             // The SAME call the STEP loader used to make eagerly, on the same
             // `Processor<_, Matrix4>`: the net the boolean's homogeneous path
@@ -482,6 +517,53 @@ impl TryIntoHomogeneousBsplineSurface for Surface {
             Surface::RevolutionSurface(r) => {
                 r.try_into_homogeneous_bspline_surface_over(parameter_range)
             }
+            Surface::ExtrusionSurface(surface) => {
+                let Some((urange, vrange)) = parameter_range else {
+                    return surface
+                        .try_into_homogeneous_bspline_surface()
+                        .map(Into::into);
+                };
+                if ![urange.0, urange.1, vrange.0, vrange.1]
+                    .into_iter()
+                    .all(f64::is_finite)
+                    || urange.0 >= urange.1
+                    || vrange.0 >= vrange.1
+                {
+                    return None;
+                }
+                let profile = surface
+                    .entity_curve()
+                    .try_into_homogeneous_bspline_curve_over(urange)
+                    .or_else(|| surface.entity_curve().try_into_homogeneous_bspline_curve())?;
+                let direction = surface.extruding_vector();
+                let points = profile
+                    .control_points()
+                    .iter()
+                    .map(|point| {
+                        [vrange.0, vrange.1]
+                            .into_iter()
+                            .map(|v| {
+                                Vector4::new(
+                                    point.x + v * direction.x * point.w,
+                                    point.y + v * direction.y * point.w,
+                                    point.z + v * direction.z * point.w,
+                                    point.w,
+                                )
+                            })
+                            .collect()
+                    })
+                    .collect();
+                Some(HomogeneousSurfaceConversion {
+                    surface: BsplineSurface::new(
+                        (
+                            profile.knot_vector().clone(),
+                            KnotVector::from(vec![vrange.0, vrange.0, vrange.1, vrange.1]),
+                        ),
+                        points,
+                    ),
+                    surface_frame_axes: (true, true),
+                })
+            }
             Surface::TsplineSurface(_) => None,
             Surface::SphericalSurface(s) => {
                 s.try_into_homogeneous_bspline_surface_over(parameter_range)
@@ -501,6 +583,7 @@ impl SupportsExactPatchDomains for Surface {
             Surface::NurbsSurface(n) => n.supports_exact_patch_domains(),
             Surface::RevolutionSurface(r) => r.supports_exact_patch_domains(),
             Surface::TsplineSurface(t) => t.supports_exact_patch_domains(),
+            Surface::ExtrusionSurface(_) => false,
             // `false`, where the rational net answered `true`. This is the same
             // flip T22 made when cylinders and cones moved onto the analytic
             // revolution variant, and for the same reason: the patch domain of
@@ -519,6 +602,7 @@ impl TryIntoAnalyticSurfaceKind for Surface {
             Surface::NurbsSurface(n) => n.try_into_analytic_surface_kind(),
             Surface::RevolutionSurface(r) => r.try_into_analytic_surface_kind(),
             Surface::TsplineSurface(t) => t.try_into_analytic_surface_kind(),
+            Surface::ExtrusionSurface(_) => None,
             // `None`, which is exactly what these faces answered as rational
             // nets: `NurbsSurface::try_into_analytic_surface_kind` only ever
             // recognises a plane or a homogeneous extrusion, and a sphere net
@@ -540,26 +624,58 @@ impl ToSameGeometry<Surface> for HomotopySurface<Curve, Curve> {
 }
 
 impl ToSameGeometry<Surface> for ExtrusionSurface<Curve, Vector3> {
-    fn to_same_geometry(&self) -> Surface {
-        let (curve0, vector) = (self.entity_curve(), self.extruding_vector());
-        let trsl = Matrix4::from_translation(vector);
-        let curve1 = self.entity_curve().transformed(trsl);
-        match (curve0, curve1) {
-            (Curve::Line(line), Curve::Line(_)) => {
-                Plane::new(line.0, line.1, line.0 + vector).into()
-            }
-            (Curve::BsplineCurve(curve0), Curve::BsplineCurve(curve1)) => {
-                BsplineSurface::homotopy(curve0.clone(), curve1.clone()).into()
-            }
-            (Curve::NurbsCurve(curve0), Curve::NurbsCurve(curve1)) => {
-                NurbsSurface::new(BsplineSurface::homotopy(
-                    curve0.non_rationalized().clone(),
-                    curve1.non_rationalized().clone(),
-                ))
-                .into()
-            }
-            (Curve::IntersectionCurve(_), Curve::IntersectionCurve(_)) => unimplemented!(),
-            _ => unreachable!(),
-        }
+    fn to_same_geometry(&self) -> Surface { Surface::ExtrusionSurface(self.clone()) }
+}
+
+#[cfg(test)]
+mod native_extrusion_tests {
+    use super::*;
+
+    #[test]
+    fn native_extrusion_preserves_profile_and_actual_extent() {
+        let profile = Curve::BsplineCurve(BsplineCurve::new(
+            KnotVector::bezier_knot(2),
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 2.0, 0.0),
+                Point3::new(2.0, 0.0, 0.0),
+            ],
+        ));
+        let direction = Vector3::new(0.25, -0.5, 3.0);
+        let native = ExtrusionSurface::by_extrusion(profile.clone(), direction);
+        let surface = native.to_same_geometry();
+        assert!(matches!(surface, Surface::ExtrusionSurface(_)));
+        assert_eq!(
+            surface.evaluate(0.25, 7.0),
+            profile.evaluate(0.25) + direction * 7.0
+        );
+        assert_eq!(surface.derivative_v(0.25, 7.0), direction);
+        assert_eq!(surface.derivative_uv(0.25, 7.0), Vector3::zero());
+        let conversion = surface
+            .try_into_homogeneous_bspline_surface_over(Some(((0.0, 1.0), (-2.0, 7.0))))
+            .unwrap();
+        assert_eq!(conversion.surface_frame_axes, (true, true));
+        assert_near!(
+            conversion.surface.evaluate(0.25, 7.0).to_point(),
+            surface.evaluate(0.25, 7.0)
+        );
+        assert_near!(
+            surface.inverse().evaluate(0.75, 7.0),
+            surface.evaluate(0.25, 7.0)
+        );
+    }
+
+    #[test]
+    fn native_line_extrusion_is_not_replaced_by_a_plane() {
+        let profile = Curve::Line(Line(Point3::origin(), Point3::new(2.0, 0.0, 0.0)));
+        let surface = ExtrusionSurface::by_extrusion(profile, Vector3::unit_z()).to_same_geometry();
+        assert!(matches!(surface, Surface::ExtrusionSurface(_)));
+        let conversion = surface
+            .try_into_homogeneous_bspline_surface_over(Some(((-3.0, 4.0), (-2.0, 7.0))))
+            .unwrap();
+        assert_near!(
+            conversion.surface.evaluate(-3.0, 7.0).to_point(),
+            surface.evaluate(-3.0, 7.0)
+        );
     }
 }

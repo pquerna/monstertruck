@@ -6,6 +6,7 @@ use crate::filters::StructuringFilter;
 use array_macro::array;
 use handles::FixedVertexHandle;
 use itertools::{Either, Itertools};
+#[cfg(test)]
 use monstertruck_geometry::prelude::ParameterCurve;
 use rustc_hash::FxHashMap as HashMap;
 use std::{collections::hash_map::Entry, env, iter};
@@ -29,117 +30,6 @@ type Cdt = ConstrainedDelaunayTriangulation<SPoint2>;
 type MeshedShell = Shell<Point3, PolylineCurve, Option<PolygonMesh>>;
 type MeshedCompressedShell = CompressedShell<Point3, PolylineCurve, Option<PolygonMesh>>;
 type TrimmedShell<C, S, T> = CompressedTrimmedShell<Point3, C, S, T>;
-
-const MAX_LIFTED_TRIM_SUBDIVISION_DEPTH: usize = 16;
-
-/// Provides exact trim boundaries in surface parameter space.
-pub trait ExactTrimBoundary2D {
-    /// Samples the trim boundary in surface parameter space.
-    fn exact_trim_boundary_2d(&self, tolerance: f64) -> Vec<Point2>;
-
-    /// Projects a point on the spatial boundary back onto this trim boundary.
-    fn project_boundary_point(&self, _point: Point3, _hint: Option<f64>) -> Option<(f64, Point2)> {
-        None
-    }
-}
-
-impl<C, S> ExactTrimBoundary2D for ParameterCurve<C, S>
-where
-    C: ParametricCurve2D + BoundedCurve + ParameterDivision1D<Point = Point2>,
-    S: ParametricSurface3D,
-    ParameterCurve<C, S>: SearchParameter<CurveParameter, Point = Point3>
-        + SearchNearestParameter<CurveParameter, Point = Point3>,
-{
-    fn exact_trim_boundary_2d(&self, tolerance: f64) -> Vec<Point2> {
-        lifted_trim_boundary_2d(self, tolerance)
-    }
-
-    fn project_boundary_point(&self, point: Point3, hint: Option<f64>) -> Option<(f64, Point2)> {
-        // A boundary is walked from the trim's start. A trim closed in space
-        // but open in parameter space matches its start with both ends, and
-        // an unseeded search can land on the far one, sending every later
-        // projection off the curve. So an absent hint means the start.
-        let hint = hint.or(Some(self.curve().range_tuple().0));
-        self.search_parameter(point, hint, 100)
-            .or_else(|| self.search_nearest_parameter(point, hint, 100))
-            .or_else(|| self.search_parameter(point, None, 100))
-            .or_else(|| self.search_nearest_parameter(point, None, 100))
-            .map(|t| (t, self.curve().subs(t)))
-    }
-}
-
-fn lifted_trim_boundary_2d<C, S>(trim_curve: &ParameterCurve<C, S>, tolerance: f64) -> Vec<Point2>
-where
-    C: ParametricCurve2D + BoundedCurve + ParameterDivision1D<Point = Point2>,
-    S: ParametricSurface3D, {
-    let (parameters, boundary) = trim_curve
-        .curve()
-        .parameter_division(trim_curve.curve().range_tuple(), tolerance);
-    if parameters.len() != boundary.len() || boundary.len() <= 1 {
-        boundary
-    } else {
-        let mut refined = Vec::with_capacity(boundary.len());
-        refined.push(boundary[0]);
-        parameters
-            .windows(2)
-            .zip(boundary.windows(2))
-            .for_each(|(parameters, boundary)| {
-                append_lifted_trim_segment(
-                    trim_curve,
-                    (parameters[0], boundary[0]),
-                    (parameters[1], boundary[1]),
-                    tolerance * tolerance,
-                    0,
-                    &mut refined,
-                );
-            });
-        refined
-    }
-}
-
-fn append_lifted_trim_segment<C, S>(
-    trim_curve: &ParameterCurve<C, S>,
-    front: (f64, Point2),
-    back: (f64, Point2),
-    tolerance2: f64,
-    depth: usize,
-    refined: &mut Vec<Point2>,
-) where
-    C: ParametricCurve2D,
-    S: ParametricSurface3D,
-{
-    let (front_parameter, front_uv) = front;
-    let (back_parameter, back_uv) = back;
-    if depth >= MAX_LIFTED_TRIM_SUBDIVISION_DEPTH || (back_parameter - front_parameter).so_small() {
-        refined.push(back_uv);
-    } else {
-        let middle_parameter = (front_parameter + back_parameter) * 0.5;
-        let middle_uv = trim_curve.curve().subs(middle_parameter);
-        let front_point = trim_curve.surface().subs(front_uv.x, front_uv.y);
-        let middle_point = trim_curve.surface().subs(middle_uv.x, middle_uv.y);
-        let back_point = trim_curve.surface().subs(back_uv.x, back_uv.y);
-        if point_segment_distance2(middle_point, front_point, back_point) > tolerance2 {
-            append_lifted_trim_segment(
-                trim_curve,
-                front,
-                (middle_parameter, middle_uv),
-                tolerance2,
-                depth + 1,
-                refined,
-            );
-            append_lifted_trim_segment(
-                trim_curve,
-                (middle_parameter, middle_uv),
-                back,
-                tolerance2,
-                depth + 1,
-                refined,
-            );
-        } else {
-            refined.push(back_uv);
-        }
-    }
-}
 
 fn mesh_trace_enabled() -> bool { env::var_os("MT_MESH_TRACE").is_some() }
 

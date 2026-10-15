@@ -115,8 +115,14 @@ where
             self.evaluate(t).to_vec()
         } else {
             let t = self.curve_parameter(t);
-            self.transform
-                .transform_vector(self.entity.derivative_n(n, t))
+            let derivative = self
+                .transform
+                .transform_vector(self.entity.derivative_n(n, t));
+            if !self.orientation && n % 2 == 1 {
+                derivative * -1.0
+            } else {
+                derivative
+            }
         }
     }
     #[inline(always)]
@@ -731,7 +737,19 @@ where
             self.entity
                 .search_nearest_parameter(inv.transform_point(point), hint, trials)?;
         let hint = self.curve_parameter(hint);
-        algo::curve::search_nearest_parameter(self, point, hint, trials)
+        // Newton refines distance in the transformed metric, but can leave a trim.
+        // Compare only selected-domain candidates, including both endpoints.
+        let candidate = algo::curve::search_nearest_parameter(self, point, hint, trials);
+        let (start, end) = self.range_tuple();
+        [Some(start), Some(end), Some(hint), candidate]
+            .into_iter()
+            .flatten()
+            .filter(|t| t.is_finite())
+            .map(|t| t.clamp(start, end))
+            .map(|t| (t, (self.evaluate(t) - point).magnitude2()))
+            .filter(|(_, distance)| distance.is_finite())
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(t, _)| t)
     }
 }
 

@@ -26,7 +26,7 @@ use std::f64::consts::TAU;
 impl SurfaceCurveAssociatedGeometry {
     fn surface(&self) -> &Surface {
         match self {
-            SurfaceCurveAssociatedGeometry::ParameterCurve(curve) => curve.surface().as_ref(),
+            SurfaceCurveAssociatedGeometry::ParameterCurve(curve) => curve.surface(),
             SurfaceCurveAssociatedGeometry::Surface(surface) => surface,
         }
     }
@@ -49,11 +49,20 @@ impl SurfaceCurveAssociatedGeometry {
 mod bspline_nets;
 /// Curve behaviour on the STEP curve enums.
 mod curve_traits;
+/// Exact source/native parameter correspondence.
+mod parameter_maps;
 /// Parameter-space trims of a STEP curve on a STEP surface.
 mod parameter_trims;
 /// Lifting concrete geometry back into the STEP enums.
 mod same_geometry;
+/// Outward enclosures of original STEP coefficients.
+mod source_jets;
 /// Conversion into `monstertruck-modeling` geometry.
 mod to_modeling;
 
+pub use parameter_maps::{
+    CurveParameterDomain, CurveParameterMap, CurveParameterMapKind, ExactConversionError,
+    SurfaceParameterMap,
+};
+pub use source_jets::validated_step_conic_jet;
 pub use to_modeling::ROUTE_ANALYTIC_SPHERE;

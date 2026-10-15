@@ -186,10 +186,83 @@ impl TryIntoHomogeneousBsplineCurve for NurbsCurve<Vector4> {
 }
 
 impl TryIntoHomogeneousBsplineCurve for TrimmedCurve<UnitCircle<Point3>> {
-    #[inline]
     fn try_into_homogeneous_bspline_curve(&self) -> Option<BsplineCurve<Vector4>> {
-        let curve: NurbsCurve<Vector4> = self.to_same_geometry();
-        Some(curve.into())
+        let (start, end) = self.range_tuple();
+        let span = end - start;
+        if !start.is_finite() || !end.is_finite() || span <= 0.0 || span > std::f64::consts::TAU {
+            return None;
+        }
+        let count = (span / std::f64::consts::FRAC_PI_2).ceil() as usize;
+        let step = span / count as f64;
+        let angle = |i: usize| {
+            if i == count {
+                end
+            } else {
+                start + step * i as f64
+            }
+        };
+        if (0..count).any(|i| angle(i + 1) <= angle(i)) {
+            return None;
+        }
+        let knots = (0..=count)
+            .flat_map(|i| std::iter::repeat_n(angle(i), if i == 0 || i == count { 3 } else { 2 }))
+            .collect::<Vec<_>>();
+        let controls = (0..=2 * count)
+            .map(|i| {
+                let theta = if i % 2 == 0 {
+                    angle(i / 2)
+                } else {
+                    angle(i / 2) + (angle(i / 2 + 1) - angle(i / 2)) / 2.0
+                };
+                let weight = if i % 2 == 0 {
+                    1.0
+                } else {
+                    ((angle(i / 2 + 1) - angle(i / 2)) / 2.0).cos()
+                };
+                Vector4::new(theta.cos(), theta.sin(), 0.0, weight)
+            })
+            .collect();
+        Some(BsplineCurve::new(KnotVector::from(knots), controls))
+    }
+}
+
+impl TryIntoHomogeneousBsplineCurve for TrimmedCurve<UnitParabola<Point3>> {
+    fn try_into_homogeneous_bspline_curve(&self) -> Option<BsplineCurve<Vector4>> {
+        let (start, end) = self.range_tuple();
+        let controls = [
+            Vector4::new(start * start, 2.0 * start, 0.0, 1.0),
+            Vector4::new(start * end, start + end, 0.0, 1.0),
+            Vector4::new(end * end, 2.0 * end, 0.0, 1.0),
+        ];
+        (start.is_finite()
+            && end.is_finite()
+            && end > start
+            && controls.iter().all(|p| p.x.is_finite() && p.y.is_finite()))
+        .then(|| {
+            BsplineCurve::new(
+                KnotVector::from(vec![start, start, start, end, end, end]),
+                controls.to_vec(),
+            )
+        })
+    }
+}
+
+impl TryIntoHomogeneousBsplineCurve for TrimmedCurve<UnitHyperbola<Point3>> {
+    fn try_into_homogeneous_bspline_curve(&self) -> Option<BsplineCurve<Vector4>> {
+        let (start, end) = self.range_tuple();
+        let (a, b) = ((start / 2.0).tanh(), (end / 2.0).tanh());
+        if !start.is_finite() || !end.is_finite() || end <= start || a <= -1.0 || b >= 1.0 || b <= a
+        {
+            return None;
+        }
+        Some(BsplineCurve::new(
+            KnotVector::from(vec![a, a, a, b, b, b]),
+            vec![
+                Vector4::new(1.0 + a * a, 2.0 * a, 0.0, 1.0 - a * a),
+                Vector4::new(1.0 + a * b, a + b, 0.0, 1.0 - a * b),
+                Vector4::new(1.0 + b * b, 2.0 * b, 0.0, 1.0 - b * b),
+            ],
+        ))
     }
 }
 

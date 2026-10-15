@@ -40,9 +40,10 @@ fn exec_test_near<THolder, T>(ans: T, step_str: &str)
 where
     THolder: Holder<Table = Table>,
     Table: EntityTable<THolder>,
-    T: for<'a> From<&'a THolder::Owned> + std::fmt::Debug + Tolerance, {
+    T: for<'a> TryFrom<&'a THolder::Owned> + std::fmt::Debug + Tolerance,
+    for<'a> <T as TryFrom<&'a THolder::Owned>>::Error: std::fmt::Debug, {
     let entity = step_to_entity(step_str);
-    let res = T::from(&entity);
+    let res = T::try_from(&entity).unwrap();
     assert_near!(res, ans);
 }
 
@@ -192,7 +193,7 @@ fn exec_axis2_placement2d(org_coord: [f64; 2], theta: f64) {
         StepDisplay::new(VectorAsDirection(dir), 3),
     );
     let placement = step_to_entity::<Axis2Placement2dHolder>(&step_str);
-    let res: Matrix3 = (&placement).into();
+    let res: Matrix3 = (&placement).try_into().unwrap();
     let n = Vector2::new(-dir.y, dir.x);
     let ans = Matrix3::from_cols(dir.extend(0.0), n.extend(0.0), origin.to_vec().extend(1.0));
     assert_near!(res, ans);
@@ -256,7 +257,7 @@ fn exec_line(org_coord: [f64; 3], vec_elem: [f64; 3]) {
         StepDisplay::new(v, 3),
     );
     let line = step_to_entity::<LineHolder>(&step_str);
-    let res: truck::Line<Point3> = (&line).into();
+    let res: truck::Line<Point3> = (&line).try_into().unwrap();
     let ans = truck::Line(p, q);
     assert_near!(res.0, ans.0);
     assert_near!(res.1, ans.1);

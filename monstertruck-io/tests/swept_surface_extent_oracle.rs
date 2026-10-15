@@ -803,7 +803,7 @@ fn extrusion_fixture(control_points: Vec<Point3>, degree: usize, axis: Vector3) 
         control_points,
     ));
     Surface::SweepSurface(SweepSurface::ExtrusionSurface(
-        StepExtrusionSurface::by_extrusion(profile, axis),
+        StepExtrusionSurface::by_extrusion(Box::new(profile), axis),
     ))
 }
 

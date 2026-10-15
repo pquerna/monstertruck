@@ -1,6 +1,6 @@
 use crate::step::save;
 use derive_more::From;
-use monstertruck_derive::{StepCurve, StepFormat, StepLength, StepSurface};
+use monstertruck_derive::{StepFormat, StepLength};
 use serde::{Deserialize, Serialize};
 
 /// re-export structs in `monstertruck-geometry` and `monstertruck-mesh`.
@@ -9,6 +9,12 @@ pub mod re_exports {
     pub use monstertruck_mesh::*;
 }
 pub use re_exports::*;
+
+mod source_trimmed_curve;
+pub use source_trimmed_curve::{SourceParameterGauge, SourceTrimmedCurve};
+mod raw_parameter_charts;
+mod raw_parameter_curve;
+pub use raw_parameter_curve::StepParameterCurve;
 
 /// Errors that occur when converting STEP format
 pub type StepConvertingError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -27,13 +33,10 @@ pub type CylindricalSurface = Processor<RevolutionSurface<Line<Point3>>, Matrix4
 pub type ToroidalSurface = Processor<Torus, Matrix4>;
 /// `conical_surface`, realized in `monstertruck`
 pub type ConicalSurface = Processor<RevolutionSurface<Line<Point3>>, Matrix4>;
-/// `surface_of_linear_extrusion`, realized in `monstertruck`
-pub type StepExtrusionSurface = ExtrusionSurface<Curve3D, Vector3>;
-/// `surface_of_revolution`, realized in `monstertruck`
-pub type StepRevolutionSurface = Processor<RevolutionSurface<Curve3D>, Matrix4>;
-/// STEP parameter curve on a surface, realized in `monstertruck`.
-pub type StepParameterCurve =
-    monstertruck_geometry::prelude::ParameterCurve<Box<Curve2D>, Box<Surface>>;
+/// `surface_of_linear_extrusion`, realized with an owned boxed [`Curve3D`] profile.
+pub type StepExtrusionSurface = ExtrusionSurface<Box<Curve3D>, Vector3>;
+/// `surface_of_revolution`, realized with an owned boxed [`Curve3D`] profile.
+pub type StepRevolutionSurface = Processor<RevolutionSurface<Box<Curve3D>>, Matrix4>;
 
 /// STEP `surface_curve` trim lookup on a specific surface.
 #[derive(Clone, Copy, Debug)]
@@ -177,6 +180,45 @@ impl SurfaceCurve3D {
         &self.associated_geometry
     }
 
+    /// Borrows an explicitly declared pcurve on structurally identical carrier coefficients.
+    ///
+    /// No sampled carrier recognition, nearest-point recovery or leader probes
+    /// authorize this association. A seam requires exactly two declared chart
+    /// branches; its oriented occurrence selects the corresponding branch.
+    /// This preserves source correspondence, not a geometric validity proof.
+    pub fn declared_parameter_curve_ref_on(
+        &self,
+        surface: &Surface,
+        orientation: bool,
+    ) -> std::result::Result<Option<&StepParameterCurve>, ExactConversionError> {
+        let mut candidates =
+            self.associated_geometry
+                .iter()
+                .filter_map(|geometry| match geometry {
+                    SurfaceCurveAssociatedGeometry::ParameterCurve(curve)
+                        if curve.surface() == surface =>
+                    {
+                        Some(curve)
+                    }
+                    _ => None,
+                });
+        let first = candidates.next();
+        let second = candidates.next();
+        if self.kind == SurfaceCurveKind::SeamCurve {
+            if first.is_none() || second.is_none() {
+                Err(ExactConversionError::MissingSeamParameterBranch)
+            } else if candidates.next().is_some() {
+                Err(ExactConversionError::AmbiguousStoredTrim)
+            } else {
+                Ok(if orientation { first } else { second })
+            }
+        } else if second.is_some() {
+            Err(ExactConversionError::AmbiguousStoredTrim)
+        } else {
+            Ok(first)
+        }
+    }
+
     /// Returns the first associated `ParameterCurve` whose basis surface matches `surface`.
     pub fn parameter_curve_on(&self, surface: &Surface) -> Option<&StepParameterCurve> {
         self.associated_geometry
@@ -186,8 +228,7 @@ impl SurfaceCurve3D {
                 _ => None,
             })
             .find(|curve| {
-                (curve.surface().as_ref() == surface
-                    || Self::same_surface(curve.surface().as_ref(), surface))
+                (curve.surface() == surface || Self::same_surface(curve.surface(), surface))
                     && self.parameter_curve_matches_leader_on_surface(curve, surface)
             })
     }
@@ -220,7 +261,6 @@ pub type StepRevolutedCurve = StepRevolutionSurface;
     SelfSameGeometry,
     StepLength,
     StepFormat,
-    StepCurve,
 )]
 pub enum Conic2D {
     Ellipse(Ellipse<Point2, Matrix3>),
@@ -238,7 +278,6 @@ pub enum Conic2D {
     Deserialize,
     ParametricCurve,
     BoundedCurve,
-    Cut,
     Invertible,
     ParameterDivision1D,
     SearchParameterD1,
@@ -247,7 +286,6 @@ pub enum Conic2D {
     SelfSameGeometry,
     StepLength,
     StepFormat,
-    StepCurve,
 )]
 
 pub enum Curve2D {
@@ -256,6 +294,7 @@ pub enum Curve2D {
     Conic(Conic2D),
     BsplineCurve(BsplineCurve<Point2>),
     NurbsCurve(NurbsCurve<Vector3>),
+    TrimmedCurve(SourceTrimmedCurve<Curve2D, Matrix3>),
 }
 
 /// `conic` in 3D, realized in `monstertruck`
@@ -278,7 +317,6 @@ pub enum Curve2D {
     SelfSameGeometry,
     StepLength,
     StepFormat,
-    StepCurve,
 )]
 pub enum Conic3D {
     Ellipse(Ellipse<Point3, Matrix4>),
@@ -296,7 +334,6 @@ pub enum Conic3D {
     Deserialize,
     ParametricCurve,
     BoundedCurve,
-    Cut,
     Invertible,
     SearchParameterD1,
     SearchNearestParameterD1,
@@ -304,7 +341,6 @@ pub enum Conic3D {
     SelfSameGeometry,
     StepLength,
     StepFormat,
-    StepCurve,
 )]
 pub enum Curve3D {
     Line(Line<Point3>),
@@ -315,6 +351,7 @@ pub enum Curve3D {
     SurfaceCurve(SurfaceCurve3D),
     IntersectionCurve(IntersectionCurve<Box<Curve3D>, Box<Surface>, Box<Surface>>),
     NurbsCurve(NurbsCurve<Vector4>),
+    TrimmedCurve(SourceTrimmedCurve<Curve3D, Matrix4>),
 }
 
 /// `elementary_surface`, realized in `monstertruck`
@@ -333,7 +370,6 @@ pub enum Curve3D {
     TransformedM4,
     SelfSameGeometry,
     StepLength,
-    StepSurface,
 )]
 pub enum ElementarySurface {
     Plane(Plane),
@@ -360,7 +396,6 @@ pub enum ElementarySurface {
     SelfSameGeometry,
     StepLength,
     StepFormat,
-    StepSurface,
 )]
 pub enum SweepSurface {
     ExtrusionSurface(StepExtrusionSurface),
@@ -383,7 +418,6 @@ pub enum SweepSurface {
     TransformedM4,
     SelfSameGeometry,
     StepLength,
-    StepSurface,
 )]
 pub enum Surface {
     ElementarySurface(ElementarySurface),
@@ -405,12 +439,24 @@ impl save::StepFormat for Surface {
 }
 
 /// `spherical_surface`, realized in `monstertruck`
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, StepSurface)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Sphere(pub monstertruck_geometry::prelude::Sphere);
+
+impl save::StepSurface for Sphere {
+    fn step_parameter_chart(&self) -> Option<crate::step::SurfaceParameterChart> {
+        Some(crate::step::SurfaceParameterChart::identity())
+    }
+}
 
 impl save::StepSurface for Processor<Sphere, Matrix4> {
     #[inline(always)]
     fn same_sense(&self) -> bool { self.orientation() }
+    fn step_parameter_chart(&self) -> Option<crate::step::SurfaceParameterChart> {
+        Some(crate::step::SurfaceParameterChart {
+            swapped: !self.orientation(),
+            ..crate::step::SurfaceParameterChart::identity()
+        })
+    }
 }
 
 mod sphere;
@@ -426,7 +472,7 @@ mod from_pcurve {
     impl From<ParameterCurve<Line<Point2>, Surface>> for Curve3D {
         fn from(value: ParameterCurve<Line<Point2>, Surface>) -> Self {
             let (line, surface) = value.decompose();
-            Curve3D::ParameterCurve(ParameterCurve::new(
+            Curve3D::ParameterCurve(super::StepParameterCurve::new(
                 Curve2D::Line(line).into(),
                 surface.into(),
             ))
@@ -436,7 +482,10 @@ mod from_pcurve {
 
 /// implementation for trait `monstertruck_modeling::builder`.
 mod geom_impls;
-pub use geom_impls::ROUTE_ANALYTIC_SPHERE;
+pub use geom_impls::{
+    CurveParameterDomain, CurveParameterMap, CurveParameterMapKind, ExactConversionError,
+    ROUTE_ANALYTIC_SPHERE, SurfaceParameterMap, validated_step_conic_jet,
+};
 /// implementation for output STEP format.
 mod stepout_impls;
 /// Provenance of a surface's reported parameter range, and the

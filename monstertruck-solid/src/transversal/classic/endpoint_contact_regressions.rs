@@ -219,7 +219,13 @@ fn native_endpoint_kinds_and_replay_use_world_distance_not_parameter_nearness() 
     let mut store: LoopsStore<Point3, modeling::Curve> = std::iter::once(&face).collect();
     let contact = Vertex::new(point);
     store
-        .add_geom_vertex((0, 0, 0), &contact, kind, &mut HashMap::default())
+        .add_geom_vertex(
+            (0, 0, 0),
+            &contact,
+            kind,
+            &mut HashMap::default(),
+            &mut None,
+        )
         .expect("replay the certified native parameter");
     assert_eq!(contact.point(), point);
     assert_eq!(store[0][0].len(), 5);

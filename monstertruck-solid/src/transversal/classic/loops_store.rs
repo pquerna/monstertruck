@@ -7,6 +7,7 @@
 
 #![allow(clippy::many_single_char_names)]
 
+use super::super::edge_lineage::{BooleanCutSide, RewriteObserver};
 use super::intersection_curve;
 use super::{ClassicResult, ShapeOpsError};
 use crate::transversal::prepared::BooleanWork;
@@ -176,10 +177,11 @@ impl<P: Copy, C: Clone> Loops<P, C> {
         old_vertex: &Vertex<P>,
         new_vertex: &Vertex<P>,
         emap: &mut HashMap<EdgeId<C>, Edge<P, C>>,
-    ) {
+        record: &mut Option<&mut RewriteObserver<'_, P, C>>,
+    ) -> std::result::Result<(), &'static str> {
         self.iter_mut()
             .flat_map(|wire| wire.iter_mut())
-            .for_each(|edge| {
+            .try_for_each(|edge| {
                 let mut new_edge = if edge.absolute_front() == old_vertex {
                     emap.entry(edge.id()).or_insert_with(|| {
                         Edge::new(new_vertex, edge.absolute_back(), edge.curve())
@@ -189,9 +191,14 @@ impl<P: Copy, C: Clone> Loops<P, C> {
                         Edge::new(edge.absolute_front(), new_vertex, edge.curve())
                     })
                 } else {
-                    return;
+                    return Ok(());
                 }
                 .clone();
+                if let Some(record) = record.as_mut()
+                    && !(**record)(edge.id(), &new_edge, None)
+                {
+                    return Err("edge_lineage_work");
+                }
                 if !edge.orientation() {
                     new_edge.invert();
                 }
@@ -200,6 +207,7 @@ impl<P: Copy, C: Clone> Loops<P, C> {
                     emap.remove(&edge.id());
                 }
                 *edge = new_edge;
+                Ok(())
             })
     }
 
@@ -276,9 +284,10 @@ impl<P: Copy + Tolerance, C: Clone> LoopsStore<P, C> {
         old_vertex: &Vertex<P>,
         new_vertex: &Vertex<P>,
         emap: &mut HashMap<EdgeId<C>, Edge<P, C>>,
-    ) {
+        record: &mut Option<&mut RewriteObserver<'_, P, C>>,
+    ) -> std::result::Result<(), &'static str> {
         self.iter_mut()
-            .for_each(|loops| loops.change_vertex(old_vertex, new_vertex, emap));
+            .try_for_each(|loops| loops.change_vertex(old_vertex, new_vertex, emap, record))
     }
 
     #[inline(always)]
@@ -303,13 +312,13 @@ impl<P: Copy + Tolerance, C: Clone> LoopsStore<P, C> {
                 let old_vertex = self[loops_index][wire_index][edge_index]
                     .absolute_front()
                     .clone();
-                self.change_vertex(&old_vertex, v, emap);
+                self.change_vertex(&old_vertex, v, emap, &mut None).ok()?;
             }
             ParameterKind::Back => {
                 let old_vertex = self[loops_index][wire_index][edge_index]
                     .absolute_back()
                     .clone();
-                self.change_vertex(&old_vertex, v, emap);
+                self.change_vertex(&old_vertex, v, emap, &mut None).ok()?;
             }
             ParameterKind::Inner(t) => {
                 let edge = self[loops_index][wire_index][edge_index].absolute_clone();
@@ -329,6 +338,7 @@ impl<C> LoopsStore<Point3, C> {
         v: &Vertex<Point3>,
         kind: ParameterKind,
         emap: &mut HashMap<EdgeId<C>, Edge<Point3, C>>,
+        record: &mut Option<&mut RewriteObserver<'_, Point3, C>>,
     ) -> std::result::Result<(), &'static str>
     where
         C: Cut<Point = Point3, Vector = Vector3>,
@@ -345,7 +355,7 @@ impl<C> LoopsStore<Point3, C> {
                     return Err("curve_cut_endpoint_residual");
                 }
                 v.set_point(old_vertex.point());
-                self.change_vertex(&old_vertex, v, emap);
+                self.change_vertex(&old_vertex, v, emap, record)?;
             }
             ParameterKind::Inner(parameter) => {
                 let edge = self[loops_index][wire_index][edge_index].absolute_clone();
@@ -353,9 +363,23 @@ impl<C> LoopsStore<Point3, C> {
                     return Err("curve_cut_residual");
                 }
                 let edge_id = edge.id();
+                let parent_domain = edge.with_curve(ParametricCurve::parameter_range);
                 let (edge0, edge1) = edge
                     .cut_with_parameter(v, parameter)
                     .ok_or("curve_cut_endpoint")?;
+                if let Some(record) = record.as_mut()
+                    && (!(**record)(
+                        edge_id,
+                        &edge0,
+                        Some((parent_domain, parameter, BooleanCutSide::Before)),
+                    ) || !(**record)(
+                        edge_id,
+                        &edge1,
+                        Some((parent_domain, parameter, BooleanCutSide::After)),
+                    ))
+                {
+                    return Err("edge_lineage_work");
+                }
                 self.swap_edge_into_pair(edge_id, &[edge0, edge1]);
             }
         }
@@ -722,6 +746,7 @@ pub(super) fn create_loops_stores<C, S>(
     poly_shell1: &Shell<Point3, PolylineCurve, Option<PolygonMesh>>,
     tolerance: f64,
     work: Option<&BooleanWork<'_>>,
+    mut record: Option<&mut RewriteObserver<'_, Point3, C>>,
 ) -> ClassicResult<LoopsStoreQuadruple<C>>
 where
     C: SearchNearestParameter<CurveParameter, Point = Point3>
@@ -927,8 +952,7 @@ where
                             }
                             let interval = coordinates.map(native_interval::closed_interval);
                             periodic_loops::add_closed_intersection(
-                                polyline,
-                                intersection_curve,
+                                (polyline, intersection_curve),
                                 [&mut geom_loops_store0, &mut geom_loops_store1],
                                 [&mut poly_loops_store0, &mut poly_loops_store1],
                                 [
@@ -937,6 +961,7 @@ where
                                 ],
                                 status,
                                 tolerance,
+                                &mut record,
                             )
                             .map_err(|detail| failure("closed_intersection_chart", detail))?;
                             if let Some(interval) = interval {
@@ -1016,6 +1041,7 @@ where
                                         &gv0,
                                         native_kind,
                                         &mut gemap0,
+                                        &mut record,
                                     )
                                     .map_err(|detail| failure("boundary_vertex0_front", detail))?;
                                 let polyline = intersection_curve.leader_mut();
@@ -1056,6 +1082,7 @@ where
                                         &gv1,
                                         native_kind,
                                         &mut gemap1,
+                                        &mut record,
                                     )
                                     .map_err(|detail| failure("boundary_vertex0_back", detail))?;
                                 let polyline = intersection_curve.leader_mut();
@@ -1098,6 +1125,7 @@ where
                                         &gv0,
                                         native_kind,
                                         &mut gemap0,
+                                        &mut record,
                                     )
                                     .map_err(|detail| failure("boundary_vertex1_front", detail))?;
                                 let polyline = intersection_curve.leader_mut();
@@ -1144,6 +1172,7 @@ where
                                         &gv1,
                                         native_kind,
                                         &mut gemap1,
+                                        &mut record,
                                     )
                                     .map_err(|detail| failure("boundary_vertex1_back", detail))?;
                                 let polyline = intersection_curve.leader_mut();

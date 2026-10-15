@@ -224,6 +224,23 @@ pub struct ParameterCurve<C, S> {
     surface: S,
 }
 
+/// Samples exact native trim geometry in surface parameter space.
+///
+/// Exactness describes the native trim's provenance, not the returned polyline.
+/// The sampled output is for ordinary display and tessellation; it does not
+/// certify a global exact trim domain or a global approximation-error bound.
+/// The [`ParameterCurve`] implementation refines samples against lifted
+/// three-dimensional chords while retaining the source curve's parameter.
+pub trait ExactTrimBoundary2D {
+    /// Samples the trim boundary in surface parameter space.
+    fn exact_trim_boundary_2d(&self, tolerance: f64) -> Vec<Point2>;
+
+    /// Projects a point on the spatial boundary back onto this trim boundary.
+    fn project_boundary_point(&self, _point: Point3, _hint: Option<f64>) -> Option<(f64, Point2)> {
+        None
+    }
+}
+
 /// A G1 edge-blend surface smoothly connecting the boundaries of two surfaces.
 ///
 /// The blend is spanned by a cubic Bezier in the `v`-direction whose end

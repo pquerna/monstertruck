@@ -21,6 +21,10 @@ use step_p21::{
 };
 
 pub mod convert;
+mod source_curve_graph;
+pub use source_curve_graph::{
+    MAX_SOURCE_GEOMETRY_EXPANSION_BYTES, MAX_SOURCE_GEOMETRY_EXPANSION_VISITS,
+};
 /// Typed accounting for what a load kept and what it lost.
 pub mod report;
 /// Geometry parsed from STEP that can be handled by monstertruck.
@@ -30,6 +34,9 @@ mod step_types;
 
 pub use report::{
     CategoryCount, EntityLoadReport, LossCategory, LossReason, LossTally, ShellLoadReport,
+    SourceCoedgeProvenance, SourceCurveInterval, SourceEdgeProvenance, SourceFaceProvenance,
+    SourceParameterChart, SourceShellProvenance, SourceTrimmedCurveProvenance,
+    SourceWireProvenance,
 };
 use step_geometry::StepConvertingError;
 
@@ -95,6 +102,8 @@ pub struct Table {
     // curve
     pub line: HashMap<u64, LineHolder>,
     pub polyline: HashMap<u64, PolylineHolder>,
+    pub trimmed_curve: HashMap<u64, StepTrimmedCurveHolder>,
+    pub parameter_value: HashMap<u64, ParameterValueHolder>,
     pub b_spline_curve_with_knots: HashMap<u64, BsplineCurveWithKnotsHolder>,
     pub bezier_curve: HashMap<u64, BezierCurveHolder>,
     pub quasi_uniform_curve: HashMap<u64, QuasiUniformCurveHolder>,
@@ -298,6 +307,15 @@ impl Table {
                 }
                 "PCURVE" => {
                     self.pcurve.insert(*id, Deserialize::deserialize(record)?);
+                }
+                "TRIMMED_CURVE" => {
+                    self.trimmed_curve
+                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                }
+                "PARAMETER_VALUE" => {
+                    let (parameter,): (f64,) = Deserialize::deserialize(&record.parameter)?;
+                    self.parameter_value
+                        .insert(*id, ParameterValueHolder(parameter));
                 }
                 "SURFACE_CURVE" => {
                     let curve: SurfaceCurveParams = Deserialize::deserialize(&record.parameter)?;

@@ -78,6 +78,7 @@ fn reported_range_bounds_the_curve(curve: &Curve) -> bool {
         Curve::BsplineCurve(_)
         | Curve::NurbsCurve(_)
         | Curve::ParameterCurve(_)
+        | Curve::TrimmedCurve(_)
         | Curve::IntersectionCurve(_) => true,
     }
 }
@@ -151,6 +152,10 @@ fn reported_range_bounds_the_curve(curve: &Curve) -> bool {
 fn reported_range_bounds_the_surface(surface: &Surface) -> (bool, bool) {
     match surface {
         Surface::Plane(_) => (false, false),
+        Surface::ExtrusionSurface(surface) => (
+            reported_range_bounds_the_curve(surface.entity_curve()),
+            false,
+        ),
         // Knot vectors: the net genuinely carries no data outside them, which
         // is the whole premise of C3's extrapolation trap.
         Surface::BsplineSurface(_) | Surface::NurbsSurface(_) => (true, true),
@@ -495,6 +500,7 @@ fn surface_kind(surface: &Surface) -> &'static str {
         Surface::BsplineSurface(_) => "bspline",
         Surface::NurbsSurface(_) => "nurbs",
         Surface::RevolutionSurface(_) => "revolution",
+        Surface::ExtrusionSurface(_) => "extrusion",
         Surface::TsplineSurface(_) => "tspline",
         Surface::SphericalSurface(_) => "sphere",
         Surface::ToroidalSurface(_) => "torus",

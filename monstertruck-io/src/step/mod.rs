@@ -45,6 +45,10 @@
 /// ```
 /// Types shared between the [`load`] and [`save`] sides of STEP I/O.
 pub mod common;
+/// Bounded affine orientation charts shared by import and export.
+pub mod parameter_chart;
+pub(crate) use parameter_chart::periodic_parameter_shift;
+pub use parameter_chart::{ParameterChart, ParameterEnclosure, SurfaceParameterChart};
 #[cfg(feature = "load")]
 pub mod load;
 /// STEP file saving (export/formatting).

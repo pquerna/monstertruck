@@ -44,6 +44,7 @@ fn curve_kind(curve: &Curve3D) -> &'static str {
         Curve3D::SurfaceCurve(_) => "SurfaceCurve",
         Curve3D::IntersectionCurve(_) => "IntersectionCurve",
         Curve3D::NurbsCurve(_) => "NurbsCurve",
+        Curve3D::TrimmedCurve(_) => "TrimmedCurve",
     }
 }
 

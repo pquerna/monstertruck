@@ -303,7 +303,7 @@ where
 fn exact_parameter_curve_on(curve: &Curve3D, surface: &Surface) -> Option<StepParameterCurve> {
     match (curve, surface) {
         (Curve3D::ParameterCurve(curve), surface)
-            if SurfaceCurve3D::same_surface(curve.surface().as_ref(), surface) =>
+            if SurfaceCurve3D::same_surface(curve.surface(), surface) =>
         {
             Some(curve.clone())
         }
@@ -529,7 +529,7 @@ impl ParameterBoundary2D<Surface> for Curve3D {
     fn parameter_boundary_2d(&self, surface: &Surface, tolerance: f64) -> Option<Vec<Point2>> {
         match self {
             Curve3D::ParameterCurve(curve) => {
-                if curve.surface().as_ref() == surface {
+                if curve.surface() == surface {
                     curve
                         .curve()
                         .try_parameter_division(curve.curve().range_tuple(), tolerance)
@@ -584,6 +584,7 @@ impl ParameterBoundary2D<Surface> for Curve3D {
             | Curve3D::Polyline(_)
             | Curve3D::Conic(_)
             | Curve3D::BsplineCurve(_)
+            | Curve3D::TrimmedCurve(_)
             | Curve3D::NurbsCurve(_) => sampled_parameter_boundary(self, surface, tolerance),
         }
     }
@@ -626,7 +627,7 @@ fn curve2d_from_sampled_boundary(points: Vec<Point2>) -> Option<Curve2D> {
 impl BoundaryCurveFromSamples<Surface> for StepParameterCurve {
     fn boundary_curve_from_samples(surface: &Surface, points: Vec<Point2>) -> Option<Self> {
         curve2d_from_sampled_boundary(points)
-            .map(|curve| ParameterCurve::new(Box::new(curve), Box::new(surface.clone())))
+            .map(|curve| StepParameterCurve::new(Box::new(curve), Box::new(surface.clone())))
     }
 }
 
@@ -848,7 +849,7 @@ fn surface_curve_line_without_pcurve_converts_to_exact_pcurve() {
     let boundary = StepParameterCurve::try_from(CurveTrimRef::new(&curve, &surface))
         .expect("surface curve leader should produce an exact parameter boundary.");
 
-    match boundary.curve().as_ref() {
+    match boundary.curve() {
         Curve2D::Line(line) => {
             assert!(line.front().near(&Point2::new(0.25, 0.5)));
             assert!(line.back().near(&Point2::new(0.75, 0.5)));

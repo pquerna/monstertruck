@@ -14,6 +14,51 @@ use std::{
 pub(crate) type MeshShell = Shell<Point3, PolylineCurve<Point3>, Option<PolygonMesh>>;
 type BooleanResult<T> = std::result::Result<T, ShapeOpsError>;
 
+/// Cumulative caller-owned native operation allowance across preparation and retries.
+///
+/// Units are native checkpoints, admitted face/coedge scans, conservative
+/// candidate triangle-pair admissions, reconstructed segment metadata, and
+/// retained seed elements. Generic tessellation, parameter search and manifold
+/// validation remain indivisible calls; their internal iterations are not claimed
+/// to be counted. Source geometry, retained-buffer limits and host execution/memory
+/// caps are still required. Failed queries retain every already charged unit.
+#[derive(Debug)]
+pub struct BooleanWorkBudget {
+    limit: usize,
+    consumed: Cell<usize>,
+}
+
+impl BooleanWorkBudget {
+    /// Creates a cumulative native allowance; zero admits no operation.
+    pub const fn new(max_native_work: usize) -> Self {
+        Self {
+            limit: max_native_work,
+            consumed: Cell::new(0),
+        }
+    }
+
+    /// Returns all units charged, including unsuccessful native attempts.
+    pub fn consumed(&self) -> usize { self.consumed.get() }
+
+    /// Returns the remaining native operation allowance.
+    pub fn remaining(&self) -> usize { self.limit - self.consumed.get() }
+
+    fn charge(&self, units: usize) -> BooleanResult<()> {
+        let actual = self.consumed.get().saturating_add(units);
+        if units > self.remaining() {
+            self.consumed.set(self.limit);
+            Err(ShapeOpsError::WorkLimitExceeded {
+                resource: "native_work",
+                actual,
+                limit: self.limit,
+            })
+        } else {
+            self.consumed.set(actual);
+            Ok(())
+        }
+    }
+}
+
 /// Explicit admission and work limits for a prepared native Boolean source.
 ///
 /// Counts apply to both complete inputs together for each query. Triangle pairs
@@ -90,24 +135,39 @@ impl<C, S> PreparedBooleanSource<'_, C, S> {
 pub(crate) struct BooleanWork<'a> {
     pub(crate) limits: BooleanWorkLimits,
     cancel: &'a AtomicBool,
+    budget: Option<&'a BooleanWorkBudget>,
     triangle_pairs: Cell<usize>,
     segments: Cell<usize>,
 }
 
 impl<'a> BooleanWork<'a> {
+    #[cfg(test)]
     pub(crate) fn new(limits: BooleanWorkLimits, cancel: &'a AtomicBool) -> Self {
+        Self::with_budget(limits, cancel, None)
+    }
+    pub(crate) fn with_budget(
+        limits: BooleanWorkLimits,
+        cancel: &'a AtomicBool,
+        budget: Option<&'a BooleanWorkBudget>,
+    ) -> Self {
         Self {
             limits,
             cancel,
+            budget,
             triangle_pairs: Cell::new(0),
             segments: Cell::new(0),
         }
     }
-    pub(crate) fn check(&self) -> BooleanResult<()> {
+    pub(crate) fn check(&self) -> BooleanResult<()> { self.charge(1) }
+    pub(crate) fn charge(&self, units: usize) -> BooleanResult<()> {
         if self.cancel.load(Ordering::Relaxed) {
             Err(ShapeOpsError::Cancelled)
         } else {
-            Ok(())
+            if let Some(budget) = self.budget {
+                budget.charge(units)
+            } else {
+                Ok(())
+            }
         }
     }
     pub(crate) fn limit(
@@ -130,14 +190,17 @@ impl<'a> BooleanWork<'a> {
     pub(crate) fn face_pair(&self, mesh0: &PolygonMesh, mesh1: &PolygonMesh) -> BooleanResult<()> {
         let count0 = mesh0.faces().triangle_iter().count();
         let count1 = mesh1.faces().triangle_iter().count();
+        self.charge(count0.saturating_add(count1))?;
         let count = count0
             .saturating_mul(count1)
             .saturating_add(self.triangle_pairs.get());
         self.limit("triangle_pairs", count, self.limits.max_triangle_pairs)?;
+        self.charge(count0.saturating_mul(count1))?;
         self.triangle_pairs.set(count);
         Ok(())
     }
     pub(crate) fn segments(&self, count: usize) -> BooleanResult<()> {
+        self.charge(count)?;
         let count = self.segments.get().saturating_add(count);
         self.limit(
             "interference_segments",
@@ -148,24 +211,56 @@ impl<'a> BooleanWork<'a> {
         Ok(())
     }
     pub(crate) fn native<P, C, S>(&self, solid: &Solid<P, C, S>) -> BooleanResult<(usize, usize)> {
-        let faces = solid.face_iter().count();
-        let edges = solid.face_iter().map(|face| face.edge_iter().count()).sum();
+        let (faces, edges) =
+            solid
+                .face_iter()
+                .try_fold((0_usize, 0_usize), |(faces, edges), face| {
+                    self.limit(
+                        "input_faces",
+                        faces.saturating_add(1),
+                        self.limits.max_faces,
+                    )?;
+                    let face_edges =
+                        face.absolute_boundaries()
+                            .iter()
+                            .try_fold(0_usize, |count, wire| {
+                                self.check()?;
+                                let next = count.saturating_add(wire.len());
+                                self.limit(
+                                    "input_edges",
+                                    edges.saturating_add(next),
+                                    self.limits.max_edges,
+                                )?;
+                                Ok::<_, ShapeOpsError>(next)
+                            })?;
+                    self.charge(face_edges)?;
+                    Ok::<_, ShapeOpsError>((
+                        faces.saturating_add(1),
+                        edges.saturating_add(face_edges),
+                    ))
+                })?;
         self.limit("input_faces", faces, self.limits.max_faces)?;
         self.limit("input_edges", edges, self.limits.max_edges)?;
         Ok((faces, edges))
     }
     pub(crate) fn output<C, S>(&self, shell: &Shell<Point3, C, S>) -> BooleanResult<()> {
+        self.charge(shell.len())?;
         self.limit("output_faces", shell.len(), self.limits.max_output_faces)?;
-        self.limit(
-            "output_edges",
-            shell.iter().map(|face| face.edge_iter().count()).sum(),
-            self.limits.max_output_edges,
-        )
+        let edges = shell.iter().try_fold(0_usize, |count, face| {
+            self.check()?;
+            let next = face
+                .absolute_boundaries()
+                .iter()
+                .fold(count, |count, wire| count.saturating_add(wire.len()));
+            self.limit("output_edges", next, self.limits.max_output_edges)?;
+            Ok::<_, ShapeOpsError>(next)
+        })?;
+        self.charge(edges)
     }
     pub(crate) fn intermediate(&self, mesh: &MeshShell) -> BooleanResult<()> {
         let mut limits = self.limits;
         limits.max_prepared_bytes = limits.max_intermediate_prepared_bytes;
-        let scratch = Self::new(limits, self.cancel);
+        let scratch = Self::with_budget(limits, self.cancel, self.budget);
         seed_stats(mesh, &scratch).map(|_| ())
     }
 }
@@ -182,6 +277,7 @@ pub(crate) fn seed_stats(mesh: &MeshShell, work: &BooleanWork<'_>) -> BooleanRes
         .enumerate()
         .try_fold(initial, |mut stats, (face_index, face)| {
             work.check()?;
+            let retained_before = stats.vertices.saturating_add(stats.triangles);
             stats.bytes = stats.bytes.saturating_add(
                 face.absolute_boundaries()
                     .capacity()
@@ -258,6 +354,12 @@ pub(crate) fn seed_stats(mesh: &MeshShell, work: &BooleanWork<'_>) -> BooleanRes
                         });
                     });
             });
+            work.charge(
+                stats
+                    .vertices
+                    .saturating_add(stats.triangles)
+                    .saturating_sub(retained_before),
+            )?;
             work.limit(
                 "mesh_vertices",
                 stats.vertices,
@@ -319,6 +421,7 @@ pub(crate) fn meshes<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
             .iter()
             .try_fold(initial, |(mut meshes, mut total), shell| {
                 work.check()?;
+                work.charge(shell.len())?;
                 let mesh = shell.triangulation(tolerance);
                 work.check()?;
                 let stats = seed_stats(&mesh, work)?;
@@ -361,15 +464,40 @@ pub fn prepare_boolean_source<'a, C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     limits: BooleanWorkLimits,
     cancel: &AtomicBool,
 ) -> BooleanResult<PreparedBooleanSource<'a, C, S>> {
-    if !tolerance.is_finite() || tolerance < TOLERANCE {
-        return Err(ShapeOpsError::InvalidTolerance);
-    }
+    prepare_boolean_source_impl(source, tolerance, limits, cancel, None)
+}
+
+/// Prepares source seeds while charging a cumulative caller-owned native allowance.
+///
+/// The same budget may be reused by counted queries and retries. It is updated
+/// before native admissions and after opaque tessellation's retained seed counts
+/// become available, including on a subsequent failure.
+pub fn prepare_boolean_source_counted<'a, C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
+    source: &'a Solid<Point3, C, S>,
+    tolerance: f64,
+    limits: BooleanWorkLimits,
+    cancel: &AtomicBool,
+    budget: &BooleanWorkBudget,
+) -> BooleanResult<PreparedBooleanSource<'a, C, S>> {
+    prepare_boolean_source_impl(source, tolerance, limits, cancel, Some(budget))
+}
+
+fn prepare_boolean_source_impl<'a, C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
+    source: &'a Solid<Point3, C, S>,
+    tolerance: f64,
+    limits: BooleanWorkLimits,
+    cancel: &AtomicBool,
+    budget: Option<&BooleanWorkBudget>,
+) -> BooleanResult<PreparedBooleanSource<'a, C, S>> {
     let mut preparation_limits = limits;
     preparation_limits.max_prepared_bytes = limits
         .max_source_prepared_bytes
         .min(limits.max_prepared_bytes);
-    let work = BooleanWork::new(preparation_limits, cancel);
+    let work = BooleanWork::with_budget(preparation_limits, cancel, budget);
     work.check()?;
+    if !tolerance.is_finite() || tolerance < TOLERANCE {
+        return Err(ShapeOpsError::InvalidTolerance);
+    }
     #[cfg(feature = "marching-ssi")]
     {
         let (meshes, stats) = meshes(source, tolerance, &work)?;
@@ -398,48 +526,33 @@ pub fn and_prepared<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     other: &Solid<Point3, C, S>,
     cancel: &AtomicBool,
 ) -> BooleanResult<Solid<Point3, C, S>> {
-    let work = BooleanWork::new(prepared.limits, cancel);
+    and_prepared_impl(prepared, other, cancel, None)
+}
+
+/// Intersects a prepared source while sharing a cumulative native operation budget.
+///
+/// Derived input and intermediate scratch charge the same borrowed allowance.
+/// Failure and cancellation do not reset already consumed native work.
+pub fn and_prepared_counted<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
+    prepared: &PreparedBooleanSource<'_, C, S>,
+    other: &Solid<Point3, C, S>,
+    cancel: &AtomicBool,
+    budget: &BooleanWorkBudget,
+) -> BooleanResult<Solid<Point3, C, S>> {
+    and_prepared_impl(prepared, other, cancel, Some(budget))
+}
+
+fn and_prepared_impl<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
+    prepared: &PreparedBooleanSource<'_, C, S>,
+    other: &Solid<Point3, C, S>,
+    cancel: &AtomicBool,
+    budget: Option<&BooleanWorkBudget>,
+) -> BooleanResult<Solid<Point3, C, S>> {
+    let work = BooleanWork::with_budget(prepared.limits, cancel, budget);
     work.check()?;
     #[cfg(feature = "marching-ssi")]
     {
-        let source_counts = work.native(prepared.source)?;
-        let other_counts = work.native(other)?;
-        work.limit(
-            "input_faces",
-            source_counts.0.saturating_add(other_counts.0),
-            prepared.limits.max_faces,
-        )?;
-        work.limit(
-            "input_edges",
-            source_counts.1.saturating_add(other_counts.1),
-            prepared.limits.max_edges,
-        )?;
-        work.limit(
-            "mesh_vertices",
-            prepared.stats.vertices,
-            prepared.limits.max_mesh_vertices,
-        )?;
-        work.limit(
-            "mesh_triangles",
-            prepared.stats.triangles,
-            prepared.limits.max_mesh_triangles,
-        )?;
-        work.limit(
-            "prepared_bytes",
-            prepared.stats.bytes,
-            prepared.limits.max_prepared_bytes,
-        )?;
-        let mut other_limits = prepared.limits;
-        other_limits.max_faces -= source_counts.0;
-        other_limits.max_edges -= source_counts.1;
-        other_limits.max_mesh_vertices -= prepared.stats.vertices;
-        other_limits.max_mesh_triangles -= prepared.stats.triangles;
-        other_limits.max_prepared_bytes = prepared
-            .limits
-            .max_other_prepared_bytes
-            .min(prepared.limits.max_prepared_bytes - prepared.stats.bytes);
-        let other_work = BooleanWork::new(other_limits, cancel);
-        let (other_meshes, _) = meshes(other, prepared.tolerance, &other_work)?;
+        let other_meshes = query_meshes(prepared, other, &work, cancel)?;
         super::classic::and_prepared(prepared, other, &other_meshes, &work)
     }
     #[cfg(not(feature = "marching-ssi"))]
@@ -447,4 +560,51 @@ pub fn and_prepared<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
         let _ = (prepared, other);
         Err(ShapeOpsError::NoBackend)
     }
+}
+
+#[cfg(feature = "marching-ssi")]
+pub(crate) fn query_meshes<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
+    prepared: &PreparedBooleanSource<'_, C, S>,
+    other: &Solid<Point3, C, S>,
+    work: &BooleanWork<'_>,
+    cancel: &AtomicBool,
+) -> BooleanResult<Vec<MeshShell>> {
+    let source_counts = work.native(prepared.source)?;
+    let other_counts = work.native(other)?;
+    work.limit(
+        "input_faces",
+        source_counts.0.saturating_add(other_counts.0),
+        prepared.limits.max_faces,
+    )?;
+    work.limit(
+        "input_edges",
+        source_counts.1.saturating_add(other_counts.1),
+        prepared.limits.max_edges,
+    )?;
+    work.limit(
+        "mesh_vertices",
+        prepared.stats.vertices,
+        prepared.limits.max_mesh_vertices,
+    )?;
+    work.limit(
+        "mesh_triangles",
+        prepared.stats.triangles,
+        prepared.limits.max_mesh_triangles,
+    )?;
+    work.limit(
+        "prepared_bytes",
+        prepared.stats.bytes,
+        prepared.limits.max_prepared_bytes,
+    )?;
+    let mut other_limits = prepared.limits;
+    other_limits.max_faces -= source_counts.0;
+    other_limits.max_edges -= source_counts.1;
+    other_limits.max_mesh_vertices -= prepared.stats.vertices;
+    other_limits.max_mesh_triangles -= prepared.stats.triangles;
+    other_limits.max_prepared_bytes = prepared
+        .limits
+        .max_other_prepared_bytes
+        .min(prepared.limits.max_prepared_bytes - prepared.stats.bytes);
+    let other_work = BooleanWork::with_budget(other_limits, cancel, work.budget);
+    meshes(other, prepared.tolerance, &other_work).map(|(meshes, _)| meshes)
 }

@@ -16,6 +16,46 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- STEP VECTOR directions are normalized independently of their declared
+  magnitude. Degenerate, nonfinite and dimensionally inconsistent geometric
+  vectors return typed conversion errors rather than silently changing line
+  and extrusion geometry.
+- STEP two-dimensional placement reference ratios are normalized before
+  constructing conic frames. Invalid ratios return typed conversion errors.
+- Closed trim projection preserves a valid explicit parameter hint on its
+  original winding branch; an absent hint still starts at the trim start.
+- Finite closed source curves can retain and subdivide their original
+  restrictions without requiring an unrelated natural-period declaration.
+- STEP export exposes bounded scalar and surface parameter-chart maps,
+  including nested directed trims and native profile/surface axis changes.
+  Parameter curves use the actually emitted carrier chart. Edge sense and
+  face material orientation compose the emitted chart orientation rather than
+  relying on unrelated carrier orientation flags.
+- Direct analytic sphere, torus and revolution export refuses affine
+  deformations whose emitted analytic geometry has not been proved
+  representable, instead of dropping shear or nonuniform scale.
+- Generic processor derivatives apply the original parameter-reflection sign
+  for every odd order, including profile derivatives reached through native
+  extrusion and parameter-curve dispatch.
+- Two-dimensional unit circles report their native period consistently with
+  three-dimensional circles, so unsupported periodic trim branch selections
+  are classified as such rather than malformed numeric intervals.
+- STEP conics retain their original analytic parameters and affine frame
+  coefficients in native parameter curves, including translated frames whose
+  axes would disappear through point addition and subtraction.
+- Compact 3D hyperbola, parabola and polyline rational/polynomial utilities
+  preserve their full algebraic form and native knot domains. Circular rational
+  utilities use positive quarter-turn-or-smaller spans, including one period;
+  saturated hyperbolic half-angle charts refuse. Rounded rational conic
+  coefficients are not original-source equivalence certificates.
+- Conical semi-angles are consumed in radians without magnitude-based degree
+  guessing. Importers must normalize declared plane-angle units first.
+- Sphere parameter curves follow the exact processor-aware source-to-native
+  affine chart map. General revolutions retain their analytic angular chart.
+  Nonlinear parameter-curve chart composition refuses instead of reusing
+  unrelated UV coordinates, and projected intersection leaders are no longer
+  advertised as exact homogeneous curve extraction.
+
 - Marching interference graphs certify nearby shared endpoints across spatial
   buckets without collapsing distinct regular segments into one-point branches.
   Native reconstruction rejects unrelated-carrier midpoint recovery and
@@ -54,6 +94,55 @@ monstertruck 0.4.0.
 - Propagated native face-topology errors retain bounded invalid-wire evidence.
 
 ### Added
+
+- STEP curve and surface conversion methods return explicit source/native
+  parameter maps with bounded intervals, orientation parity and unavailable
+  correspondence reasons. These reports certify neither trim coverage nor
+  implicit intersection completeness.
+- Ordinary native extrusions preserve arbitrary profiles as `C(u) + v*d`
+  without rationalizing analytic conics. Derivatives, search, division,
+  inversion, native operations and bounded interval jets share that entity;
+  retained face trims, not the legacy unit cell, determine extrusion extent.
+- `StepParameterCurve` distinguishes decoded UV construction from admitted raw
+  STEP UV, retaining its immutable bounded input chart through evaluation,
+  native conversion and export. Borrowed evaluation applies that chart once.
+  `ExactTrimBoundary2D` belongs to `monstertruck_geometry::prelude`; native
+  tessellation consumes the same chart-aware UV sampling and projection API
+  without a production meshing dependency in STEP IO.
+- Exact straight/regular UV proofs accept original line entities and clamped
+  single-span degree-one polynomial/rational splines, including retained
+  transforms and inversions. Actual active-domain and denominator checks
+  reject poles, stationary traces and unsupported endpoint-fit guesses.
+- STEP output writes native linear extrusions directly and preserves analytic
+  profile charts using affine line-extrusion carriers, rather than normalizing
+  their plane axes or fitting conics. Curve/profile inversion sense is retained.
+  Numeric STEP `TRIMMED_CURVE` selectors retain the original basis, selected
+  parameter interval, and sense through generic native trimmed-curve wrappers.
+  Inverse cuts retain the original reflection chart rather than reanchoring it
+  to each resulting subinterval. Recursive source graphs are depth- and
+  expansion-bounded before owned conversion.
+  Directed STEP start/end selectors are emitted in the actual basis chart;
+  nested restrictions and pcurves compose explicit enclosed orientation maps.
+  Period coefficients and endpoint arithmetic are not labeled exact identities.
+  Revolution, sphere and torus output uses analytic entities rather than a
+  hidden rational rechart. Unproved affine carrier normalization refuses.
+- Prepared native curve bindings use bounded Krawczyk uniqueness tubes,
+  implicit interval derivatives and exhaustive face-plane cell coverage.
+  Samples use the prepared binding, not legacy projected endpoint recovery.
+  Singular, nontransverse, nonsmooth or unresolved cells refuse explicitly;
+  internal source knots below C1 are not presumed geometrically smooth.
+- Bounded native trim domains retain declared coedges, seam branches, source
+  vertices and joint/pole strata. Exact dyadic affine and tensor-boundary
+  identities provide UV routes for ordinary rational patches without fitting.
+  Explicit original-source natural-boundary evidence also permits bounded
+  generic tensor connectors using whole `(N - Pvertex*W)/W` residual enclosures,
+  with numeric vertex allowance, original incidence and oriented UV winding.
+- Compact reported STEP trims store only UV curves per occurrence, with
+  original face, wire, edge and use provenance and actual restricted parameter
+  intervals through shared periodic-edge subdivision.
+- Before-clone curve and surface storage accounting includes owned capacities
+  and rejects native carrier/profile nesting beyond 32, consistently with
+  interval evaluation. Work limits and cancellation remain cumulative.
 
 - Opaque borrowed `PreparedBooleanSource`, explicit `BooleanWorkLimits`,
   `prepare_boolean_source` and `and_prepared` for repeated native intersections

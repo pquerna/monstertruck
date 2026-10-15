@@ -115,6 +115,13 @@ impl<C> StepCurve for StepSurfaceCurve<'_, C>
 where C: StepCurve
 {
     fn same_sense(&self) -> bool { self.leader.same_sense() }
+    fn step_parameter_chart(&self) -> Option<crate::step::ParameterChart> {
+        self.leader.step_parameter_chart()
+    }
+    fn step_reversed_parameter_chart(&self) -> Option<crate::step::ParameterChart> {
+        self.leader.step_reversed_parameter_chart()
+    }
+    fn step_parameter_period(&self) -> Option<f64> { self.leader.step_parameter_period() }
 }
 
 enum StepEdgeGeometry<'a, C> {
@@ -151,6 +158,24 @@ where C: StepCurve
         match self {
             Self::Curve(curve) => curve.same_sense(),
             Self::SurfaceCurve(curve) => curve.same_sense(),
+        }
+    }
+    fn step_parameter_chart(&self) -> Option<crate::step::ParameterChart> {
+        match self {
+            Self::Curve(curve) => curve.step_parameter_chart(),
+            Self::SurfaceCurve(curve) => curve.step_parameter_chart(),
+        }
+    }
+    fn step_reversed_parameter_chart(&self) -> Option<crate::step::ParameterChart> {
+        match self {
+            Self::Curve(curve) => curve.step_reversed_parameter_chart(),
+            Self::SurfaceCurve(curve) => curve.step_reversed_parameter_chart(),
+        }
+    }
+    fn step_parameter_period(&self) -> Option<f64> {
+        match self {
+            Self::Curve(curve) => curve.step_parameter_period(),
+            Self::SurfaceCurve(curve) => curve.step_parameter_period(),
         }
     }
 }
@@ -436,15 +461,18 @@ where
                     f.boundaries.iter().map(closure).collect()
                 }
             };
-            // `advanced_face` is the AP203/AP214/AP242 canonical shell face: a
-            // `face_surface` subtype placed directly into the shell instead of
-            // an `oriented_face`/`face_surface` pair. The former pair's face
-            // orientation is folded into `same_sense` as `orientation ==
-            // surface same_sense`, so a reload rebuilds the same
-            // `CompressedFace` orientation.
+            // Material orientation composes with the actual emitted UV chart,
+            // including profile reversal and U/V exchange.
+            let chart = f.surface.step_parameter_chart().ok_or(std::fmt::Error)?;
+            chart.nominal([0.0, 0.0]).ok_or(std::fmt::Error)?;
+            let jacobian = chart.jacobian();
+            let determinant = jacobian[0][0] * jacobian[1][1] - jacobian[0][1] * jacobian[1][0];
+            if determinant == 0.0 || !determinant.is_finite() {
+                return Err(std::fmt::Error);
+            }
             formatter.write_fmt(format_args!(
                 "#{idx} = ADVANCED_FACE('', {face_bound}, #{face_geometry}, {same_sense});\n",
-                same_sense = BooleanDisplay(f.orientation == f.surface.same_sense()),
+                same_sense = BooleanDisplay(f.orientation == (determinant > 0.0)),
                 face_bound = IndexSliceDisplay(face_bounds.clone()),
             ))?;
             cursor = idx + 1;
@@ -498,7 +526,9 @@ where
             .iter()
             .enumerate()
             .try_for_each(|(i, geometry)| {
-                let same_sense = if geometry.same_sense() { ".T." } else { ".F." };
+                let chart = geometry.step_parameter_chart().ok_or(std::fmt::Error)?;
+                chart.nominal(0.0).ok_or(std::fmt::Error)?;
+                let same_sense = if chart.scale > 0.0 { ".T." } else { ".F." };
                 formatter.write_fmt(format_args!(
                     "#{idx} = EDGE_CURVE('', #{edge_start}, #{edge_end}, #{edge_geometry}, {same_sense});\n",
                     idx = ep_edges + i,

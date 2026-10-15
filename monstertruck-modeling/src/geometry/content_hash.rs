@@ -54,6 +54,10 @@ impl DeterministicContentHash for Curve2D {
                 state.write_u8(4);
                 v.content_hash(state);
             }
+            Self::TrimmedCurve(v) => {
+                state.write_u8(5);
+                v.content_hash(state);
+            }
         }
     }
 }
@@ -79,6 +83,10 @@ impl DeterministicContentHash for Curve {
             }
             Self::IntersectionCurve(v) => {
                 state.write_u8(4);
+                v.content_hash(state);
+            }
+            Self::TrimmedCurve(v) => {
+                state.write_u8(5);
                 v.content_hash(state);
             }
         }
@@ -116,6 +124,10 @@ impl DeterministicContentHash for Surface {
             }
             Self::ToroidalSurface(v) => {
                 state.write_u8(6);
+                v.content_hash(state);
+            }
+            Self::ExtrusionSurface(v) => {
+                state.write_u8(7);
                 v.content_hash(state);
             }
         }

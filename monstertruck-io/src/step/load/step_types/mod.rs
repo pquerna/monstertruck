@@ -26,15 +26,20 @@ use super::Table;
 use super::step_geometry::{self, *};
 
 mod curve;
+mod curve_holder;
 mod placement;
 mod product;
 mod surface;
 mod topology;
+mod trim_parameterization;
 
 pub use curve::*;
+pub use curve::{Ellipse, Hyperbola, Line, Parabola};
+pub use curve_holder::*;
 pub use placement::*;
 pub use product::*;
 pub use surface::*;
+pub use surface::{ConicalSurface, CylindricalSurface, Plane, SphericalSurface, ToroidalSurface};
 pub use topology::*;
 
 /// Undefined structures are parsed into this.
@@ -130,10 +135,10 @@ impl TryFrom<&Pcurve> for step_geometry::StepParameterCurve {
             .first()
             .ok_or("no representation item")?
             .try_into()?;
-        Ok(step_geometry::StepParameterCurve::new(
+        Ok(step_geometry::StepParameterCurve::try_from_raw(
             Box::new(curve),
             Box::new(surface),
-        ))
+        )?)
     }
 }
 

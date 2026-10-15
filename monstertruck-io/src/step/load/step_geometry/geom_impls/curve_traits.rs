@@ -3,6 +3,61 @@
 
 use super::*;
 
+impl Cut for Curve2D {
+    fn cut(&mut self, parameter: f64) -> Self {
+        match self {
+            Self::Line(curve) => Self::Line(curve.cut(parameter)),
+            Self::Polyline(curve) => Self::Polyline(curve.cut(parameter)),
+            Self::Conic(curve) => Self::Conic(curve.cut(parameter)),
+            Self::BsplineCurve(curve) => Self::BsplineCurve(curve.cut(parameter)),
+            Self::NurbsCurve(curve) => Self::NurbsCurve(curve.cut(parameter)),
+            Self::TrimmedCurve(curve) if curve.orientation() => {
+                Self::TrimmedCurve(curve.split_forward(parameter))
+            }
+            Self::TrimmedCurve(_) => {
+                let range = self.range_tuple();
+                let second = Self::TrimmedCurve(SourceTrimmedCurve::internal(Processor::new(
+                    TrimmedCurve::new(Box::new(self.clone()), (parameter, range.1)),
+                )));
+                let original = std::mem::replace(self, second);
+                let first = Self::TrimmedCurve(SourceTrimmedCurve::internal(Processor::new(
+                    TrimmedCurve::new(Box::new(original), (range.0, parameter)),
+                )));
+                std::mem::replace(self, first)
+            }
+        }
+    }
+}
+
+impl Cut for Curve3D {
+    fn cut(&mut self, parameter: f64) -> Self {
+        match self {
+            Self::Line(curve) => Self::Line(curve.cut(parameter)),
+            Self::Polyline(curve) => Self::Polyline(curve.cut(parameter)),
+            Self::Conic(curve) => Self::Conic(curve.cut(parameter)),
+            Self::BsplineCurve(curve) => Self::BsplineCurve(curve.cut(parameter)),
+            Self::ParameterCurve(curve) => Self::ParameterCurve(curve.cut(parameter)),
+            Self::SurfaceCurve(curve) => Self::SurfaceCurve(curve.cut(parameter)),
+            Self::IntersectionCurve(curve) => Self::IntersectionCurve(curve.cut(parameter)),
+            Self::NurbsCurve(curve) => Self::NurbsCurve(curve.cut(parameter)),
+            Self::TrimmedCurve(curve) if curve.orientation() => {
+                Self::TrimmedCurve(curve.split_forward(parameter))
+            }
+            Self::TrimmedCurve(_) => {
+                let range = self.range_tuple();
+                let second = Self::TrimmedCurve(SourceTrimmedCurve::internal(Processor::new(
+                    TrimmedCurve::new(Box::new(self.clone()), (parameter, range.1)),
+                )));
+                let original = std::mem::replace(self, second);
+                let first = Self::TrimmedCurve(SourceTrimmedCurve::internal(Processor::new(
+                    TrimmedCurve::new(Box::new(original), (range.0, parameter)),
+                )));
+                std::mem::replace(self, first)
+            }
+        }
+    }
+}
+
 impl ParametricCurve for SurfaceCurve3D {
     type Point = Point3;
     type Vector = Vector3;
@@ -71,6 +126,7 @@ impl SnapCurveEndpoints for Curve3D {
             | Curve3D::Conic(_)
             | Curve3D::BsplineCurve(_)
             | Curve3D::ParameterCurve(_)
+            | Curve3D::TrimmedCurve(_)
             | Curve3D::NurbsCurve(_) => {}
         }
     }
@@ -159,6 +215,7 @@ impl ParameterDivision1D for Curve3D {
             Curve3D::SurfaceCurve(curve) => curve.try_parameter_division(range, tol),
             Curve3D::IntersectionCurve(curve) => curve.leader().try_parameter_division(range, tol),
             Curve3D::NurbsCurve(curve) => curve.try_parameter_division(range, tol),
+            Curve3D::TrimmedCurve(curve) => curve.try_parameter_division(range, tol),
         };
         if let Some(started) = started {
             let kind = match self {
@@ -170,6 +227,7 @@ impl ParameterDivision1D for Curve3D {
                 Curve3D::SurfaceCurve(_) => "SurfaceCurve",
                 Curve3D::IntersectionCurve(_) => "IntersectionCurve",
                 Curve3D::NurbsCurve(_) => "NurbsCurve",
+                Curve3D::TrimmedCurve(_) => "TrimmedCurve",
             };
             eprintln!(
                 "trace bool curve_division kind={} points={} tol={} elapsed_ms={:.3}",
@@ -195,6 +253,7 @@ impl ParameterDivision1D for Curve3D {
             Curve3D::SurfaceCurve(curve) => curve.parameter_division(range, tol),
             Curve3D::IntersectionCurve(curve) => curve.leader().parameter_division(range, tol),
             Curve3D::NurbsCurve(curve) => curve.parameter_division(range, tol),
+            Curve3D::TrimmedCurve(curve) => curve.parameter_division(range, tol),
         };
         if let Some(started) = started {
             let kind = match self {
@@ -206,6 +265,7 @@ impl ParameterDivision1D for Curve3D {
                 Curve3D::SurfaceCurve(_) => "SurfaceCurve",
                 Curve3D::IntersectionCurve(_) => "IntersectionCurve",
                 Curve3D::NurbsCurve(_) => "NurbsCurve",
+                Curve3D::TrimmedCurve(_) => "TrimmedCurve",
             };
             eprintln!(
                 "trace bool curve_division kind={} points={} tol={} elapsed_ms={:.3}",

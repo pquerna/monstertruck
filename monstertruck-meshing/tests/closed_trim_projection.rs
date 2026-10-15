@@ -8,7 +8,6 @@
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI, TAU};
 
 use monstertruck_geometry::prelude::*;
-use monstertruck_meshing::prelude::*;
 
 /// A rational quadratic cylinder of radius 1 and height 1 around `z`, `u`
 /// over `[0, 2π]` in four quarter spans, `v` over `[0, 1]`.

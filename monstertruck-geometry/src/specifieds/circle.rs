@@ -26,6 +26,8 @@ impl ParametricCurve for UnitCircle<Point2> {
     #[inline]
     fn derivative_2(&self, t: f64) -> Vector2 { self.derivative_n(2, t) }
     #[inline]
+    fn period(&self) -> Option<f64> { Some(TAU) }
+    #[inline]
     fn parameter_range(&self) -> ParameterRange { (Bound::Included(0.0), Bound::Excluded(TAU)) }
 }
 

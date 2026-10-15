@@ -4,8 +4,6 @@ use monstertruck_topology::compress::*;
 
 use self::topology::PreStepModel;
 
-const ERR: Result = Err(std::fmt::Error);
-
 #[cfg(feature = "derive")]
 pub use monstertruck_derive::{StepFormat, StepLength};
 
@@ -253,16 +251,44 @@ pub trait StepCurve {
     /// the parameter `same_sense`.
     #[inline(always)]
     fn same_sense(&self) -> bool { true }
+    /// Maps native parameters into the chart actually emitted by this writer.
+    ///
+    /// The coefficient enclosure is descriptive, not geometric authorization.
+    fn step_parameter_chart(&self) -> Option<super::ParameterChart> {
+        Some(super::ParameterChart::identity())
+    }
+
+    /// The root-family reversal in the actually emitted STEP parameter chart.
+    fn step_reversed_parameter_chart(&self) -> Option<super::ParameterChart> { None }
+
+    /// Natural period of the emitted basis, not a native convenience range.
+    ///
+    /// An explicitly emitted TRIMMED_CURVE is bounded and returns `None`.
+    fn step_parameter_period(&self) -> Option<f64> { None }
 }
 
 impl<T: StepCurve> StepCurve for &T {
     #[inline(always)]
     fn same_sense(&self) -> bool { (*self).same_sense() }
+    fn step_parameter_chart(&self) -> Option<super::ParameterChart> {
+        (*self).step_parameter_chart()
+    }
+    fn step_reversed_parameter_chart(&self) -> Option<super::ParameterChart> {
+        (*self).step_reversed_parameter_chart()
+    }
+    fn step_parameter_period(&self) -> Option<f64> { (*self).step_parameter_period() }
 }
 
 impl<T: StepCurve> StepCurve for Box<T> {
     #[inline(always)]
     fn same_sense(&self) -> bool { self.as_ref().same_sense() }
+    fn step_parameter_chart(&self) -> Option<super::ParameterChart> {
+        self.as_ref().step_parameter_chart()
+    }
+    fn step_reversed_parameter_chart(&self) -> Option<super::ParameterChart> {
+        self.as_ref().step_reversed_parameter_chart()
+    }
+    fn step_parameter_period(&self) -> Option<f64> { self.as_ref().step_parameter_period() }
 }
 
 /// Additional information for output to `face_surface`.
@@ -270,16 +296,28 @@ pub trait StepSurface {
     /// the parameter `same_sense`.
     #[inline(always)]
     fn same_sense(&self) -> bool { true }
+    /// Maps native UV coordinates into the surface chart actually emitted.
+    ///
+    /// The owning face retains its active domain and trim authority.
+    fn step_parameter_chart(&self) -> Option<super::SurfaceParameterChart> {
+        Some(super::SurfaceParameterChart::identity())
+    }
 }
 
 impl<T: StepSurface> StepSurface for &T {
     #[inline(always)]
     fn same_sense(&self) -> bool { (*self).same_sense() }
+    fn step_parameter_chart(&self) -> Option<super::SurfaceParameterChart> {
+        (*self).step_parameter_chart()
+    }
 }
 
 impl<T: StepSurface> StepSurface for Box<T> {
     #[inline(always)]
     fn same_sense(&self) -> bool { self.as_ref().same_sense() }
+    fn step_parameter_chart(&self) -> Option<super::SurfaceParameterChart> {
+        self.as_ref().step_parameter_chart()
+    }
 }
 
 /// Describe STEP file header
@@ -538,3 +576,4 @@ mod geometry;
 mod topology;
 pub use assembly::StepDesign;
 pub use geometry::{MatrixAsAxis, VectorAsDirection};
+pub(crate) use geometry::{fmt_parameter_curve_with_chart, with_pcurve_step_curve};

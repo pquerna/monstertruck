@@ -159,6 +159,7 @@ fn reported_range_bounds_the_curve(curve: &Curve3D) -> bool {
         | Curve3D::Polyline(_)
         | Curve3D::BsplineCurve(_)
         | Curve3D::NurbsCurve(_)
+        | Curve3D::TrimmedCurve(_)
         | Curve3D::IntersectionCurve(_) => true,
         Curve3D::ParameterCurve(_) => true,
         Curve3D::SurfaceCurve(curve) => reported_range_bounds_the_curve(curve.leader()),

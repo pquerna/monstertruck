@@ -13,7 +13,9 @@ impl TryFrom<Surface> for NurbsSurface<Vector4> {
             // The exact rational net -- the SAME one these faces WERE before
             // spec 012 U1.2 moved them onto the analytic variants, so the
             // fillet path sees no change.
-            Surface::SphericalSurface(_) | Surface::ToroidalSurface(_) => surface
+            Surface::SphericalSurface(_)
+            | Surface::ToroidalSurface(_)
+            | Surface::ExtrusionSurface(_) => surface
                 .try_into_homogeneous_bspline_surface()
                 .map(NurbsSurface::new)
                 .ok_or(()),
@@ -30,11 +32,24 @@ impl TryFrom<Curve> for NurbsCurve<Vector4> {
     // silently degrade downstream fillet/chamfer geometry. Parameter curves
     // and non-exact leader chains have no exact NURBS form, so they refuse
     // here and surface as `FilletError::UnsupportedGeometry`.
-    fn try_from(curve: Curve) -> std::result::Result<Self, ()> {
-        curve
-            .try_into_homogeneous_bspline_curve()
-            .map(NurbsCurve::new)
-            .ok_or(())
+    fn try_from(mut curve: Curve) -> std::result::Result<Self, ()> {
+        loop {
+            match curve {
+                Curve::Line(line) => return Ok(Self::from(BsplineCurve::from(line))),
+                Curve::BsplineCurve(curve) => return Ok(Self::from(curve)),
+                Curve::NurbsCurve(curve) => return Ok(curve),
+                Curve::IntersectionCurve(intersection) => {
+                    curve = *intersection.destruct_with_boundaries().2;
+                }
+                Curve::ParameterCurve(_) => return Err(()),
+                trimmed @ Curve::TrimmedCurve(_) => {
+                    return trimmed
+                        .try_into_homogeneous_bspline_curve()
+                        .map(Self::new)
+                        .ok_or(());
+                }
+            }
+        }
     }
 }
 // From<NurbsCurve<Vector4>> for Curve -- provided by derive_more::From

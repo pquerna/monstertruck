@@ -44,6 +44,14 @@ fn curve3d_only_curve(curve: &monstertruck_modeling::Curve) -> monstertruck_mode
         monstertruck_modeling::Curve::Line(_)
         | monstertruck_modeling::Curve::BsplineCurve(_)
         | monstertruck_modeling::Curve::NurbsCurve(_) => curve.clone(),
+        monstertruck_modeling::Curve::TrimmedCurve(trimmed) => {
+            monstertruck_modeling::Curve::TrimmedCurve(trimmed.map_ref(|trim| {
+                monstertruck_geometry::prelude::TrimmedCurve::new(
+                    Box::new(curve3d_only_curve(trim.curve())),
+                    trim.range(),
+                )
+            }))
+        }
         monstertruck_modeling::Curve::ParameterCurve(parameter_curve) => {
             monstertruck_modeling::Curve::NurbsCurve(monstertruck_modeling::NurbsCurve::new(
                 monstertruck_modeling::Curve::ParameterCurve(parameter_curve.clone()).lift_up(),

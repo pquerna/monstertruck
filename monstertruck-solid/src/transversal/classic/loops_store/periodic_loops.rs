@@ -282,14 +282,16 @@ struct LoopPoint {
     direction: Option<Vector3>,
 }
 
+type ClosedIntersection<S> = (PolylineCurve, IntersectionCurve<PolylineCurve, S, S>);
+
 pub(super) fn add_closed_intersection<C, S>(
-    mut polyline: PolylineCurve,
-    mut curve: IntersectionCurve<PolylineCurve, S, S>,
+    (mut polyline, mut curve): ClosedIntersection<S>,
     native: [&mut LoopsStore<Point3, C>; 2],
     polygon: [&mut LoopsStore<Point3, PolylineCurve>; 2],
     sides: [(usize, &S, ShapesOpStatus); 2],
     orientation: ShapesOpStatus,
     tolerance: f64,
+    record: &mut Option<&mut RewriteObserver<'_, Point3, C>>,
 ) -> std::result::Result<(), &'static str>
 where
     C: SearchNearestParameter<CurveParameter, Point = Point3>
@@ -452,6 +454,7 @@ where
                 &point.native,
                 native_kind,
                 &mut native_maps[side],
+                record,
             )?;
         }
         if point.on_boundary.iter().any(|&contact| contact) {

@@ -81,7 +81,12 @@
 //! * A `Processor`'s `Matrix4` is a similarity. It is checked, not assumed:
 //!   anything else refuses.
 
+use crate::geometry::{ValidatedGeometryBudget, validated_curve_jet, validated_curve2d_jet};
 use crate::*;
+use std::sync::atomic::AtomicBool;
+
+mod validated;
+pub use validated::{validated_face_bounding_box, validated_inverse_affine_point};
 
 /// How much an analytic sphere's axis-aligned bounding box exceeds the sphere:
 /// `(2r)^3 / (4/3 pi r^3) = 6 / pi`, independent of the radius.
@@ -141,6 +146,10 @@ pub fn certified_surface_bounding_box(
     match surface {
         // A planar face is exactly what its wires enclose.
         Surface::Plane(_) => hull_box(boundary_hull?),
+        // Every coordinate is affine along each complete extrusion ruling.
+        // A compact trimmed ruling reaches the boundary at both ends, so its
+        // coordinate extrema are already enclosed by the boundary hull.
+        Surface::ExtrusionSurface(_) => hull_box(boundary_hull?),
         // Convex-hull property, straight.
         Surface::BsplineSurface(surface) => {
             hull_box_iter(surface.control_points().iter().flatten().copied())
@@ -243,6 +252,7 @@ fn surface_class_name(surface: &Surface) -> &'static str {
         Surface::BsplineSurface(_) => "BsplineSurface",
         Surface::NurbsSurface(_) => "NurbsSurface",
         Surface::RevolutionSurface(_) => "RevolutionSurface",
+        Surface::ExtrusionSurface(_) => "ExtrusionSurface",
         Surface::TsplineSurface(_) => "TsplineSurface",
         Surface::SphericalSurface(_) => "SphericalSurface",
         Surface::ToroidalSurface(_) => "ToroidalSurface",
@@ -256,6 +266,7 @@ fn curve_class_name(curve: &Curve) -> &'static str {
         Curve::BsplineCurve(_) => "BsplineCurve",
         Curve::NurbsCurve(_) => "NurbsCurve",
         Curve::ParameterCurve(_) => "ParameterCurve",
+        Curve::TrimmedCurve(_) => "TrimmedCurve",
         Curve::IntersectionCurve(_) => "IntersectionCurve",
     }
 }
@@ -299,6 +310,32 @@ pub fn push_curve_hull(curve: &Curve, points: &mut Vec<Point3>) -> Option<()> {
             for control in curve.control_points() {
                 points.push(projected_control_point(*control)?);
             }
+            Some(())
+        }
+        Curve::TrimmedCurve(trimmed) => {
+            let range = trimmed.entity().range();
+            let jet = validated_curve_jet(
+                curve,
+                [range.0, range.1],
+                &mut ValidatedGeometryBudget::new(1_000_000),
+                &AtomicBool::new(false),
+            )
+            .ok()?;
+            push_box_corners(
+                &BoundingBox::from_iter([
+                    Point3::new(
+                        jet.position[0].lower,
+                        jet.position[1].lower,
+                        jet.position[2].lower,
+                    ),
+                    Point3::new(
+                        jet.position[0].upper,
+                        jet.position[1].upper,
+                        jet.position[2].upper,
+                    ),
+                ]),
+                points,
+            );
             Some(())
         }
         Curve::ParameterCurve(pcurve) => {
@@ -345,6 +382,20 @@ fn parameter_curve_uv_box(curve: &Curve2D) -> Option<BoundingBox<Point2>> {
     let mut points: Vec<Point2> = Vec::new();
     match curve {
         Curve2D::Line(Line(front, back)) => points.extend([*front, *back]),
+        Curve2D::TrimmedCurve(trimmed) => {
+            let range = trimmed.entity().range();
+            let jet = validated_curve2d_jet(
+                curve,
+                [range.0, range.1],
+                &mut ValidatedGeometryBudget::new(1_000_000),
+                &AtomicBool::new(false),
+            )
+            .ok()?;
+            points.extend([
+                Point2::new(jet.position[0].lower, jet.position[1].lower),
+                Point2::new(jet.position[0].upper, jet.position[1].upper),
+            ]);
+        }
         Curve2D::Polyline(polyline) => points.extend(polyline.0.iter().copied()),
         Curve2D::BsplineCurve(curve) => points.extend(curve.control_points().iter().copied()),
         Curve2D::NurbsCurve(curve) => {
@@ -405,6 +456,20 @@ fn surface_patch_box(
                 points.push(plane.origin() + plane.axis_u() * u + plane.axis_v() * v);
             }
             hull_box(&points)
+        }
+        Surface::ExtrusionSurface(extrusion) => {
+            let mut points = Vec::new();
+            if let Curve::Line(line) = extrusion.entity_curve() {
+                points.extend([line.evaluate(low.x), line.evaluate(high.x)]);
+            } else {
+                push_curve_hull(extrusion.entity_curve(), &mut points)?;
+            }
+            hull_box_iter(points.into_iter().flat_map(|point| {
+                [
+                    point + extrusion.extruding_vector() * low.y,
+                    point + extrusion.extruding_vector() * high.y,
+                ]
+            }))
         }
         Surface::RevolutionSurface(processor) => {
             let revolution = processor.entity();

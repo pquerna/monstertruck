@@ -26,7 +26,6 @@ type ModelSurfaceCurve = SurfaceCurve<
     From,
     ParametricCurve,
     BoundedCurve,
-    Cut,
     Invertible,
     SearchNearestParameterD1,
     SearchParameterD1,
@@ -43,6 +42,8 @@ pub enum Curve {
     ParameterCurve(ParameterCurve<Curve2D, Box<Surface>>),
     /// intersection curve
     IntersectionCurve(ModelSurfaceCurve),
+    /// A bounded original basis with an independent affine pose and sense.
+    TrimmedCurve(Processor<TrimmedCurve<Box<Curve>>, Matrix4>),
 }
 
 /// 2-dimensional curve used as a parameter-space trim.
@@ -79,7 +80,6 @@ pub enum Conic2D {
     ParametricCurve,
     BoundedCurve,
     ParameterDivision1D,
-    Cut,
     Invertible,
     SearchNearestParameterD1,
     SearchParameterD1,
@@ -95,6 +95,8 @@ pub enum Curve2D {
     BsplineCurve(BsplineCurve<Point2>),
     /// 2-dimensional NURBS curve
     NurbsCurve(NurbsCurve<Vector3>),
+    /// A bounded original parameter-space basis and its independent sense.
+    TrimmedCurve(Processor<TrimmedCurve<Box<Curve2D>>, Matrix3>),
 }
 
 macro_rules! derive_curve_method {
@@ -105,6 +107,7 @@ macro_rules! derive_curve_method {
             Curve::NurbsCurve(got) => $method(got, $($ver), *),
             Curve::ParameterCurve(got) => $method(got, $($ver), *),
             Curve::IntersectionCurve(got) => $method(got, $($ver), *),
+            Curve::TrimmedCurve(got) => $method(got, $($ver), *),
         }
     };
 }
@@ -117,6 +120,7 @@ macro_rules! derive_curve_self_method {
             Curve::NurbsCurve(got) => Curve::NurbsCurve($method(got, $($ver), *)),
             Curve::ParameterCurve(got) => Curve::ParameterCurve($method(got, $($ver), *)),
             Curve::IntersectionCurve(got) => Curve::IntersectionCurve($method(got, $($ver), *)),
+            Curve::TrimmedCurve(got) => Curve::TrimmedCurve($method(got, $($ver), *)),
         }
     };
 }
@@ -176,6 +180,7 @@ impl ParameterDivision1D for Curve {
             Curve::NurbsCurve(curve) => curve.parameter_division(range, tol),
             Curve::ParameterCurve(curve) => curve.parameter_division(range, tol),
             Curve::IntersectionCurve(curve) => curve.leader().parameter_division(range, tol),
+            Curve::TrimmedCurve(curve) => curve.parameter_division(range, tol),
         };
         if debug_profile {
             let kind = match self {
@@ -183,12 +188,14 @@ impl ParameterDivision1D for Curve {
                 Curve::BsplineCurve(_) => "BsplineCurve",
                 Curve::NurbsCurve(_) => "NurbsCurve",
                 Curve::ParameterCurve(_) => "ParameterCurve",
+                Curve::TrimmedCurve(_) => "TrimmedCurve",
                 Curve::IntersectionCurve(curve) => match curve.leader().as_ref() {
                     Curve::Line(_) => "IntersectionCurve(Line)",
                     Curve::BsplineCurve(_) => "IntersectionCurve(BsplineCurve)",
                     Curve::NurbsCurve(_) => "IntersectionCurve(NurbsCurve)",
                     Curve::ParameterCurve(_) => "IntersectionCurve(ParameterCurve)",
                     Curve::IntersectionCurve(_) => "IntersectionCurve(IntersectionCurve)",
+                    Curve::TrimmedCurve(_) => "IntersectionCurve(TrimmedCurve)",
                 },
             };
             eprintln!(
@@ -324,6 +331,9 @@ impl Curve {
             Curve::NurbsCurve(curve) => curve.non_rationalized().clone(),
             Curve::ParameterCurve(curve) => sample_curve_to_nurbs(curve).non_rationalized().clone(),
             Curve::IntersectionCurve(curve) => curve.leader().lift_up(),
+            Curve::TrimmedCurve(curve) => self
+                .try_into_homogeneous_bspline_curve()
+                .unwrap_or_else(|| sample_curve_to_nurbs(curve).non_rationalized().clone()),
         }
     }
 }
@@ -340,7 +350,7 @@ fn curve2d_endpoint_hints(curve: &Curve2D) -> Option<(Point2, Point2)> {
             curve.control_points().first()?.to_point(),
             curve.control_points().last()?.to_point(),
         )),
-        Curve2D::Conic(_) => None,
+        Curve2D::Conic(_) | Curve2D::TrimmedCurve(_) => None,
     }
 }
 
@@ -380,7 +390,7 @@ fn set_curve2d_endpoints(curve: &mut Curve2D, front: Point2, back: Point2) {
                 *point = back.to_vec().extend(weight);
             }
         }
-        Curve2D::Conic(_) => {}
+        Curve2D::Conic(_) | Curve2D::TrimmedCurve(_) => {}
     }
 }
 
@@ -438,7 +448,8 @@ impl TryIntoHomogeneousBsplineCurve for Curve {
             Curve::BsplineCurve(curve) => curve.try_into_homogeneous_bspline_curve(),
             Curve::NurbsCurve(curve) => curve.try_into_homogeneous_bspline_curve(),
             Curve::ParameterCurve(_) => None,
-            Curve::IntersectionCurve(curve) => curve.leader().try_into_homogeneous_bspline_curve(),
+            Curve::IntersectionCurve(_) => None,
+            Curve::TrimmedCurve(_) => exact_trimmed_homogeneous(self, 0),
         }
     }
 
@@ -503,6 +514,7 @@ impl ParameterBoundary2D<Surface> for Curve {
                 .or_else(|| sampled_parameter_boundary(curve, surface, tolerance)),
             Curve::ParameterCurve(curve) => same_surface(curve.surface().as_ref(), surface)
                 .then(|| parameter_curve_points(curve, tolerance)),
+            Curve::TrimmedCurve(curve) => sampled_parameter_boundary(curve, surface, tolerance),
             Curve::IntersectionCurve(curve) => {
                 if let Some(boundary) = curve.boundary0().filter(|boundary| {
                     boundary_matches_surface_curve(curve.leader().as_ref(), boundary, surface)
@@ -538,6 +550,19 @@ impl ExactParameterBoundary2D<Surface> for Curve {
             Curve::Line(curve) => exact_line_boundary(curve, surface),
             Curve::BsplineCurve(curve) => exact_bspline_boundary(curve, surface),
             Curve::NurbsCurve(curve) => exact_nurbs_boundary(curve, surface),
+            Curve::TrimmedCurve(curve) if *curve.transform() == Matrix4::identity() => {
+                let boundary = curve
+                    .entity()
+                    .curve()
+                    .exact_parameter_boundary_2d(surface)?;
+                let (basis, surface) = boundary.decompose();
+                let mut trim =
+                    Processor::new(TrimmedCurve::new(Box::new(basis), curve.entity().range()));
+                if !curve.orientation() {
+                    trim.invert();
+                }
+                Some(ParameterCurve::new(Curve2D::TrimmedCurve(trim), surface))
+            }
             Curve::ParameterCurve(curve) if same_surface(curve.surface().as_ref(), surface) => {
                 Some(curve.clone())
             }
@@ -591,12 +616,14 @@ impl Curve {
                 Curve::BsplineCurve(_) => "BsplineCurve",
                 Curve::NurbsCurve(_) => "NurbsCurve",
                 Curve::ParameterCurve(_) => "ParameterCurve",
+                Curve::TrimmedCurve(_) => "TrimmedCurve",
                 Curve::IntersectionCurve(curve) => match curve.leader().as_ref() {
                     Curve::Line(_) => "IntersectionCurve(Line)",
                     Curve::BsplineCurve(_) => "IntersectionCurve(BsplineCurve)",
                     Curve::NurbsCurve(_) => "IntersectionCurve(NurbsCurve)",
                     Curve::ParameterCurve(_) => "IntersectionCurve(ParameterCurve)",
                     Curve::IntersectionCurve(_) => "IntersectionCurve(IntersectionCurve)",
+                    Curve::TrimmedCurve(_) => "IntersectionCurve(TrimmedCurve)",
                 },
             };
             eprintln!(
@@ -608,5 +635,180 @@ impl Curve {
             );
         }
         result
+    }
+}
+
+impl Cut for Curve {
+    fn cut(&mut self, t: f64) -> Self {
+        if matches!(self, Self::TrimmedCurve(curve) if !curve.orientation()) {
+            let (start, end) = self.range_tuple();
+            let right = Self::TrimmedCurve(Processor::new(TrimmedCurve::new(
+                Box::new(self.clone()),
+                (t, end),
+            )));
+            let original = std::mem::replace(self, right);
+            let left = Self::TrimmedCurve(Processor::new(TrimmedCurve::new(
+                Box::new(original),
+                (start, t),
+            )));
+            std::mem::replace(self, left)
+        } else {
+            derive_curve_self_method!(self, Cut::cut, t)
+        }
+    }
+}
+
+impl Cut for Curve2D {
+    fn cut(&mut self, t: f64) -> Self {
+        match self {
+            Self::Line(curve) => Self::Line(curve.cut(t)),
+            Self::Polyline(curve) => Self::Polyline(curve.cut(t)),
+            Self::Conic(curve) => Self::Conic(curve.cut(t)),
+            Self::BsplineCurve(curve) => Self::BsplineCurve(curve.cut(t)),
+            Self::NurbsCurve(curve) => Self::NurbsCurve(curve.cut(t)),
+            Self::TrimmedCurve(curve) if curve.orientation() => Self::TrimmedCurve(curve.cut(t)),
+            Self::TrimmedCurve(_) => {
+                let (start, end) = self.range_tuple();
+                let right = Self::TrimmedCurve(Processor::new(TrimmedCurve::new(
+                    Box::new(self.clone()),
+                    (t, end),
+                )));
+                let original = std::mem::replace(self, right);
+                let left = Self::TrimmedCurve(Processor::new(TrimmedCurve::new(
+                    Box::new(original),
+                    (start, t),
+                )));
+                std::mem::replace(self, left)
+            }
+        }
+    }
+}
+
+fn exact_trimmed_homogeneous(curve: &Curve, depth: usize) -> Option<BsplineCurve<Vector4>> {
+    if depth > MAX_NATIVE_GEOMETRY_NESTING {
+        return None;
+    }
+    let Curve::TrimmedCurve(trimmed) = curve else {
+        return curve.try_into_homogeneous_bspline_curve();
+    };
+    let range = trimmed.entity().range();
+    let basis = trimmed.entity().curve().as_ref();
+    let mut spline = match basis {
+        Curve::Line(line) => line.try_into_homogeneous_bspline_curve_over(range)?,
+        _ => exact_trimmed_homogeneous(basis, depth + 1)?,
+    };
+    let own = spline.range_tuple();
+    if range.0 < own.0 || range.1 > own.1 || range.0 >= range.1 {
+        return None;
+    }
+    if range.0 > own.0 {
+        spline = spline.cut(range.0);
+    }
+    if range.1 < own.1 {
+        let _ = spline.cut(range.1);
+    }
+    if !trimmed.orientation() {
+        spline.invert();
+    }
+    spline
+        .control_points_mut()
+        .for_each(|point| *point = *trimmed.transform() * *point);
+    Some(spline)
+}
+
+impl Transformed<Matrix3> for Conic2D {
+    fn transform_by(&mut self, transform: Matrix3) {
+        match self {
+            Self::Ellipse(curve) => curve.transform_by(transform),
+            Self::Hyperbola(curve) => curve.transform_by(transform),
+            Self::Parabola(curve) => curve.transform_by(transform),
+        }
+    }
+
+    fn transformed(&self, transform: Matrix3) -> Self {
+        let mut curve = self.clone();
+        curve.transform_by(transform);
+        curve
+    }
+}
+
+impl Transformed<Matrix3> for Curve2D {
+    fn transform_by(&mut self, transform: Matrix3) {
+        match self {
+            Self::Line(curve) => curve.transform_by(transform),
+            Self::Polyline(curve) => curve.transform_by(transform),
+            Self::Conic(curve) => curve.transform_by(transform),
+            Self::BsplineCurve(curve) => curve.transform_by(transform),
+            Self::NurbsCurve(curve) => curve.transform_by(transform),
+            Self::TrimmedCurve(curve) => curve.transform_by(transform),
+        }
+    }
+
+    fn transformed(&self, transform: Matrix3) -> Self {
+        let mut curve = self.clone();
+        curve.transform_by(transform);
+        curve
+    }
+}
+
+#[cfg(test)]
+mod native_trimmed_curve_tests {
+    use super::*;
+
+    #[test]
+    fn nested_inverse_trim_cut_preserves_original_parameter_chart() {
+        let basis = Curve::Line(Line(Point3::origin(), Point3::new(1.0, 2.0, 3.0)));
+        let mut inner = Processor::new(TrimmedCurve::new(Box::new(basis), (-2.0, 7.0)));
+        inner.invert();
+        let original = Curve::TrimmedCurve(Processor::new(TrimmedCurve::new(
+            Box::new(Curve::TrimmedCurve(inner)),
+            (1.0, 4.0),
+        )))
+        .inverse();
+        let mut first = original.clone();
+        let second = first.cut(2.0);
+        for t in [1.0, 1.5, 2.0] {
+            assert_eq!(first.evaluate(t), original.evaluate(t));
+            assert_eq!(first.derivative(t), original.derivative(t));
+        }
+        for t in [2.0, 3.0, 4.0] {
+            assert_eq!(second.evaluate(t), original.evaluate(t));
+            assert_eq!(second.derivative(t), original.derivative(t));
+        }
+        assert_eq!(first.range_tuple(), (1.0, 2.0));
+        assert_eq!(second.range_tuple(), (2.0, 4.0));
+        assert_eq!(original.inverse().evaluate(1.0), original.evaluate(4.0));
+        assert!(
+            first
+                .search_parameter(original.evaluate(3.0), None, 100)
+                .is_none()
+        );
+        assert_near!(
+            first
+                .search_nearest_parameter(original.evaluate(3.0), None, 100)
+                .unwrap(),
+            2.0
+        );
+        let third = first.cut(1.5);
+        assert_eq!(third.evaluate(1.75), original.evaluate(1.75));
+        assert!(matches!(&third, Curve::TrimmedCurve(outer)
+            if matches!(outer.entity().curve().as_ref(), Curve::TrimmedCurve(basis) if !basis.orientation())));
+    }
+
+    #[test]
+    fn nested_2d_inverse_trim_cut_preserves_original_parameter_chart() {
+        let basis = Curve2D::Line(Line(Point2::origin(), Point2::new(1.0, 2.0)));
+        let mut inner = Processor::new(TrimmedCurve::new(Box::new(basis), (-2.0, 7.0)));
+        inner.invert();
+        let original = Curve2D::TrimmedCurve(Processor::new(TrimmedCurve::new(
+            Box::new(Curve2D::TrimmedCurve(inner)),
+            (1.0, 4.0),
+        )))
+        .inverse();
+        let mut first = original.clone();
+        let second = first.cut(2.0);
+        assert_eq!(first.evaluate(1.5), original.evaluate(1.5));
+        assert_eq!(second.evaluate(3.0), original.evaluate(3.0));
+        assert_eq!(second.derivative(3.0), original.derivative(3.0));
     }
 }

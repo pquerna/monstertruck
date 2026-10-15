@@ -268,6 +268,173 @@ impl CategoryCount {
     pub fn lost(&self) -> usize { self.listed.saturating_sub(self.kept) }
 }
 
+/// A source-coordinate interval, retaining its exact floating-point bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceCurveInterval {
+    start_bits: u64,
+    end_bits: u64,
+}
+
+impl SourceCurveInterval {
+    pub(crate) fn new((start, end): (f64, f64)) -> Self {
+        Self {
+            start_bits: start.to_bits(),
+            end_bits: end.to_bits(),
+        }
+    }
+
+    /// Returns the source-coordinate endpoints without normalization.
+    pub fn range_tuple(self) -> (f64, f64) {
+        (
+            f64::from_bits(self.start_bits),
+            f64::from_bits(self.end_bits),
+        )
+    }
+}
+
+/// Bit-preserving scalar chart coefficients, including their certified enclosure.
+///
+/// This is parameter provenance, not a geometric-equivalence certificate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceParameterChart {
+    scale_bits: u64,
+    offset_bits: u64,
+    offset_enclosure: SourceCurveInterval,
+}
+
+impl SourceParameterChart {
+    pub(crate) fn new(chart: crate::step::ParameterChart) -> Self {
+        Self {
+            scale_bits: chart.scale.to_bits(),
+            offset_bits: chart.offset.to_bits(),
+            offset_enclosure: SourceCurveInterval::new((
+                chart.offset_enclosure.lower,
+                chart.offset_enclosure.upper,
+            )),
+        }
+    }
+
+    /// Restores nominal coefficients and their outward enclosure unchanged.
+    pub fn parameter_chart(self) -> crate::step::ParameterChart {
+        let (lower, upper) = self.offset_enclosure.range_tuple();
+        crate::step::ParameterChart {
+            scale: f64::from_bits(self.scale_bits),
+            offset: f64::from_bits(self.offset_bits),
+            offset_enclosure: crate::step::ParameterEnclosure { lower, upper },
+        }
+    }
+}
+
+/// Original STEP occurrence lineage for one native compressed coedge.
+///
+/// Its position in the containing wire is its native use ordinal. Closed-curve
+/// subdivision children retain the same source occurrence and original interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceCoedgeProvenance {
+    /// Original `EDGE_CURVE` reference, absent for inline owned entities.
+    pub source_edge: Option<u64>,
+    /// Original edge-use reference, usually an `ORIENTED_EDGE`.
+    pub source_coedge: Option<u64>,
+    /// Position in the original `EDGE_LOOP`, before reversal or subdivision.
+    pub source_coedge_index: usize,
+    /// Original edge-use orientation, before bound/face composition.
+    pub source_orientation: bool,
+    /// Index into this native shell's compressed edge table.
+    pub native_edge_index: usize,
+    /// Final native coedge orientation.
+    pub native_orientation: bool,
+    /// Complete parsed source edge interval, before closed-curve subdivision.
+    pub source_curve_range: SourceCurveInterval,
+    /// Actual resulting native subedge interval in source coordinates.
+    pub restricted_curve_range: SourceCurveInterval,
+}
+
+/// Original STEP loop lineage, aligned with one native boundary wire.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceWireProvenance {
+    /// Original `FACE_BOUND` reference, absent for an inline bound.
+    pub source_bound: Option<u64>,
+    /// Original `EDGE_LOOP` reference, absent for an inline loop.
+    pub source_wire: Option<u64>,
+    /// Position of the bound in the original face's bound list.
+    pub source_wire_index: usize,
+    /// Occurrences in returned native wire order, including closed-curve children.
+    pub coedges: Vec<SourceCoedgeProvenance>,
+}
+
+/// Original STEP face lineage, aligned with one native compressed face.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFaceProvenance {
+    /// Ultimate `FACE_SURFACE`/`ADVANCED_FACE` reference, if referenced.
+    pub source_face: Option<u64>,
+    /// Original shell face-use reference, possibly an `ORIENTED_FACE`.
+    pub source_face_use: Option<u64>,
+    /// Position in the original shell's face list.
+    pub source_face_index: usize,
+    /// Final returned native face orientation, including oriented-shell sense.
+    pub native_orientation: bool,
+    /// Wires in returned native boundary order.
+    pub wires: Vec<SourceWireProvenance>,
+}
+
+/// One original declared trim wrapper, ordered from outermost to innermost.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceTrimmedCurveProvenance {
+    /// Original `TRIMMED_CURVE` reference, absent for an inline wrapper.
+    pub source_curve: Option<u64>,
+    /// Original direct basis reference, absent for an inline basis.
+    pub source_basis_curve: Option<u64>,
+    /// Original wrapper interval in the decoded internal source chart.
+    pub source_curve_range: SourceCurveInterval,
+    /// Original complete direct basis interval before restriction.
+    pub source_basis_curve_range: SourceCurveInterval,
+    /// Original numeric `trim_1` and `trim_2`, without sorting or lifting.
+    pub declared_parameter_range: SourceCurveInterval,
+    /// Selected interval in the direct basis's raw canonical chart.
+    pub selected_basis_range: SourceCurveInterval,
+    /// Outward enclosures of the two selected basis endpoints, respectively.
+    pub selected_basis_bounds: [SourceCurveInterval; 2],
+    /// Original wrapper's nominal canonical raw STEP parameter interval.
+    pub raw_parameter_range: SourceCurveInterval,
+    /// Outward enclosures of the canonical raw endpoints, respectively.
+    pub raw_parameter_bounds: [SourceCurveInterval; 2],
+    /// Raw canonical STEP coordinates to the returned decoded source chart.
+    pub raw_parameter_chart: SourceParameterChart,
+    /// Original declared trim sense, before edge and coedge composition.
+    pub sense_agreement: bool,
+}
+
+/// Original curve/basis lineage for one parsed source edge before subdivision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceEdgeProvenance {
+    /// Original `EDGE_CURVE` entity.
+    pub source_edge: u64,
+    /// The edge's declared source geometry reference, if referenced.
+    pub source_curve: Option<u64>,
+    /// Ultimate basis reference after trim and surface-curve leader wrappers.
+    pub source_root_curve: Option<u64>,
+    /// Native edge index before closed-curve subdivision.
+    pub original_native_edge_index: usize,
+    /// Parsed original source interval before closed-curve subdivision.
+    pub source_curve_range: SourceCurveInterval,
+    /// Ultimate parsed basis interval before outer trim restriction.
+    pub source_root_curve_range: SourceCurveInterval,
+    /// Original explicit trim wrappers, without closed-curve subdivision wrappers.
+    pub trimmed_curves: Vec<SourceTrimmedCurveProvenance>,
+}
+
+/// One independently scoped native shell's original STEP occurrence tables.
+///
+/// Vector positions are native face/wire/use ordinals. A merged report retains
+/// separate shell records; its edge indices never share a flattened namespace.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourceShellProvenance {
+    /// Faces in returned native compressed face order.
+    pub faces: Vec<SourceFaceProvenance>,
+    /// Original parsed edges in pre-subdivision native edge order.
+    pub edges: Vec<SourceEdgeProvenance>,
+}
+
 /// What one conversion kept and lost, per category, with reasons.
 ///
 /// Returned alongside the converted value by the `*_reported` methods on
@@ -284,9 +451,24 @@ impl CategoryCount {
 pub struct ShellLoadReport {
     counts: BTreeMap<LossCategory, CategoryCount>,
     reasons: BTreeMap<(LossCategory, LossReason), LossTally>,
+    source_shells: Vec<SourceShellProvenance>,
 }
 
 impl ShellLoadReport {
+    /// Independently scoped source tables for compact reported conversions.
+    ///
+    /// A single converted shell has one record, including an empty shell.
+    /// [`Self::merge`] appends records without changing their local ordinals.
+    /// Legacy conversions that do not collect lineage have no records.
+    pub fn source_shells(&self) -> &[SourceShellProvenance] { &self.source_shells }
+
+    /// Consumes the report, retaining source tables without cloning diagnostics.
+    pub fn into_source_shells(self) -> Vec<SourceShellProvenance> { self.source_shells }
+
+    pub(crate) fn set_source_shell(&mut self, shell: SourceShellProvenance) {
+        self.source_shells = vec![shell];
+    }
+
     /// Listed/kept for one category.
     pub fn count(&self, category: LossCategory) -> CategoryCount {
         self.counts.get(&category).copied().unwrap_or_default()
@@ -345,6 +527,8 @@ impl ShellLoadReport {
             }
             entry.count += tally.count;
         }
+        self.source_shells
+            .extend(other.source_shells.iter().cloned());
     }
 
     /// Turn loss into a typed error, for callers that want strictness.
@@ -573,3 +757,51 @@ impl LossSink {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod source_lineage_regressions {
+    use super::*;
+
+    #[test]
+    fn source_intervals_preserve_endpoint_bits_and_report_equality() {
+        let interval = SourceCurveInterval::new((-0.0, f64::from_bits(0x7ff8000000000001)));
+        let (start, end) = interval.range_tuple();
+        assert_eq!(start.to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(end.to_bits(), 0x7ff8000000000001);
+        assert_eq!(interval, interval);
+        assert_ne!(interval, SourceCurveInterval::new((0.0, end)));
+    }
+
+    #[test]
+    fn merging_source_reports_preserves_independent_shell_ordinal_scopes() {
+        let report_for = |source_face| {
+            let mut report = ShellLoadReport::default();
+            report.note_listed(LossCategory::Face, 1);
+            report.note_kept(LossCategory::Face, 1);
+            report.set_source_shell(SourceShellProvenance {
+                faces: vec![SourceFaceProvenance {
+                    source_face: Some(source_face),
+                    source_face_use: Some(source_face),
+                    source_face_index: 0,
+                    native_orientation: true,
+                    wires: Vec::new(),
+                }],
+                edges: Vec::new(),
+            });
+            report
+        };
+        let mut merged = report_for(17);
+        merged.merge(&report_for(105));
+        assert_eq!(
+            merged.count(LossCategory::Face),
+            CategoryCount { listed: 2, kept: 2 }
+        );
+        assert!(merged.is_lossless());
+        let shells = merged.into_source_shells();
+        assert_eq!(shells.len(), 2);
+        assert_eq!(shells[0].faces[0].source_face, Some(17));
+        assert_eq!(shells[1].faces[0].source_face, Some(105));
+        assert_eq!(shells[0].faces[0].source_face_index, 0);
+        assert_eq!(shells[1].faces[0].source_face_index, 0);
+    }
+}

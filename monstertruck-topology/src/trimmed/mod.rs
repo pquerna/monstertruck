@@ -5,6 +5,12 @@ use crate::compress::{
 use crate::{errors::Error, *};
 use rustc_hash::FxHashMap as HashMap;
 
+mod chart;
+pub use chart::{
+    ChartCoedge, ChartCoedgeIdentity, ChartCoedges, ChartInformationUnavailable,
+    ChartTraversalError, StoredPcurve,
+};
+
 /// Destructured parts of a [`TrimmedFace`].
 pub type TrimmedFaceParts<P, C, S, T> = (Face<P, C, S>, Vec<Vec<Option<T>>>);
 

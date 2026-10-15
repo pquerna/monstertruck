@@ -232,6 +232,7 @@ where
     Ok(vec)
 }
 
+#[cfg(test)]
 pub(super) fn divide_faces<C, S>(
     shell: &Shell<Point3, C, S>,
     loops_store: &LoopsStore<Point3, C>,
@@ -239,6 +240,30 @@ pub(super) fn divide_faces<C, S>(
     shell_index: usize,
     polys: &mut CurveDivisionCache<Point3, C>,
     work: Option<&BooleanWork<'_>>,
+) -> ClassicResult<FacesClassification<Point3, C, S>>
+where
+    C: BoundedCurve<Point = Point3> + ParameterDivision1D<Point = Point3>,
+    S: Clone + ParametricSurface + SearchParameter<SurfaceParameter, Point = Point3>,
+{
+    divide_faces_recording(
+        shell,
+        loops_store,
+        tol,
+        shell_index,
+        polys,
+        work,
+        &mut |_, _| Ok(()),
+    )
+}
+
+pub(super) fn divide_faces_recording<C, S>(
+    shell: &Shell<Point3, C, S>,
+    loops_store: &LoopsStore<Point3, C>,
+    tol: f64,
+    shell_index: usize,
+    polys: &mut CurveDivisionCache<Point3, C>,
+    work: Option<&BooleanWork<'_>>,
+    record: &mut impl FnMut(usize, FaceId<S>) -> ClassicResult<()>,
 ) -> ClassicResult<FacesClassification<Point3, C, S>>
 where
     C: BoundedCurve<Point = Point3> + ParameterDivision1D<Point = Point3>,
@@ -308,6 +333,7 @@ where
                     updated.set_stable_id(face.stable_id());
                     updated
                 };
+                record(face_index, updated.id())?;
                 res.push(updated, ShapesOpStatus::Unknown);
             } else {
                 let vec =
@@ -327,8 +353,11 @@ where
                             },
                         },
                     )?;
-                vec.into_iter()
-                    .for_each(|(face, status)| res.push(face, status));
+                vec.into_iter().try_for_each(|(face, status)| {
+                    record(face_index, face.id())?;
+                    res.push(face, status);
+                    Ok::<(), ShapeOpsError>(())
+                })?;
             }
             Ok::<(), ShapeOpsError>(())
         })?;

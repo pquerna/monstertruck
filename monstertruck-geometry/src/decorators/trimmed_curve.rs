@@ -45,18 +45,40 @@ impl<C: ParametricCurveTrait> Cut for TrimmedCurve<C> {
     }
 }
 
-impl<C: SearchNearestParameter<CurveParameter>> SearchNearestParameter<CurveParameter>
-    for TrimmedCurve<C>
+impl<C> SearchNearestParameter<CurveParameter> for TrimmedCurve<C>
+where
+    C: ParametricCurveTrait
+        + SearchNearestParameter<CurveParameter, Point = <C as ParametricCurveTrait>::Point>,
+    <C as ParametricCurveTrait>::Point: MetricSpace<Metric = f64> + Copy,
 {
-    type Point = C::Point;
+    type Point = <C as ParametricCurveTrait>::Point;
     #[inline(always)]
     fn search_nearest_parameter<H: Into<SearchParameterHint1D>>(
         &self,
-        pt: C::Point,
+        pt: Self::Point,
         hint: H,
         trials: usize,
     ) -> Option<f64> {
-        self.curve.search_nearest_parameter(pt, hint, trials)
+        let (start, end) = self.range;
+        let hint = match hint.into() {
+            SearchParameterHint1D::Parameter(t) if t >= start && t <= end => {
+                SearchParameterHint1D::Parameter(t)
+            }
+            _ => SearchParameterHint1D::Range(start, end),
+        };
+        let candidate = self
+            .curve
+            .search_nearest_parameter(pt, hint, trials)
+            .filter(|t| t.is_finite())
+            .map(|t| t.clamp(start, end));
+        [Some(start), candidate, Some(end)]
+            .into_iter()
+            .flatten()
+            .min_by(|a, b| {
+                self.evaluate(*a)
+                    .distance2(pt)
+                    .total_cmp(&self.evaluate(*b).distance2(pt))
+            })
     }
 }
 
@@ -69,7 +91,16 @@ impl<C: SearchParameter<CurveParameter>> SearchParameter<CurveParameter> for Tri
         hint: H,
         trials: usize,
     ) -> Option<f64> {
-        self.curve.search_parameter(pt, hint, trials)
+        let (start, end) = self.range;
+        let hint = match hint.into() {
+            SearchParameterHint1D::Parameter(t) if t >= start && t <= end => {
+                SearchParameterHint1D::Parameter(t)
+            }
+            _ => SearchParameterHint1D::Range(start, end),
+        };
+        self.curve
+            .search_parameter(pt, hint, trials)
+            .filter(|t| t.is_finite() && *t >= start && *t <= end)
     }
 }
 

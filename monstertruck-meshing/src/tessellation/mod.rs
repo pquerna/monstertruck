@@ -1,4 +1,5 @@
 use crate::*;
+use monstertruck_geometry::prelude::ExactTrimBoundary2D;
 use monstertruck_topology::{compress::*, *};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -153,7 +154,6 @@ pub trait MeshedShape {
     fn to_polygon(&self) -> PolygonMesh;
 }
 
-pub use triangulation::ExactTrimBoundary2D;
 pub use triangulation::{FaceDropReason, face_drop_count, reset_face_drop_count};
 
 /// A typed tessellation refusal, produced ONLY by the opt-in strict meshing path

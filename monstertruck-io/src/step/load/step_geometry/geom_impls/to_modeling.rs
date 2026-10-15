@@ -8,10 +8,119 @@ fn to_modeling_trim(
     curve: &StepParameterCurve,
 ) -> std::result::Result<ParameterCurve<ModelingCurve2D, Box<ModelingSurface>>, StepConvertingError>
 {
-    Ok(ParameterCurve::new(
-        curve.curve().as_ref().try_into()?,
-        Box::new(curve.surface().as_ref().try_into()?),
-    ))
+    let (surface, map) = curve.surface().to_modeling_with_parameter_map()?;
+    let transform = map
+        .internal_affine_transform()
+        .ok_or(ExactConversionError::NonlinearParameterCurveChart)?;
+    let mut trim = curve.to_modeling_uv_curve()?;
+    if transform != Matrix3::identity() {
+        trim.transform_by(transform);
+    }
+    Ok(ParameterCurve::new(trim, Box::new(surface)))
+}
+
+impl StepParameterCurve {
+    /// Converts only stored UV into the decoded source carrier chart.
+    ///
+    /// This borrows the carrier and never clones it. The returned nominal curve
+    /// does not discard `input_parameter_chart`'s coefficient enclosures or
+    /// certify equivalence; a later native carrier rechart remains separate.
+    pub fn to_modeling_uv_curve(
+        &self,
+    ) -> std::result::Result<ModelingCurve2D, StepConvertingError> {
+        let mut curve = ModelingCurve2D::try_from(self.curve())?;
+        let transform = self.input_affine_transform();
+        if transform != Matrix3::identity() {
+            curve.transform_by(transform);
+        }
+        Ok(curve)
+    }
+}
+
+fn parameter_preserving_conic_leader(conic: &Conic3D) -> Option<ModelingCurve> {
+    let (transform, orientation, range) = match conic {
+        Conic3D::Ellipse(curve) => (
+            *curve.transform(),
+            curve.orientation(),
+            curve.entity().range_tuple(),
+        ),
+        Conic3D::Hyperbola(curve) => (
+            *curve.transform(),
+            curve.orientation(),
+            curve.entity().range_tuple(),
+        ),
+        Conic3D::Parabola(curve) => (
+            *curve.transform(),
+            curve.orientation(),
+            curve.entity().range_tuple(),
+        ),
+    };
+    if transform.x.w != 0.0
+        || transform.y.w != 0.0
+        || transform.z.w != 0.0
+        || transform.w.w != 1.0
+        || !range.0.is_finite()
+        || !range.1.is_finite()
+        || range.1 <= range.0
+        || (0..4).any(|column| (0..4).any(|row| !transform[column][row].is_finite()))
+    {
+        return None;
+    }
+    let origin = Point3::from_vec(transform.w.truncate());
+    let x = transform.x.truncate();
+    let y = transform.y.truncate();
+    let area_squared = x.cross(y).magnitude2();
+    if !area_squared.is_finite() || area_squared == 0.0 {
+        return None;
+    }
+    let mut profile = match conic {
+        Conic3D::Ellipse(_) => ModelingConic2D::Ellipse(Processor::new(TrimmedCurve::new(
+            UnitCircle::<Point2>::new(),
+            range,
+        ))),
+        Conic3D::Hyperbola(_) => ModelingConic2D::Hyperbola(Processor::new(TrimmedCurve::new(
+            UnitHyperbola::<Point2>::new(),
+            range,
+        ))),
+        Conic3D::Parabola(_) => ModelingConic2D::Parabola(Processor::new(TrimmedCurve::new(
+            UnitParabola::<Point2>::new(),
+            range,
+        ))),
+    };
+    if !orientation {
+        profile.invert();
+    }
+    Some(ModelingCurve::ParameterCurve(ParameterCurve::new(
+        ModelingCurve2D::Conic(profile),
+        Box::new(ModelingSurface::Plane(Plane::from_origin_vectors(
+            origin, x, y,
+        ))),
+    )))
+}
+
+impl Curve3D {
+    /// Constructs an ordinary native curve retaining the explicit source parameter.
+    ///
+    /// Conics use an analytic parameter curve in an affine plane with the
+    /// original matrix origin and axes stored separately. No rational fitting,
+    /// angle reparameterization or translated-axis reconstruction is involved.
+    /// Implicit projected curves require their own correspondence certificate.
+    pub fn to_parameter_preserving_modeling(
+        &self,
+    ) -> std::result::Result<ModelingCurve, StepConvertingError> {
+        match self {
+            Self::Conic(conic) => parameter_preserving_conic_leader(conic).ok_or_else(|| {
+                ExactConversionError::CurveDomain {
+                    family: "affine conic",
+                }
+                .into()
+            }),
+            Self::SurfaceCurve(_) | Self::IntersectionCurve(_) => {
+                Err(ExactConversionError::UnestablishedCurveCorrespondence.into())
+            }
+            _ => ModelingCurve::try_from(self),
+        }
+    }
 }
 
 impl TryFrom<&Curve3D> for ModelingCurve {
@@ -19,13 +128,39 @@ impl TryFrom<&Curve3D> for ModelingCurve {
     fn try_from(value: &Curve3D) -> std::result::Result<Self, Self::Error> {
         match value {
             Curve3D::Line(line) => Ok((*line).into()),
+            Curve3D::Polyline(curve) => {
+                let knots = bspline_nets::polyline_knots(curve)
+                    .ok_or(ExactConversionError::CurveDomain { family: "polyline" })?;
+                Ok(ModelingCurve::BsplineCurve(BsplineCurve::new(
+                    knots,
+                    curve.0.clone(),
+                )))
+            }
             Curve3D::BsplineCurve(curve) => Ok(curve.clone().into()),
             Curve3D::NurbsCurve(curve) => Ok(curve.clone().into()),
+            Curve3D::TrimmedCurve(curve) => {
+                let basis = curve
+                    .entity()
+                    .curve()
+                    .as_ref()
+                    .to_parameter_preserving_modeling()?;
+                let mut trim = Processor::with_transform(
+                    TrimmedCurve::new(Box::new(basis), curve.entity().range()),
+                    *curve.transform(),
+                );
+                if !curve.orientation() {
+                    trim.invert();
+                }
+                Ok(ModelingCurve::TrimmedCurve(trim))
+            }
+            Curve3D::Conic(conic) => parameter_preserving_conic_leader(conic).ok_or_else(|| {
+                ExactConversionError::CurveDomain {
+                    family: "affine conic",
+                }
+                .into()
+            }),
             Curve3D::ParameterCurve(curve) => {
-                Ok(ModelingCurve::ParameterCurve(ParameterCurve::new(
-                    curve.curve().as_ref().try_into()?,
-                    Box::new(curve.surface().as_ref().try_into()?),
-                )))
+                Ok(ModelingCurve::ParameterCurve(to_modeling_trim(curve)?))
             }
             Curve3D::SurfaceCurve(curve) => {
                 let surfaces = curve
@@ -33,24 +168,24 @@ impl TryFrom<&Curve3D> for ModelingCurve {
                     .iter()
                     .map(SurfaceCurveAssociatedGeometry::surface)
                     .collect::<Vec<_>>();
-                if surfaces.len() >= 2 {
+                if surfaces.len() >= 2 && surfaces[0] != surfaces[1] {
+                    let trim0 = curve.declared_parameter_curve_ref_on(surfaces[0], true)?;
+                    let trim1 = curve.declared_parameter_curve_ref_on(surfaces[1], true)?;
+                    let has_boundary = trim0.is_some() || trim1.is_some();
+                    let (leader, parameter_map) =
+                        curve.leader().to_modeling_with_parameter_map()?;
+                    if has_boundary && parameter_map.kind != CurveParameterMapKind::Identity {
+                        return Err(ExactConversionError::UnestablishedCurveCorrespondence.into());
+                    }
                     let surface0 = surfaces[0].try_into()?;
                     let surface1 = surfaces[1].try_into()?;
-                    let boundary0 = curve
-                        .parameter_curve_on(surfaces[0])
-                        .cloned()
-                        .map(|trim| to_modeling_trim(&trim))
-                        .transpose()?;
-                    let boundary1 = curve
-                        .parameter_curve_on(surfaces[1])
-                        .cloned()
-                        .map(|trim| to_modeling_trim(&trim))
-                        .transpose()?;
+                    let boundary0 = trim0.map(to_modeling_trim).transpose()?;
+                    let boundary1 = trim1.map(to_modeling_trim).transpose()?;
                     Ok(ModelingCurve::IntersectionCurve(
                         SurfaceCurve::with_boundaries(
                             Box::new(surface0),
                             Box::new(surface1),
-                            Box::new(curve.leader().try_into()?),
+                            Box::new(leader),
                             boundary0,
                             boundary1,
                         ),
@@ -68,10 +203,6 @@ impl TryFrom<&Curve3D> for ModelingCurve {
                     None,
                 ),
             )),
-            _ => value
-                .try_into_homogeneous_bspline_curve()
-                .map(|curve| ModelingCurve::NurbsCurve(NurbsCurve::new(curve)))
-                .ok_or_else(|| "STEP curve cannot be represented in modeling geometry.".into()),
         }
     }
 }
@@ -96,6 +227,17 @@ impl TryFrom<&Curve2D> for ModelingCurve2D {
             Curve2D::Conic(curve) => Ok(ModelingCurve2D::Conic(curve.try_into()?)),
             Curve2D::BsplineCurve(curve) => Ok(curve.clone().into()),
             Curve2D::NurbsCurve(curve) => Ok(curve.clone().into()),
+            Curve2D::TrimmedCurve(curve) => {
+                let basis = ModelingCurve2D::try_from(curve.entity().curve().as_ref())?;
+                let mut trim = Processor::with_transform(
+                    TrimmedCurve::new(Box::new(basis), curve.entity().range()),
+                    *curve.transform(),
+                );
+                if !curve.orientation() {
+                    trim.invert();
+                }
+                Ok(ModelingCurve2D::TrimmedCurve(trim))
+            }
         }
     }
 }
@@ -280,8 +422,8 @@ fn analytic_torus_is_representable(torus: &Torus) -> bool {
 /// # Spheres and tori (spec 012 U1.2), same shape, different axis
 ///
 /// T22 above was about the emitted net's EXTENT. Spheres and tori never had
-/// that defect -- their dedicated rational builders are machine-exact over the
-/// whole domain (ledger C1, "not this class", 7y) -- but routing them through
+/// that extent defect in their dedicated rational builders. Those binary64
+/// representations are not exact source-equivalence certificates. Routing through
 /// [`TryIntoHomogeneousBsplineSurface`] threw away something else the analytic
 /// form carries: their CLOSED-FORM [`ParameterDivision2D`]
 /// (`specifieds/sphere.rs`, `specifieds/torus.rs`). The generic net divider
@@ -338,14 +480,11 @@ impl TryFrom<&Surface> for ModelingSurface {
                     )
                 },
             ))),
-            // `map_ref` again: the `Matrix4` and the orientation flag ride
-            // across untouched, only the STEP newtype's `(u, v)` relabeling is
-            // dropped. That relabeling has Jacobian determinant +1, so the
-            // composite orientation -- and therefore the surface normal -- is
-            // unchanged either way. Face trims cannot be affected: they are
-            // ERASED (`TrimmedSolid::erase_trims`) before the geometry is
-            // mapped, and every consumer re-derives `(u, v)` by projecting the
-            // 3D boundary onto the modeling surface.
+            // Preserve the original frame and orientation. The STEP sphere's
+            // chart relabeling has positive determinant, so it preserves the
+            // normal. `to_modeling_with_parameter_map` reports that relabeling;
+            // declared UV coedges must use it rather than silently projecting
+            // or erasing the original trim chart.
             Surface::ElementarySurface(ElementarySurface::Sphere(surface))
                 if ROUTE_ANALYTIC_SPHERE
                     && analytic_sphere_is_representable(&surface.entity().0) =>
@@ -398,6 +537,30 @@ impl TryFrom<&Surface> for ModelingSurface {
                 // lint through an `if false` guard, which is one more reason a
                 // held-back arm is not a free thing to leave lying around.
                 Ok(ModelingSurface::ToroidalSurface(*surface))
+            }
+            Surface::BsplineSurface(surface) => {
+                Ok(ModelingSurface::BsplineSurface(surface.clone()))
+            }
+            Surface::NurbsSurface(surface) => Ok(ModelingSurface::NurbsSurface(surface.clone())),
+            Surface::SweepSurface(SweepSurface::ExtrusionSurface(surface)) => {
+                let profile = ModelingCurve::try_from(surface.entity_curve().as_ref())?;
+                Ok(ModelingSurface::ExtrusionSurface(
+                    ExtrusionSurface::by_extrusion(profile, surface.extruding_vector()),
+                ))
+            }
+            Surface::SweepSurface(SweepSurface::RevolutionSurface(surface)) => {
+                let revolution = surface.entity();
+                let profile = ModelingCurve::try_from(revolution.entity_curve().as_ref())?;
+                let entity = RevolutionSurface::by_revolution(
+                    profile,
+                    revolution.origin(),
+                    revolution.axis(),
+                );
+                let mut converted = Processor::with_transform(entity, *surface.transform());
+                if !surface.orientation() {
+                    converted.invert();
+                }
+                Ok(ModelingSurface::RevolutionSurface(converted))
             }
             _ => value
                 .try_into_homogeneous_bspline_surface()

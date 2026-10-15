@@ -1,9 +1,6 @@
 use super::report::{LossCategory as Cat, LossReason as Why, LossSink};
-use super::step_geometry::{
-    SurfaceCurve3D as StepSurfaceCurve3D,
-    SurfaceCurveAssociatedGeometry as StepSurfaceCurveAssociatedGeometry,
-    SurfaceCurveKind as StepSurfaceCurveKind,
-};
+#[cfg(test)]
+use super::step_geometry::SurfaceCurveKind as StepSurfaceCurveKind;
 use super::*;
 use monstertruck_topology::compress::*;
 use std::collections::HashSet;
@@ -28,11 +25,20 @@ pub type StepCompressedTrimmedShell =
 /// See [`StepCompressedShell`].
 pub type StepCompressedSolid = CompressedSolid<Point3, Curve3D, Surface>;
 
+/// A source solid retaining declared two-dimensional trim curves per coedge.
+pub type StepCompressedTrimmedSolid = CompressedTrimmedSolid<Point3, Curve3D, Surface, Curve2D>;
+
+type CompactTrimmedShell = CompressedTrimmedShell<Point3, Curve3D, Surface, Curve2D>;
+type CompactBoundary = (Vec<CompressedEdgeUse<Curve2D>>, Vec<SourceCoedgeProvenance>);
+
 impl Table {
     fn place_holder_edge_any_to_index_and_edge_curve(
         &self,
         edge: &PlaceHolder<EdgeAnyHolder>,
     ) -> Option<(u64, EdgeCurveHolder)> {
+        if let PlaceHolder::Owned(EdgeAnyHolder::OrientedEdge(edge)) = edge {
+            return Some((edge.edge_element_idx()?, edge.edge_element_holder(self)?));
+        }
         use PlaceHolder::Ref;
         let Ref(Name::Entity(idx)) = edge else {
             return None;
@@ -65,7 +71,7 @@ impl Table {
     }
 
     /// The entity id behind a reference place-holder, when it has one.
-    fn ref_id<T>(place_holder: &PlaceHolder<T>) -> Option<u64> {
+    pub(super) fn ref_id<T>(place_holder: &PlaceHolder<T>) -> Option<u64> {
         if let PlaceHolder::Ref(Name::Entity(idx)) = place_holder {
             Some(*idx)
         } else {
@@ -365,54 +371,20 @@ impl Table {
         surface: &Surface,
         orientation: bool,
     ) -> Option<step_geometry::StepParameterCurve> {
-        let mut trim_curve = match curve {
-            Curve3D::SurfaceCurve(surface_curve) => {
-                Self::seam_trim_curve_on(surface_curve, surface, orientation).or_else(|| {
-                    step_geometry::StepParameterCurve::try_from(step_geometry::CurveTrimRef::new(
-                        curve, surface,
-                    ))
-                    .ok()
-                })?
-            }
-            _ => step_geometry::StepParameterCurve::try_from(step_geometry::CurveTrimRef::new(
-                curve, surface,
-            ))
-            .ok()?,
-        };
+        if matches!(curve, Curve3D::SurfaceCurve(_) | Curve3D::ParameterCurve(_)) {
+            return curve
+                .declared_parameter_curve_on(surface, orientation)
+                .ok()
+                .flatten();
+        }
+        let mut trim_curve = step_geometry::StepParameterCurve::try_from(
+            step_geometry::CurveTrimRef::new(curve, surface),
+        )
+        .ok()?;
         if !orientation {
             trim_curve.invert();
         }
         Some(trim_curve)
-    }
-
-    fn seam_trim_curve_on(
-        curve: &StepSurfaceCurve3D,
-        surface: &Surface,
-        orientation: bool,
-    ) -> Option<step_geometry::StepParameterCurve> {
-        (curve.kind() == StepSurfaceCurveKind::SeamCurve)
-            .then(|| {
-                let curves = curve
-                    .associated_geometry()
-                    .iter()
-                    .filter_map(|geometry| match geometry {
-                        StepSurfaceCurveAssociatedGeometry::ParameterCurve(trim_curve)
-                            if trim_curve.surface().as_ref() == surface
-                                || StepSurfaceCurve3D::same_surface(
-                                    trim_curve.surface().as_ref(),
-                                    surface,
-                                ) =>
-                        {
-                            Some(trim_curve)
-                        }
-                        _ => None,
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let index = usize::from(!orientation);
-                curves.get(index).or_else(|| curves.first()).cloned()
-            })
-            .flatten()
     }
 
     /// The trimmed sibling of [`Self::face_bound_to_edges`], likewise in the
@@ -613,6 +585,334 @@ impl Table {
                 })
             })
             .collect()
+    }
+
+    /// Copies only the declared UV geometry, never its carrier surface.
+    fn compact_declared_trim_on(
+        curve: &Curve3D,
+        surface: &Surface,
+        orientation: bool,
+    ) -> Result<Option<Curve2D>, StepConvertingError> {
+        let trim = Self::compact_declared_uv_on(curve, surface, orientation)?;
+        Ok(trim.map(|mut uv| {
+            if !orientation {
+                uv.invert();
+            }
+            uv
+        }))
+    }
+
+    fn compact_declared_uv_on(
+        curve: &Curve3D,
+        surface: &Surface,
+        branch_orientation: bool,
+    ) -> Result<Option<Curve2D>, StepConvertingError> {
+        if let Curve3D::TrimmedCurve(curve) = curve {
+            if *curve.transform() != Matrix4::identity() {
+                return Err(ExactConversionError::UnestablishedCurveCorrespondence.into());
+            }
+            let basis = Self::compact_declared_uv_on(
+                curve.entity().curve().as_ref(),
+                surface,
+                branch_orientation == curve.orientation(),
+            )?;
+            return Ok(basis.map(|basis| {
+                let mut trim =
+                    Processor::new(TrimmedCurve::new(Box::new(basis), curve.entity().range()));
+                if !curve.orientation() {
+                    trim.invert();
+                }
+                Curve2D::TrimmedCurve(SourceTrimmedCurve::internal(trim))
+            }));
+        }
+        let declared = match curve {
+            Curve3D::SurfaceCurve(curve) => {
+                curve.declared_parameter_curve_ref_on(surface, branch_orientation)?
+            }
+            Curve3D::ParameterCurve(curve) if curve.surface() == surface => Some(curve),
+            _ => None,
+        };
+        Ok(declared.map(|curve| curve.curve().clone()))
+    }
+
+    fn compact_face_bound(
+        &self,
+        bound: FaceBoundHolder,
+        face_sense: bool,
+        surface: &Surface,
+        edges: &[CompressedEdge<Curve3D>],
+        eidx_map: &HashMap<u64, usize>,
+        sink: &LossSink,
+    ) -> Result<Option<CompactBoundary>, StepConvertingError> {
+        let ori = Self::absolute_bound_orientation(&bound, face_sense);
+        let Some(edge_loop) = self.resolved_edge_loop(&bound, sink) else {
+            return Ok(None);
+        };
+        sink.listed(Cat::EdgeUse, edge_loop.edge_list.len());
+        let mut uses = Vec::new();
+        let mut lineage = Vec::new();
+        for (source_coedge_index, edge_use) in edge_loop.edge_list.iter().enumerate() {
+            let source_coedge = Self::ref_id(edge_use);
+            let (source_edge, source_orientation) = match edge_use {
+                PlaceHolder::Owned(EdgeAnyHolder::OrientedEdge(edge)) => {
+                    (edge.edge_element_idx(), edge.orientation)
+                }
+                PlaceHolder::Ref(Name::Entity(id)) => match self.oriented_edge.get(id) {
+                    Some(edge) => (edge.edge_element_idx(), edge.orientation),
+                    None => (Some(*id), true),
+                },
+                _ => (None, true),
+            };
+            let Some(index) = source_edge.and_then(|id| eidx_map.get(&id)).copied() else {
+                sink.lost(Cat::EdgeUse, Why::EdgeUseUnresolved, source_coedge, None);
+                continue;
+            };
+            let orientation = source_orientation == ori;
+            let curve = &edges[index].curve;
+            let trim_curve = Self::compact_declared_trim_on(curve, surface, orientation)?;
+            uses.push(CompressedEdgeUse {
+                index,
+                orientation,
+                trim_curve,
+            });
+            let source_curve_range = SourceCurveInterval::new(curve.range_tuple());
+            lineage.push(SourceCoedgeProvenance {
+                source_edge,
+                source_coedge,
+                source_coedge_index,
+                source_orientation,
+                native_edge_index: index,
+                native_orientation: orientation,
+                source_curve_range,
+                restricted_curve_range: source_curve_range,
+            });
+        }
+        sink.kept(Cat::EdgeUse, uses.len());
+        if !ori {
+            uses.reverse();
+            lineage.reverse();
+        }
+        Ok(Some((uses, lineage)))
+    }
+
+    fn original_numeric_trim_selector(
+        &self,
+        selectors: &[PlaceHolder<TrimmingSelectHolder>],
+    ) -> Result<f64, StepConvertingError> {
+        let mut selected = None;
+        for selector in selectors {
+            let value = match selector {
+                PlaceHolder::Owned(TrimmingSelectHolder::ParameterValue(value)) => Some(value.0),
+                PlaceHolder::Ref(Name::Entity(id)) => {
+                    self.parameter_value.get(id).map(|value| value.0)
+                }
+                _ => None,
+            };
+            if let Some(value) = value
+                && (!value.is_finite() || selected.replace(value).is_some())
+            {
+                return Err(
+                    step_geometry::ExactConversionError::InvalidTrimParameterSelectors.into(),
+                );
+            }
+        }
+        selected.ok_or_else(|| step_geometry::ExactConversionError::CartesianTrimSelectors.into())
+    }
+
+    fn source_edge_curve_provenance(
+        &self,
+        source_edge: u64,
+        original_native_edge_index: usize,
+        curve: &Curve3D,
+    ) -> Result<SourceEdgeProvenance, StepConvertingError> {
+        let edge = self
+            .edge_curve
+            .get(&source_edge)
+            .ok_or("parsed source edge has no original EDGE_CURVE holder")?;
+        let source_curve = Self::ref_id(&edge.edge_geometry);
+        let source_curve_range = SourceCurveInterval::new(curve.range_tuple());
+        let mut raw = &edge.edge_geometry;
+        let mut parsed = curve;
+        let mut trimmed_curves = Vec::new();
+        loop {
+            let trimmed = match raw {
+                PlaceHolder::Ref(Name::Entity(id)) => self.trimmed_curve.get(id),
+                PlaceHolder::Owned(CurveAnyHolder::TrimmedCurve(curve)) => Some(curve.as_ref()),
+                _ => None,
+            };
+            if let Some(trimmed) = trimmed {
+                let Curve3D::TrimmedCurve(wrapper) = parsed else {
+                    return Err("parsed source trim lost its declared wrapper".into());
+                };
+                let basis = wrapper.entity().curve().as_ref();
+                let SourceParameterGauge::Declared {
+                    raw_to_internal,
+                    raw_range,
+                    selected_basis_range,
+                    raw_parameter_bounds,
+                    selected_basis_bounds,
+                } = wrapper.raw_parameter_gauge()?
+                else {
+                    return Err(
+                        step_geometry::ExactConversionError::UnrepresentableTrimParameterChart
+                            .into(),
+                    );
+                };
+                let interval = |bounds: crate::step::ParameterEnclosure| {
+                    SourceCurveInterval::new((bounds.lower, bounds.upper))
+                };
+                trimmed_curves.push(SourceTrimmedCurveProvenance {
+                    source_curve: Self::ref_id(raw),
+                    source_basis_curve: Self::ref_id(&trimmed.basis_curve),
+                    source_curve_range: SourceCurveInterval::new(parsed.range_tuple()),
+                    source_basis_curve_range: SourceCurveInterval::new(basis.range_tuple()),
+                    declared_parameter_range: SourceCurveInterval::new((
+                        self.original_numeric_trim_selector(&trimmed.trim_1)?,
+                        self.original_numeric_trim_selector(&trimmed.trim_2)?,
+                    )),
+                    selected_basis_range: interval(selected_basis_range),
+                    selected_basis_bounds: selected_basis_bounds.map(interval),
+                    raw_parameter_range: interval(raw_range),
+                    raw_parameter_bounds: raw_parameter_bounds.map(interval),
+                    raw_parameter_chart: SourceParameterChart::new(raw_to_internal),
+                    sense_agreement: trimmed.sense_agreement,
+                });
+                raw = &trimmed.basis_curve;
+                parsed = basis;
+                continue;
+            }
+            let surface_curve = match raw {
+                PlaceHolder::Ref(Name::Entity(id)) => self.surface_curve.get(id),
+                PlaceHolder::Owned(CurveAnyHolder::SurfaceCurve(curve)) => Some(curve.as_ref()),
+                _ => None,
+            };
+            if let Some(surface_curve) = surface_curve {
+                raw = &surface_curve.curve_3d;
+                parsed = match parsed {
+                    Curve3D::SurfaceCurve(curve) => curve.leader(),
+                    Curve3D::IntersectionCurve(curve) => curve.leader().as_ref(),
+                    _ => parsed,
+                };
+                continue;
+            }
+            break;
+        }
+        Ok(SourceEdgeProvenance {
+            source_edge,
+            source_curve,
+            source_root_curve: Self::ref_id(raw),
+            original_native_edge_index,
+            source_curve_range,
+            source_root_curve_range: SourceCurveInterval::new(parsed.range_tuple()),
+            trimmed_curves,
+        })
+    }
+
+    fn compact_trimmed_shell(
+        &self,
+        shell: &ShellHolder,
+        shell_orientation: bool,
+    ) -> Result<(CompactTrimmedShell, ShellLoadReport), StepConvertingError> {
+        self.validate_shell_source(shell, false)?;
+        let sink = LossSink::default();
+        let (vertices, vidx_map) = self.shell_vertices(shell, &sink);
+        let (edges, eidx_map) = self.shell_edges(shell, &vidx_map, &sink);
+        let mut faces = Vec::new();
+        let mut source_edges = eidx_map
+            .iter()
+            .map(|(source, index)| {
+                self.source_edge_curve_provenance(*source, *index, &edges[*index].curve)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        source_edges.sort_unstable_by_key(|edge| edge.original_native_edge_index);
+        let mut provenance = SourceShellProvenance {
+            faces: Vec::new(),
+            edges: source_edges,
+        };
+        for (source_face_index, (raw, resolved)) in shell
+            .cfs_faces
+            .iter()
+            .zip(shell.cfs_faces_holder(self))
+            .enumerate()
+        {
+            sink.listed(Cat::Face, 1);
+            let source_face_use = Self::ref_id(raw);
+            let source_face = match &resolved {
+                Some(FaceAnyHolder::OrientedFace(face)) => Self::ref_id(&face.face_element),
+                _ => source_face_use,
+            };
+            let Some((orientation, face)) = self.face_any_to_orientation_and_face(resolved) else {
+                sink.lost(Cat::Face, Why::FaceUnresolved, source_face_use, None);
+                continue;
+            };
+            let Some(surface) = self.face_surface_or_report(&face, &sink) else {
+                continue;
+            };
+            let face_sense = orientation == face.same_sense;
+            let bounds = face.bounds_holder(self);
+            sink.listed(Cat::Wire, bounds.len());
+            let mut boundaries = Vec::new();
+            let mut wires = Vec::new();
+            for (source_wire_index, (source_bound, bound)) in bounds.into_iter().enumerate() {
+                let Some(bound) = bound else {
+                    sink.lost(Cat::Wire, Why::BoundUnresolved, source_bound, None);
+                    continue;
+                };
+                let source_wire = Self::ref_id(&bound.bound);
+                let Some((wire, coedges)) =
+                    self.compact_face_bound(bound, face_sense, &surface, &edges, &eidx_map, &sink)?
+                else {
+                    continue;
+                };
+                sink.kept(Cat::Wire, 1);
+                boundaries.push(wire);
+                wires.push(SourceWireProvenance {
+                    source_bound,
+                    source_wire,
+                    source_wire_index,
+                    coedges,
+                });
+            }
+            sink.kept(Cat::Face, 1);
+            let native_orientation = face_sense == shell_orientation;
+            faces.push(CompressedTrimmedFace {
+                surface,
+                boundaries,
+                orientation: native_orientation,
+            });
+            provenance.faces.push(SourceFaceProvenance {
+                source_face,
+                source_face_use,
+                source_face_index,
+                native_orientation,
+                wires,
+            });
+        }
+        let mut shell = CompressedTrimmedShell {
+            vertices,
+            edges,
+            faces,
+        };
+        periodic_edges::compact_trimmed(&mut shell, &mut provenance)?;
+        let mut report = sink.into_report();
+        report.set_source_shell(provenance);
+        Ok((shell, report))
+    }
+
+    fn compact_trimmed_shell_reference(
+        &self,
+        id: u64,
+    ) -> Result<(CompactTrimmedShell, ShellLoadReport), StepConvertingError> {
+        if let Some(shell) = self.shell.get(&id) {
+            self.compact_trimmed_shell(shell, true)
+        } else if let Some(oriented) = self.oriented_shell.get(&id) {
+            let shell = Self::ref_id(&oriented.shell_element)
+                .and_then(|id| self.shell.get(&id))
+                .ok_or("failed to reference oriented shell element")?;
+            self.compact_trimmed_shell(shell, oriented.orientation)
+        } else {
+            Err("failed to reference shell".into())
+        }
     }
 
     /// Constructs [`CompressedShell`] from a STEP `Shell`.
@@ -838,6 +1138,38 @@ impl Table {
             },
             reports,
         ))
+    }
+
+    /// Constructs a trimmed solid together with every shell's source loss report.
+    ///
+    /// The geometry and retained source pcurves are converted once. Declared
+    /// seam branches use structural carrier correspondence; an unavailable
+    /// pcurve remains absent and is not a trim-coverage certificate.
+    ///
+    /// Only declared UV geometry is copied into each coedge, in that use's
+    /// direction; no carrier is cloned per use. Missing or ambiguous seam
+    /// branches return their typed conversion error, never a recovered branch.
+    /// Reports retain original STEP face, loop and edge-use references aligned
+    /// with the returned native ordinals, including exact periodic children.
+    pub fn to_compressed_trimmed_solid_reported(
+        &self,
+        solid: &ManifoldSolidBrepHolder,
+    ) -> Result<(StepCompressedTrimmedSolid, Vec<ShellLoadReport>), LoadError> {
+        let PlaceHolder::Ref(Name::Entity(outer_idx)) = &solid.outer else {
+            return Err("failed to reference `solid.outer`".into());
+        };
+        let (outer, report) = self.compact_trimmed_shell_reference(*outer_idx)?;
+        let mut boundaries = vec![outer];
+        let mut reports = vec![report];
+        for inner in &solid.voids {
+            let PlaceHolder::Ref(Name::Entity(inner_idx)) = inner else {
+                return Err("failed to reference a member of `solid.voids`".into());
+            };
+            let (shell, report) = self.compact_trimmed_shell_reference(*inner_idx)?;
+            boundaries.push(shell);
+            reports.push(report);
+        }
+        Ok((CompressedTrimmedSolid { boundaries }, reports))
     }
 
     /// Constructs `CompressedTrimmedSolid` from `ManifoldSolidBrep` in STEP file.
@@ -1387,6 +1719,7 @@ impl StepShell for ShellHolder {
         table: &Table,
     ) -> Result<(CompressedShell<Point3, Curve3D, Surface>, ShellLoadReport), StepConvertingError>
     {
+        table.validate_shell_source(self, false)?;
         let sink = LossSink::default();
         let (vertices, vidx_map) = table.shell_vertices(self, &sink);
         let (edges, eidx_map) = table.shell_edges(self, &vidx_map, &sink);
@@ -1413,6 +1746,7 @@ impl StepShell for ShellHolder {
         ),
         StepConvertingError,
     > {
+        table.validate_shell_source(self, true)?;
         let sink = LossSink::default();
         let (vertices, vidx_map) = table.shell_vertices(self, &sink);
         let (edges, eidx_map) = table.shell_edges(self, &vidx_map, &sink);
@@ -1507,3 +1841,323 @@ impl StepShell for ShellAnyHolder {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod compact_source_lineage_regressions {
+    use super::*;
+    use crate::step::load::step_geometry::SurfaceCurveRepresentation as StepSurfaceCurveRepresentation;
+    use std::f64::consts::TAU;
+
+    fn cylinder_table() -> Table {
+        Table::from_step(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../resources/step/occt-cylinder.step",
+        )))
+        .expect("the fixed cylinder source parses")
+    }
+
+    #[test]
+    fn compact_report_preserves_original_occurrences_across_periodic_children() {
+        let table = cylinder_table();
+        let (solid, reports) = table
+            .to_compressed_trimmed_solid_reported(&table.manifold_solid_brep[&15])
+            .expect("the compact cylinder converts");
+        let shell = &solid.boundaries[0];
+        let source = &reports[0].source_shells()[0];
+        assert_eq!(source.faces.len(), shell.faces.len());
+        assert_eq!(source.faces[0].source_face, Some(17));
+        assert_eq!(source.faces[0].source_face_use, Some(17));
+        let wire = &source.faces[0].wires[0];
+        assert_eq!(wire.source_bound, Some(18));
+        assert_eq!(wire.source_wire, Some(19));
+        let children: Vec<_> = wire
+            .coedges
+            .iter()
+            .filter(|source| source.source_coedge == Some(20))
+            .collect();
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().all(|source| {
+            source.source_edge == Some(21)
+                && source.source_coedge_index == 0
+                && !source.source_orientation
+                && !source.native_orientation
+        }));
+        assert_eq!(
+            children[0].source_curve_range,
+            children[1].source_curve_range
+        );
+        assert_ne!(children[0].native_edge_index, children[1].native_edge_index);
+        assert_eq!(
+            children[0].restricted_curve_range.range_tuple().0,
+            children[1].restricted_curve_range.range_tuple().1
+        );
+        for (face, source_face) in shell.faces.iter().zip(&source.faces) {
+            assert_eq!(face.orientation, source_face.native_orientation);
+            for (wire, source_wire) in face.boundaries.iter().zip(&source_face.wires) {
+                assert_eq!(wire.len(), source_wire.coedges.len());
+                for (edge_use, source_use) in wire.iter().zip(&source_wire.coedges) {
+                    assert_eq!(edge_use.index, source_use.native_edge_index);
+                    assert_eq!(edge_use.orientation, source_use.native_orientation);
+                    assert_eq!(
+                        shell.edges[edge_use.index].curve.range_tuple(),
+                        source_use.restricted_curve_range.range_tuple()
+                    );
+                }
+            }
+        }
+        assert!(
+            shell
+                .faces
+                .iter()
+                .flat_map(|face| &face.boundaries)
+                .flatten()
+                .any(|edge| edge.trim_curve.is_some())
+        );
+    }
+
+    #[test]
+    fn closed_source_declarations_retain_unbounded_uv_basis_and_actual_edge_domain() {
+        let table = cylinder_table();
+        let source = EntityTable::<EdgeCurveHolder>::get_owned(&table, 21)
+            .expect("the original closed source edge resolves");
+        let parsed = source
+            .parse_curve3d()
+            .expect("the closed curve parses once");
+        let Curve3D::SurfaceCurve(declared) = &parsed else {
+            panic!("a closed edge must retain its declared pcurve metadata");
+        };
+        let surface: Surface = (&EntityTable::<SurfaceAnyHolder>::get_owned(&table, 31)
+            .expect("the original cylinder resolves"))
+            .try_into()
+            .expect("analytic cylinder");
+        let pcurve = declared
+            .declared_parameter_curve_ref_on(&surface, true)
+            .expect("one structurally declared cylinder branch")
+            .expect("closed declarations are not discarded");
+        let Curve2D::TrimmedCurve(active) = pcurve.curve() else {
+            panic!("the unbounded STEP LINE receives the actual active source interval");
+        };
+        assert_eq!(active.range_tuple(), parsed.range_tuple());
+        assert!(active.orientation());
+        assert_eq!(
+            active.entity().curve().as_ref(),
+            &Curve2D::Line(Line(Point2::new(0.0, 10.0), Point2::new(1.0, 10.0)))
+        );
+        let (solid, reports) = table
+            .to_compressed_trimmed_solid_reported(&table.manifold_solid_brep[&15])
+            .expect("compact declared UV survives periodic splitting");
+        let shell = &solid.boundaries[0];
+        let source = &reports[0].source_shells()[0];
+        for (face, provenance) in shell.faces.iter().zip(&source.faces) {
+            for (wire, source_wire) in face.boundaries.iter().zip(&provenance.wires) {
+                for (edge_use, original) in wire.iter().zip(&source_wire.coedges) {
+                    if original.source_edge == Some(21) {
+                        assert!(edge_use.trim_curve.is_some());
+                        assert_eq!(
+                            shell.edges[edge_use.index].curve.range_tuple(),
+                            original.restricted_curve_range.range_tuple()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn owned_inline_coedge_keeps_none_identity_without_losing_original_edge_occurrence() {
+        let mut table = cylinder_table();
+        let source_use = table.oriented_edge[&20].clone();
+        table
+            .edge_loop
+            .get_mut(&19)
+            .expect("original loop")
+            .edge_list[0] = PlaceHolder::Owned(EdgeAnyHolder::OrientedEdge(source_use));
+        let (_, reports) = table
+            .to_compressed_trimmed_solid_reported(&table.manifold_solid_brep[&15])
+            .expect("an inline occurrence still references its original declared source edge");
+        let children: Vec<_> = reports[0].source_shells()[0].faces[0].wires[0]
+            .coedges
+            .iter()
+            .filter(|source| source.source_coedge_index == 0)
+            .collect();
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().all(|source| source.source_coedge.is_none()
+            && source.source_edge == Some(21)
+            && !source.source_orientation));
+    }
+
+    #[test]
+    fn compact_oriented_shell_changes_only_recorded_face_sense() {
+        let mut table = cylinder_table();
+        table.oriented_shell.insert(
+            10000,
+            OrientedShellHolder {
+                label: String::new(),
+                shell_element: PlaceHolder::Ref(Name::Entity(16)),
+                orientation: false,
+            },
+        );
+        let (ordinary, ordinary_report) = table
+            .compact_trimmed_shell_reference(16)
+            .expect("ordinary shell converts");
+        let (reversed, reversed_report) = table
+            .compact_trimmed_shell_reference(10000)
+            .expect("oriented shell converts");
+        for (face, reversed_face) in ordinary.faces.iter().zip(&reversed.faces) {
+            assert_eq!(face.orientation, !reversed_face.orientation);
+            assert_eq!(face.boundaries, reversed_face.boundaries);
+        }
+        for (face, reversed_face) in ordinary_report.source_shells()[0]
+            .faces
+            .iter()
+            .zip(&reversed_report.source_shells()[0].faces)
+        {
+            assert_eq!(face.native_orientation, !reversed_face.native_orientation);
+            assert_eq!(face.wires, reversed_face.wires);
+        }
+    }
+
+    #[test]
+    fn compact_declared_seam_selects_and_inverts_uv_without_recovery() {
+        let surface =
+            Surface::ElementarySurface(ElementarySurface::Plane(step_geometry::Plane::new(
+                Point3::origin(),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            )));
+        let parameter_curve = |u| {
+            SurfaceCurveAssociatedGeometry::ParameterCurve(step_geometry::StepParameterCurve::new(
+                Box::new(Curve2D::Line(Line(
+                    Point2::new(u, 0.0),
+                    Point2::new(u, 1.0),
+                ))),
+                Box::new(surface.clone()),
+            ))
+        };
+        let seam = |branches| {
+            Curve3D::SurfaceCurve(SurfaceCurve3D::new(
+                StepSurfaceCurveKind::SeamCurve,
+                Box::new(Curve3D::Line(Line(
+                    Point3::origin(),
+                    Point3::new(0.0, 1.0, 0.0),
+                ))),
+                branches,
+                StepSurfaceCurveRepresentation::ParameterCurve1,
+            ))
+        };
+        let curve = seam(vec![parameter_curve(0.0), parameter_curve(TAU)]);
+        let forward = Table::compact_declared_trim_on(&curve, &surface, true)
+            .expect("declared forward branch resolves")
+            .expect("forward UV exists");
+        let backward = Table::compact_declared_trim_on(&curve, &surface, false)
+            .expect("declared backward branch resolves")
+            .expect("backward UV exists");
+        assert_eq!(forward.front(), Point2::new(0.0, 0.0));
+        assert_eq!(backward.front(), Point2::new(TAU, 1.0));
+        let missing =
+            Table::compact_declared_trim_on(&seam(vec![parameter_curve(0.0)]), &surface, true)
+                .expect_err("one seam branch must refuse");
+        assert!(matches!(
+            missing.downcast_ref::<ExactConversionError>(),
+            Some(ExactConversionError::MissingSeamParameterBranch)
+        ));
+        let ambiguous = Table::compact_declared_trim_on(
+            &seam(vec![
+                parameter_curve(0.0),
+                parameter_curve(TAU),
+                parameter_curve(2.0 * TAU),
+            ]),
+            &surface,
+            true,
+        )
+        .expect_err("three seam branches must refuse");
+        assert!(matches!(
+            ambiguous.downcast_ref::<ExactConversionError>(),
+            Some(ExactConversionError::AmbiguousStoredTrim)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod trimmed_source_lineage_regressions {
+    use super::*;
+    use std::f64::consts::TAU;
+
+    #[test]
+    fn original_trim_wrapper_basis_and_root_ranges_survive_periodic_source_uses() {
+        let mut table = Table::from_step(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../resources/step/occt-cylinder.step",
+        )))
+        .expect("fixed cylinder source parses");
+        let selector = |parameter| {
+            PlaceHolder::Owned(TrimmingSelectHolder::ParameterValue(Box::new(
+                ParameterValueHolder(parameter),
+            )))
+        };
+        table.trimmed_curve.insert(
+            10000,
+            StepTrimmedCurveHolder {
+                label: String::new(),
+                basis_curve: PlaceHolder::Ref(Name::Entity(25)),
+                trim_1: vec![selector(TAU)],
+                trim_2: vec![selector(0.0)],
+                sense_agreement: false,
+                master_representation: TrimmingPreference::Parameter,
+            },
+        );
+        table
+            .edge_curve
+            .get_mut(&21)
+            .expect("original source edge exists")
+            .edge_geometry = PlaceHolder::Ref(Name::Entity(10000));
+        let owned = EntityTable::<CurveAnyHolder>::get_owned(&table, 10000)
+            .expect("original inverse source wrapper resolves");
+        let original = Curve3D::try_from(&owned).expect("source wrapper preserves its parameter");
+        let (solid, reports) = table
+            .to_compressed_trimmed_solid_reported(&table.manifold_solid_brep[&15])
+            .expect("compact source wrapper converts");
+        let shell = &solid.boundaries[0];
+        let provenance = &reports[0].source_shells()[0];
+        let edge = provenance
+            .edges
+            .iter()
+            .find(|edge| edge.source_edge == 21)
+            .expect("original source edge lineage exists");
+        assert_eq!(edge.source_curve, Some(10000));
+        assert_eq!(edge.source_root_curve, Some(25));
+        assert_eq!(edge.source_curve_range.range_tuple(), (0.0, TAU));
+        assert_eq!(
+            edge.source_root_curve_range.range_tuple(),
+            original.range_tuple()
+        );
+        assert_eq!(edge.trimmed_curves.len(), 1);
+        assert_eq!(edge.trimmed_curves[0].source_curve, Some(10000));
+        assert_eq!(edge.trimmed_curves[0].source_basis_curve, Some(25));
+        assert!(!edge.trimmed_curves[0].sense_agreement);
+        let declared = &edge.trimmed_curves[0];
+        assert_eq!(declared.declared_parameter_range.range_tuple(), (TAU, 0.0));
+        assert_eq!(declared.selected_basis_range.range_tuple(), (0.0, TAU));
+        assert_eq!(declared.raw_parameter_range.range_tuple(), (0.0, TAU));
+        let chart = declared.raw_parameter_chart.parameter_chart();
+        assert_eq!(chart.nominal(0.0), Some(0.0));
+        assert!(chart.offset_enclosure.contains(0.0));
+        assert!(chart.offset_enclosure.lower < chart.offset_enclosure.upper);
+        let children: Vec<_> = provenance.faces[0].wires[0]
+            .coedges
+            .iter()
+            .filter(|source| source.source_edge == Some(21))
+            .collect();
+        assert_eq!(children.len(), 2);
+        for child in children {
+            let native = &shell.edges[child.native_edge_index].curve;
+            let (start, end) = child.restricted_curve_range.range_tuple();
+            assert_eq!(native.range_tuple(), (start, end));
+            assert_eq!(child.source_curve_range, edge.source_curve_range);
+            for parameter in [start, start + (end - start) * 0.37, end] {
+                assert!(native.subs(parameter).near(&original.subs(parameter)));
+                assert!(native.der(parameter).near(&original.der(parameter)));
+            }
+        }
+    }
+}
