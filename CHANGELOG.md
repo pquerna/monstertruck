@@ -31,6 +31,13 @@ monstertruck 0.4.0.
   association with endpoint coverage. This avoids closed-endpoint inverse-sheet
   ambiguity without guessed period shifts, original master reselection or
   relaxed continuation, endpoint, work or storage bounds.
+- Complete plane coverage uses original-surface interval-Newton zero contraction
+  and defers trim winding until whole-cell zero/tube proofs need it. Correlated
+  axial/radial Rodrigues coefficients avoid artificial full-period height motion;
+  original curve, profile, transforms and all work/storage bounds remain intact.
+- Retained trim projection rejects inactive raw parameters and off-trim nearest
+  points, preferring the original spatial trim over periodic carrier inversion.
+  Trim-aware meshing preserves the resulting per-use source chart across coedges.
 
 - STEP `SURFACE_CURVE` and `SEAM_CURVE` retain their original explicit leader,
   kind, declared master and associated geometry, including closed restrictions.

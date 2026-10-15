@@ -77,11 +77,19 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   avoids a nearest-point inverse choosing another chart sheet at a closed
   endpoint, while unchanged whole-curve continuation and all-domain coverage
   remain mandatory. Original prepared master branches are not reselected.
+- Complete plane coverage contracts cells by necessary interval-Newton root
+  bounds on the original surface before subdivision. Whole-cell plane exclusion
+  or validated candidate tubes can discharge a cell before trim winding.
+  Revolution enclosures form constant axial/radial Rodrigues coefficients before
+  applying the original profile, preserving correlated full-period coordinates.
 
 **Meshing**
 - Triangulation/tessellation pipeline rewritten; CDT trim-constraint handling rebuilt across [`b60b1604`](https://github.com/virtualritz/monstertruck/commit/b60b1604)/[`46b21f9f`](https://github.com/virtualritz/monstertruck/commit/46b21f9f)/[`f35d3b6d`](https://github.com/virtualritz/monstertruck/commit/f35d3b6d)/[`7c5ce2d2`](https://github.com/virtualritz/monstertruck/commit/7c5ce2d2) (skip conflicting, avoid invalid, preserve split, split through vertices).
 - `PolyBoundary::include` gets an AABB early reject; double tessellation removed in `step-to-mesh`.
 - Tessellation benchmark example + baseline log for regression tracking.
+- Retained trim projection requires an active original raw parameter and matching
+  spatial point before returning source UV. Trim-aware boundary projection keeps
+  that original chart instead of wrapping each coedge into a canonical period.
 
 **Boolean Operations**
 - Reverted upstream's [`700138cb`](https://github.com/virtualritz/monstertruck/commit/700138cb)-equivalent boolean rewrite after bisect confirmed it regressed `punched_cube` and `adjacent_cubes_or` (output shells came back `Oriented`, not `Closed`); we keep the upstream-derived single-ray algorithm wrapped in our `Result` layer.

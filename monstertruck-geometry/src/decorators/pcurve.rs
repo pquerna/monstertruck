@@ -263,10 +263,25 @@ where
             return Some((seed, self.curve().evaluate(seed)));
         }
         let hint = Some(seed);
-        self.search_parameter(point, hint, 100)
-            .or_else(|| self.search_nearest_parameter(point, hint, 100))
-            .or_else(|| self.search_parameter(point, None, 100))
-            .or_else(|| self.search_nearest_parameter(point, None, 100))
+        // Project on the actual spatial trim before inverting its carrier.
+        // A periodic carrier image is not an active raw-parameter witness.
+        let on_active_trim = |t: &f64| {
+            t.is_finite() && range.0 <= *t && *t <= range.1 && self.evaluate(*t).near(&point)
+        };
+        self.search_nearest_parameter(point, hint, 100)
+            .filter(on_active_trim)
+            .or_else(|| {
+                self.search_parameter(point, hint, 100)
+                    .filter(on_active_trim)
+            })
+            .or_else(|| {
+                self.search_nearest_parameter(point, None, 100)
+                    .filter(on_active_trim)
+            })
+            .or_else(|| {
+                self.search_parameter(point, None, 100)
+                    .filter(on_active_trim)
+            })
             .map(|t| (t, self.curve().subs(t)))
     }
 }

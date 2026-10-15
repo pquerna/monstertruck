@@ -697,19 +697,26 @@ fn surface_taylor_with_policy(
             let delta: [Taylor; 3] =
                 std::array::from_fn(|i| point[i] - Taylor::constant(origin[i]));
             let (sine, cosine) = v.sin_cos();
-            let axial = (0..3)
-                .map(|i| delta[i] * Taylor::constant(axis[i]))
-                .fold(Taylor::ZERO, |a, b| a + b);
             let cross = [
                 delta[2] * Taylor::constant(axis.y) - delta[1] * Taylor::constant(axis.z),
                 delta[0] * Taylor::constant(axis.z) - delta[2] * Taylor::constant(axis.x),
                 delta[1] * Taylor::constant(axis.x) - delta[0] * Taylor::constant(axis.y),
             ];
+            // Form the axial and radial coefficients before applying them to
+            // the original profile. This is the same Rodrigues operation,
+            // without a spurious full-period oscillation from correlated axial
+            // terms or subtraction of two whole profile-position intervals.
             let point = std::array::from_fn(|i| {
-                Taylor::constant(origin[i])
-                    + delta[i] * cosine
-                    + cross[i] * sine
-                    + axial * Taylor::constant(axis[i]) * (Taylor::constant(1.0) - cosine)
+                let rotated = (0..3)
+                    .map(|j| {
+                        let axial =
+                            ValidatedInterval::point(axis[i]) * ValidatedInterval::point(axis[j]);
+                        let radial =
+                            ValidatedInterval::point(if i == j { 1.0 } else { 0.0 }) - axial;
+                        delta[j] * (Taylor::interval(axial) + Taylor::interval(radial) * cosine)
+                    })
+                    .fold(Taylor::ZERO, |a, b| a + b);
+                Taylor::constant(origin[i]) + rotated + cross[i] * sine
             });
             transform3(*processor.transform(), point)?
         }

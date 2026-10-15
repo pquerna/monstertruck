@@ -284,16 +284,19 @@ impl PolyBoundaryPiece {
             trim_curve
                 .and_then(|trim_curve| {
                     let mut previous_t = None;
-                    let mut previous_uv = None;
                     polyline
                         .iter()
                         .copied()
                         .map(|point| {
                             let (t, uv) = trim_curve.project_boundary_point(point, previous_t)?;
-                            let (u, v) = Self::normalize_uv(surface, (uv.x, uv.y), previous_uv)?;
+                            // A retained trim already selects its source chart.
+                            // Rewrapping each coedge into the carrier's default
+                            // period destroys that association at shared seams.
+                            if !uv.x.is_finite() || !uv.y.is_finite() {
+                                return None;
+                            }
                             previous_t = Some(t);
-                            previous_uv = Some((u, v));
-                            Some(SurfacePoint::from((Point2::new(u, v), point)))
+                            Some(SurfacePoint::from((uv, point)))
                         })
                         .collect::<Option<Vec<_>>>()
                 })

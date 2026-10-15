@@ -75,4 +75,7 @@ fn polyline_on_surface(
 }
 
 #[cfg(test)]
+mod retained_chart_tests;
+
+#[cfg(test)]
 mod tests;

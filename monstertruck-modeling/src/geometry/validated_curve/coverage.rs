@@ -51,11 +51,12 @@ pub struct ValidatedPlaneCoverage {
 
 /// Proves that all plane zeros of an authoritative trimmed face are represented.
 ///
-/// The complete native covering-chart rectangle is subdivided. Each terminal
-/// cell is either strictly outside the material winding, has an interval plane
-/// residual excluding zero, or has all its plane roots mapped into existing
-/// prepared branch tubes. Coverage requires interval bracketing and strict
-/// monotonicity of the actual prepared coordinate, source coefficient identity,
+/// The complete native covering-chart rectangle is subdivided. Interval Newton
+/// contraction first encloses every possible plane zero within each closed
+/// cell. Each terminal cell is either strictly outside the material winding,
+/// has no plane zero, or has all its plane roots mapped into existing prepared
+/// branch tubes. Coverage requires interval bracketing and strict monotonicity
+/// of the actual prepared coordinate, source coefficient identity,
 /// and containment in every applicable uniqueness tube. UV-box overlap alone
 /// is never coverage. Missing closed interior components therefore cause a typed
 /// refusal instead of a false empty section. Boundary, singular, nonsmooth or
@@ -211,35 +212,20 @@ pub fn validated_face_plane_coverage(
             length -= 1;
             let (cell, depth) = pending[length];
             result.visited_cells += 1;
-            let classification = domain
-                .classify_parameter_box(cell, budget, cancel)
-                .map_err(trim_error)?;
-            if classification == ParameterBoxClassification::Outside {
-                result.excluded_cells += 1;
-                continue;
-            }
-            let enclosure = validated_surface_jet(surface, cell, budget, cancel);
+            let mut root_cell = cell;
+            let enclosure = plane_zero_cell(surface, cell, normal, origin, budget, cancel);
             let mut covered = false;
             match enclosure {
-                Ok(jet) => {
-                    let residual = dot3(normal, subtract3(jet.position, origin));
-                    if !residual.is_finite() {
-                        return Err(ValidatedGeometryError::ConditioningFailure);
-                    }
-                    if !residual.contains_zero() {
-                        result.excluded_cells += 1;
-                        continue;
-                    }
+                Ok(None) => {
+                    result.excluded_cells += 1;
+                    continue;
+                }
+                Ok(Some((contracted, position))) => {
+                    root_cell = contracted;
                     for &(candidate_index, candidate, index) in &matches {
                         budget.charge(1, cancel)?;
                         if candidate_covers(
-                            candidate,
-                            index,
-                            cell,
-                            jet.position,
-                            plane,
-                            budget,
-                            cancel,
+                            candidate, index, root_cell, position, plane, budget, cancel,
                         )? {
                             covered = true;
                             break;
@@ -258,8 +244,8 @@ pub fn validated_face_plane_coverage(
                                         &prepared_endpoints,
                                         endpoints::CoverageCell {
                                             source_index: index,
-                                            uv: cell,
-                                            position: jet.position,
+                                            uv: root_cell,
+                                            position,
                                         },
                                         budget,
                                         cancel,
@@ -288,19 +274,30 @@ pub fn validated_face_plane_coverage(
                 result.covered_cells += 1;
                 continue;
             }
+            // Winding is needed only when the original whole-cell zero proof
+            // cannot discharge this cell. It must not spend the trim subdivision
+            // allowance on cells already proved empty or covered.
+            if domain
+                .classify_parameter_box(root_cell, budget, cancel)
+                .map_err(trim_error)?
+                == ParameterBoxClassification::Outside
+            {
+                result.excluded_cells += 1;
+                continue;
+            }
             if depth == options.max_depth {
                 return Err(ValidatedGeometryError::PlaneCoverageUnresolved {
                     operation: "complete original face cells / subdivision depth",
                 });
             }
-            let (axis, middle) = split_cell(surface, cell, budget, cancel)?;
-            if middle <= cell[axis][0] || middle >= cell[axis][1] {
+            let (axis, middle) = split_cell(surface, root_cell, budget, cancel)?;
+            if middle <= root_cell[axis][0] || middle >= root_cell[axis][1] {
                 return Err(ValidatedGeometryError::PlaneCoverageUnresolved {
                     operation: "complete original face cells / finite split",
                 });
             }
-            let mut lower = cell;
-            let mut upper = cell;
+            let mut lower = root_cell;
+            let mut upper = root_cell;
             lower[axis][1] = middle;
             upper[axis][0] = middle;
             budget.charge(2, cancel)?;
@@ -344,6 +341,64 @@ fn coverage_context(
     } else {
         error
     }
+}
+
+type PlaneZeroCell = ([[f64; 2]; 2], [ValidatedInterval; 3]);
+
+fn plane_zero_cell(
+    surface: &Surface,
+    mut cell: [[f64; 2]; 2],
+    normal: [ValidatedInterval; 3],
+    origin: [ValidatedInterval; 3],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<PlaneZeroCell>, ValidatedGeometryError> {
+    let mut jet = validated_surface_jet(surface, cell, budget, cancel)?;
+    for axis in 0..2 {
+        budget.charge(1, cancel)?;
+        let residual = dot3(normal, subtract3(jet.position, origin));
+        if !residual.is_finite() {
+            return Err(ValidatedGeometryError::ConditioningFailure);
+        }
+        if !residual.contains_zero() {
+            return Ok(None);
+        }
+        let derivative = dot3(normal, if axis == 0 { jet.du } else { jet.dv });
+        if !derivative.is_finite() {
+            return Err(ValidatedGeometryError::ConditioningFailure);
+        }
+        if derivative.contains_zero() || cell[axis][0] == cell[axis][1] {
+            continue;
+        }
+        let range = interval_range(cell[axis])?;
+        let midpoint = range.midpoint();
+        let mut section = cell;
+        section[axis] = [midpoint; 2];
+        let section = validated_surface_jet(surface, section, budget, cancel)?;
+        let value = dot3(normal, subtract3(section.position, origin));
+        if !value.is_finite() {
+            return Err(ValidatedGeometryError::ConditioningFailure);
+        }
+        // For every actual zero, the mean-value theorem places this coordinate
+        // in the interval Newton image with the other coordinate still free.
+        // This is only necessary-root exclusion, never an existence witness.
+        let inverse = derivative.reciprocal()?;
+        if !inverse.is_finite() {
+            return Err(ValidatedGeometryError::ConditioningFailure);
+        }
+        let newton = ValidatedInterval::point(midpoint) - value * inverse;
+        if !newton.is_finite() {
+            return Err(ValidatedGeometryError::ConditioningFailure);
+        }
+        let Some(contracted) = range.intersection(newton) else {
+            return Ok(None);
+        };
+        if contracted != range {
+            cell[axis] = [contracted.lower, contracted.upper];
+            jet = validated_surface_jet(surface, cell, budget, cancel)?;
+        }
+    }
+    Ok(Some((cell, jet.position)))
 }
 
 fn candidate_covers(
@@ -709,4 +764,250 @@ fn exact_curve2d(
         }
         _ => false,
     })
+}
+
+#[cfg(test)]
+mod plane_zero_cell_regressions {
+    use super::*;
+    use crate::{
+        BsplineSurface, Edge, Face, Invertible, KnotVector, Line, Point2, Point3, Processor,
+        RevolutionSurface, TrimDomainLimits, ValidatedCurveOptions, ValidatedFacePlaneSource,
+        Vector3, Wire, builder, prepare_face_parameter_domain_with_uncertainty,
+        prepared_face_plane_curve,
+    };
+    use monstertruck_core::EuclideanSpace;
+    use monstertruck_topology::trimmed::TrimmedFace;
+    use std::f64::consts::TAU;
+
+    fn tapered_surface() -> Surface {
+        Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+            Curve::Line(Line(
+                Point3::new(6.0, 0.0, 0.0),
+                Point3::new(4.0, 0.0, 12.0),
+            )),
+            Point3::origin(),
+            Vector3::unit_z(),
+        )))
+    }
+
+    fn axis(index: usize) -> [ValidatedInterval; 3] {
+        std::array::from_fn(|i| ValidatedInterval::point(if i == index { 1.0 } else { 0.0 }))
+    }
+
+    #[test]
+    fn original_full_period_taper_contracts_only_the_plane_normal_coordinate() {
+        let cancel = AtomicBool::new(false);
+        let normal = axis(2);
+        let origin = normal.map(|x| x * ValidatedInterval::point(6.0));
+        for inverted in [false, true] {
+            let surface = if inverted {
+                tapered_surface().inverse()
+            } else {
+                tapered_surface()
+            };
+            let profile_axis = usize::from(inverted);
+            let angle_axis = 1 - profile_axis;
+            let mut cell = [[0.0, 1.0]; 2];
+            cell[angle_axis] = [0.0, TAU];
+            let mut budget = ValidatedGeometryBudget::new(128);
+            let (contracted, position) =
+                plane_zero_cell(&surface, cell, normal, origin, &mut budget, &cancel)
+                    .expect("whole original operation graph fits a fixed small work allowance")
+                    .expect("the original full-period section cannot be excluded");
+            let profile = interval_range(contracted[profile_axis]).unwrap();
+            assert!(profile.lower <= 0.5 && 0.5 <= profile.upper);
+            assert!(profile.width() < 1.0e-12);
+            assert_eq!(contracted[angle_axis], cell[angle_axis]);
+            assert!(position[2].lower <= 6.0 && 6.0 <= position[2].upper);
+            assert!(position[2].width() < 1.0e-10);
+            assert!(budget.consumed() < 128);
+        }
+    }
+
+    #[test]
+    fn nonmonotone_original_surface_retains_both_unselected_plane_components() {
+        let surface = Surface::BsplineSurface(BsplineSurface::new(
+            (KnotVector::bezier_knot(2), KnotVector::bezier_knot(1)),
+            [(-1.0, 1.0), (0.0, -1.0), (1.0, 1.0)]
+                .into_iter()
+                .map(|(x, z)| vec![Point3::new(x, -1.0, z), Point3::new(x, 1.0, z)])
+                .collect(),
+        ));
+        let cell = [[0.0, 1.0]; 2];
+        let normal = axis(2);
+        let origin = normal.map(|x| x * ValidatedInterval::point(0.25));
+        let (contracted, _) = plane_zero_cell(
+            &surface,
+            cell,
+            normal,
+            origin,
+            &mut ValidatedGeometryBudget::new(100_000),
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .expect("neither distinct original plane-zero component may be excluded");
+        for root in [0.25, 0.75] {
+            assert!(contracted[0][0] <= root && root <= contracted[0][1]);
+        }
+        assert_eq!(contracted, cell);
+        let plane = Plane::new(
+            Point3::new(0.0, 0.0, 0.25),
+            Point3::new(1.0, 0.0, 0.25),
+            Point3::new(0.0, 1.0, 0.25),
+        );
+        let guide = Curve::Line(Line(
+            Point3::new(0.5, -0.5, 0.25),
+            Point3::new(0.5, 0.5, 0.25),
+        ));
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(1_000_000);
+        let candidate = prepared_face_plane_curve(
+            &guide,
+            ValidatedFacePlaneSource {
+                surface: &surface,
+                initial_chart: Some([0.75, 0.25]),
+            },
+            &plane,
+            [0.0, 1.0],
+            &ValidatedCurveOptions::default(),
+            &mut budget,
+            &cancel,
+        )
+        .unwrap();
+        for (root, expected) in [(0.75, true), (0.25, false)] {
+            let root_cell = [[root; 2], [0.5; 2]];
+            let (_, position) =
+                plane_zero_cell(&surface, root_cell, normal, origin, &mut budget, &cancel)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                candidate_covers(
+                    &candidate,
+                    0,
+                    root_cell,
+                    position,
+                    &plane,
+                    &mut budget,
+                    &cancel,
+                )
+                .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn empty_original_plane_cell_does_not_spend_work_on_trim_contact() {
+        let points = [
+            Point3::new(-3.0, -2.0, 0.0),
+            Point3::new(3.0, -2.0, 0.0),
+            Point3::new(3.0, 2.0, 0.0),
+            Point3::new(-3.0, 2.0, 0.0),
+        ];
+        let vertices = points.map(builder::vertex);
+        let wire: Wire = (0..4)
+            .map(|i| {
+                Edge::new(
+                    &vertices[i],
+                    &vertices[(i + 1) % 4],
+                    Curve::Line(Line(points[i], points[(i + 1) % 4])),
+                )
+            })
+            .collect();
+        let trims = (0..4)
+            .map(|i| {
+                let a = points[i];
+                let b = points[(i + 1) % 4];
+                Some(Curve2D::Line(Line(
+                    Point2::new(a.x, a.y),
+                    Point2::new(b.x, b.y),
+                )))
+            })
+            .collect();
+        let trimmed = TrimmedFace::new(
+            Face::new(
+                vec![wire],
+                Surface::Plane(Plane::new(
+                    Point3::origin(),
+                    Point3::new(1.0, 0.0, 0.0),
+                    Point3::new(0.0, 1.0, 0.0),
+                )),
+            ),
+            vec![trims],
+        );
+        let plane = Plane::new(
+            Point3::new(0.0, 0.0, 1.0),
+            Point3::new(1.0, 0.0, 1.0),
+            Point3::new(0.0, 1.0, 1.0),
+        );
+        let cancel = AtomicBool::new(false);
+        for uncertainty in [0.0, 1.0e-7] {
+            let domain = prepare_face_parameter_domain_with_uncertainty(
+                &trimmed,
+                [uncertainty; 2],
+                TrimDomainLimits {
+                    max_coedges: 16,
+                    max_subdivisions: 65_536,
+                    max_retained_bytes: 32 * 1024 * 1024,
+                },
+                &mut ValidatedGeometryBudget::new(1_000_000),
+                &cancel,
+            )
+            .unwrap();
+            assert_eq!(domain.uncertainty_uv(), [uncertainty; 2]);
+            let mut budget = ValidatedGeometryBudget::new(256);
+            let coverage = validated_face_plane_coverage(
+                &domain,
+                &plane,
+                &[],
+                &[],
+                &ValidatedPlaneCoverageOptions::default(),
+                &mut budget,
+                &cancel,
+            )
+            .expect("plane exclusion precedes whole-boundary trim winding");
+            assert_eq!(coverage.visited_cells, 1);
+            assert_eq!(coverage.excluded_cells, 1);
+            assert_eq!(coverage.covered_cells, 0);
+            assert!(coverage.endpoint_strata.is_empty());
+            assert!(budget.consumed() < 256);
+        }
+    }
+
+    #[test]
+    fn root_exclusion_keeps_work_and_cancellation_failures_typed() {
+        let surface = tapered_surface();
+        let cell = [[0.0, 1.0], [0.0, TAU]];
+        let normal = axis(2);
+        let origin = normal.map(|x| x * ValidatedInterval::point(13.0));
+        assert!(
+            plane_zero_cell(
+                &surface,
+                cell,
+                normal,
+                origin,
+                &mut ValidatedGeometryBudget::new(128),
+                &AtomicBool::new(false),
+            )
+            .unwrap()
+            .is_none()
+        );
+        for (allowance, cancelled, expected) in [
+            (0, false, ValidatedGeometryError::ResourceLimit),
+            (128, true, ValidatedGeometryError::Cancelled),
+        ] {
+            assert_eq!(
+                plane_zero_cell(
+                    &surface,
+                    cell,
+                    normal,
+                    origin,
+                    &mut ValidatedGeometryBudget::new(allowance),
+                    &AtomicBool::new(cancelled),
+                )
+                .unwrap_err(),
+                expected
+            );
+        }
+    }
 }
