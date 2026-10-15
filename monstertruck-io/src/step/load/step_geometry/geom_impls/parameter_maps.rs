@@ -361,6 +361,10 @@ impl Curve3D {
     ///
     /// Implicit projected curves report unavailable correspondence rather than
     /// declaring their sampled leader an exact geometric certificate.
+    /// For an explicit `SURFACE_CURVE`, the map describes the retained native
+    /// leader function only. Original kind, master and PCURVE associations stay
+    /// on the source object; their geometric equivalence needs a separate
+    /// whole-domain incidence/correspondence certificate.
     pub fn to_modeling_with_parameter_map(
         &self,
     ) -> Result<(ModelingCurve, CurveParameterMap), StepConvertingError> {
@@ -392,18 +396,12 @@ impl Curve3D {
                 curve.entity().curve().parameter_map_for(native_range)?.kind
             }
             Self::SurfaceCurve(curve) => {
-                let mut surfaces = curve
-                    .associated_geometry()
-                    .iter()
-                    .map(SurfaceCurveAssociatedGeometry::surface);
-                match (surfaces.next(), surfaces.next()) {
-                    (_, None) => curve.leader().parameter_map_for(native_range)?.kind,
-                    (Some(first), Some(second)) if first == second => {
-                        curve.leader().parameter_map_for(native_range)?.kind
-                    }
-                    _ => CurveParameterMapKind::Unavailable {
+                if curve.kind() == SurfaceCurveKind::IntersectionCurve {
+                    CurveParameterMapKind::Unavailable {
                         reason: "Projected implicit curve equivalence requires validated continuation.",
-                    },
+                    }
+                } else {
+                    curve.leader().parameter_map_for(native_range)?.kind
                 }
             }
             Self::IntersectionCurve(_) => CurveParameterMapKind::Unavailable {

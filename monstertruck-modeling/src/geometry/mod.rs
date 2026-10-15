@@ -60,7 +60,8 @@ pub use surface::Surface;
 pub use validated_curve::{
     PreparedValidatedCurve, ValidatedCurveOptions, ValidatedCurvePiece, ValidatedCurvePoint,
     ValidatedPlaneCoverage, ValidatedPlaneCoverageOptions, prepared_face_plane_curve,
-    prepared_validated_curve, validated_face_plane_coverage, validated_same_surface_coefficients,
+    prepared_validated_curve, prepared_validated_curve_owned, validated_face_plane_coverage,
+    validated_same_surface_coefficients,
 };
 pub use validated_interval::{
     ValidatedCurveJet, ValidatedCurveJet2D, ValidatedGeometryBudget, ValidatedGeometryError,

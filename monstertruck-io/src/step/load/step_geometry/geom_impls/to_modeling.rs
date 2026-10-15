@@ -98,13 +98,50 @@ fn parameter_preserving_conic_leader(conic: &Conic3D) -> Option<ModelingCurve> {
     )))
 }
 
+fn validate_surface_curve_master(
+    curve: &SurfaceCurve3D,
+) -> std::result::Result<(), StepConvertingError> {
+    let index = match curve.master_representation() {
+        SurfaceCurveRepresentation::Curve3D => return Ok(()),
+        SurfaceCurveRepresentation::ParameterCurve0 => 0,
+        SurfaceCurveRepresentation::ParameterCurve1 => 1,
+    };
+    match curve.associated_geometry().get(index) {
+        Some(SurfaceCurveAssociatedGeometry::ParameterCurve(preferred))
+            if preferred.try_range_tuple().is_some_and(|(start, end)| {
+                start.is_finite() && end.is_finite() && start < end
+            }) =>
+        {
+            Ok(())
+        }
+        _ => Err(ExactConversionError::UnestablishedCurveCorrespondence.into()),
+    }
+}
+
+fn modeling_trimmed_curve(
+    curve: &SourceTrimmedCurve<Curve3D, Matrix4>,
+    basis: ModelingCurve,
+) -> ModelingCurve {
+    let mut trim = Processor::with_transform(
+        TrimmedCurve::new(Box::new(basis), curve.entity().range()),
+        *curve.transform(),
+    );
+    if !curve.orientation() {
+        trim.invert();
+    }
+    ModelingCurve::TrimmedCurve(trim)
+}
+
 impl Curve3D {
     /// Constructs an ordinary native curve retaining the explicit source parameter.
     ///
     /// Conics use an analytic parameter curve in an affine plane with the
     /// original matrix origin and axes stored separately. No rational fitting,
     /// angle reparameterization or translated-axis reconstruction is involved.
-    /// Implicit projected curves require their own correspondence certificate.
+    /// An explicit `SURFACE_CURVE` retains its original leader function. Its
+    /// parameter map does not establish equivalence to a preferred PCURVE:
+    /// consumers must validate that original association over its whole domain.
+    /// Genuine implicit curves require their own continuation certificate.
     pub fn to_parameter_preserving_modeling(
         &self,
     ) -> std::result::Result<ModelingCurve, StepConvertingError> {
@@ -115,6 +152,14 @@ impl Curve3D {
                 }
                 .into()
             }),
+            Self::TrimmedCurve(curve) => {
+                let basis = curve.entity().curve().to_parameter_preserving_modeling()?;
+                Ok(modeling_trimmed_curve(curve, basis))
+            }
+            Self::SurfaceCurve(curve) if curve.kind() != SurfaceCurveKind::IntersectionCurve => {
+                validate_surface_curve_master(curve)?;
+                curve.leader().to_parameter_preserving_modeling()
+            }
             Self::SurfaceCurve(_) | Self::IntersectionCurve(_) => {
                 Err(ExactConversionError::UnestablishedCurveCorrespondence.into())
             }
@@ -139,19 +184,8 @@ impl TryFrom<&Curve3D> for ModelingCurve {
             Curve3D::BsplineCurve(curve) => Ok(curve.clone().into()),
             Curve3D::NurbsCurve(curve) => Ok(curve.clone().into()),
             Curve3D::TrimmedCurve(curve) => {
-                let basis = curve
-                    .entity()
-                    .curve()
-                    .as_ref()
-                    .to_parameter_preserving_modeling()?;
-                let mut trim = Processor::with_transform(
-                    TrimmedCurve::new(Box::new(basis), curve.entity().range()),
-                    *curve.transform(),
-                );
-                if !curve.orientation() {
-                    trim.invert();
-                }
-                Ok(ModelingCurve::TrimmedCurve(trim))
+                let basis = ModelingCurve::try_from(curve.entity().curve().as_ref())?;
+                Ok(modeling_trimmed_curve(curve, basis))
             }
             Curve3D::Conic(conic) => parameter_preserving_conic_leader(conic).ok_or_else(|| {
                 ExactConversionError::CurveDomain {
@@ -163,22 +197,25 @@ impl TryFrom<&Curve3D> for ModelingCurve {
                 Ok(ModelingCurve::ParameterCurve(to_modeling_trim(curve)?))
             }
             Curve3D::SurfaceCurve(curve) => {
-                let surfaces = curve
+                validate_surface_curve_master(curve)?;
+                if curve.kind() != SurfaceCurveKind::IntersectionCurve {
+                    return curve.leader().try_into();
+                }
+                let mut surfaces = curve
                     .associated_geometry()
                     .iter()
-                    .map(SurfaceCurveAssociatedGeometry::surface)
-                    .collect::<Vec<_>>();
-                if surfaces.len() >= 2 && surfaces[0] != surfaces[1] {
-                    let trim0 = curve.declared_parameter_curve_ref_on(surfaces[0], true)?;
-                    let trim1 = curve.declared_parameter_curve_ref_on(surfaces[1], true)?;
+                    .map(SurfaceCurveAssociatedGeometry::surface);
+                if let (Some(surface0), Some(surface1)) = (surfaces.next(), surfaces.next()) {
+                    let trim0 = curve.declared_parameter_curve_ref_on(surface0, true)?;
+                    let trim1 = curve.declared_parameter_curve_ref_on(surface1, true)?;
                     let has_boundary = trim0.is_some() || trim1.is_some();
                     let (leader, parameter_map) =
                         curve.leader().to_modeling_with_parameter_map()?;
                     if has_boundary && parameter_map.kind != CurveParameterMapKind::Identity {
                         return Err(ExactConversionError::UnestablishedCurveCorrespondence.into());
                     }
-                    let surface0 = surfaces[0].try_into()?;
-                    let surface1 = surfaces[1].try_into()?;
+                    let surface0 = surface0.try_into()?;
+                    let surface1 = surface1.try_into()?;
                     let boundary0 = trim0.map(to_modeling_trim).transpose()?;
                     let boundary1 = trim1.map(to_modeling_trim).transpose()?;
                     Ok(ModelingCurve::IntersectionCurve(
@@ -191,7 +228,7 @@ impl TryFrom<&Curve3D> for ModelingCurve {
                         ),
                     ))
                 } else {
-                    curve.leader().try_into()
+                    Err(ExactConversionError::UnestablishedCurveCorrespondence.into())
                 }
             }
             Curve3D::IntersectionCurve(curve) => Ok(ModelingCurve::IntersectionCurve(

@@ -2161,3 +2161,164 @@ mod trimmed_source_lineage_regressions {
         }
     }
 }
+
+#[cfg(test)]
+mod explicit_surface_curve_source_regressions {
+    use super::*;
+    use crate::step::load::step_geometry::{
+        CurveParameterMapKind, ExactConversionError, SurfaceCurveKind, SurfaceCurveRepresentation,
+    };
+    use step_p21::tables::EntityTable;
+
+    fn line_source(kind: &str, master: &str) -> Curve3D {
+        let data = format!(
+            "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('explicit source curve'),'2;1');\n\
+             FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n\
+             #1=CARTESIAN_POINT('',(2.,3.,5.));\n\
+             #2=CARTESIAN_POINT('',(11.,3.,5.));\n\
+             #3=VERTEX_POINT('',#1);\n#4=VERTEX_POINT('',#2);\n\
+             #5=DIRECTION('',(1.,0.,0.));\n#6=VECTOR('',#5,9.);\n\
+             #7=LINE('',#1,#6);\n#8=DIRECTION('',(0.,0.,1.));\n\
+             #9=AXIS2_PLACEMENT_3D('',#1,#8,#5);\n#10=PLANE('',#9);\n\
+             #11=DIRECTION('',(0.,-1.,0.));\n\
+             #12=AXIS2_PLACEMENT_3D('',#1,#11,#5);\n#13=PLANE('',#12);\n\
+             #14={kind}('',#7,(#10,#13),.{master}.);\n\
+             #15=EDGE_CURVE('',#3,#4,#14,.T.);\nENDSEC;\nEND-ISO-10303-21;"
+        );
+        let table = Table::from_step(&data).expect("small original STEP source parses");
+        EntityTable::<EdgeCurveHolder>::get_owned(&table, 15)
+            .expect("the original source edge resolves")
+            .parse_curve3d()
+            .expect("source edge geometry materializes")
+    }
+
+    #[test]
+    fn original_surface_curve_with_bare_surfaces_preserves_explicit_native_curve_and_map() {
+        let source = line_source("SURFACE_CURVE", "CURVE_3D");
+        let (native, map) = source
+            .to_modeling_with_parameter_map()
+            .expect("explicit source geometry converts without an implicit projection");
+        for t in [0.0, 0.37, 1.0] {
+            let expected = Point3::new(2.0 + 9.0 * t, 3.0, 5.0);
+            assert!(source.subs(t).near(&expected));
+            assert!(native.subs(t).near(&expected));
+            assert_eq!(source.der(t), Vector3::new(9.0, 0.0, 0.0));
+            assert_eq!(native.der(t), Vector3::new(9.0, 0.0, 0.0));
+            assert_eq!(map.source_to_native(t), Some(t));
+        }
+        assert_eq!(map.kind, CurveParameterMapKind::Identity);
+        assert_eq!(map.source_range, source.range_tuple());
+        assert_eq!(map.native_range, native.range_tuple());
+        let Curve3D::SurfaceCurve(original) = &source else {
+            panic!("original SURFACE_CURVE must keep its source kind and master metadata");
+        };
+        assert_eq!(original.kind(), SurfaceCurveKind::SurfaceCurve);
+        assert_eq!(
+            original.master_representation(),
+            SurfaceCurveRepresentation::Curve3D
+        );
+        assert_eq!(original.associated_geometry().len(), 2);
+    }
+
+    #[test]
+    fn original_closed_surface_curve_keeps_exact_geometry_after_actual_periodic_restriction() {
+        let table = Table::from_step(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../resources/step/occt-cylinder.step",
+        )))
+        .expect("existing independent OCCT source parses");
+        let source = EntityTable::<EdgeCurveHolder>::get_owned(&table, 21)
+            .expect("original closed fitting-style source edge resolves")
+            .parse_curve3d()
+            .expect("original closed surface curve materializes");
+        let original_range = source.range_tuple();
+        let mut shell: CompactTrimmedShell = CompressedTrimmedShell {
+            vertices: vec![source.front()],
+            edges: vec![CompressedEdge {
+                vertices: (0, 0),
+                curve: source,
+            }],
+            faces: Vec::new(),
+        };
+        periodic_edges::compact_trimmed(&mut shell, &mut SourceShellProvenance::default())
+            .expect("actual closed-edge native restriction succeeds");
+        assert_eq!(shell.edges.len(), 2);
+        assert_eq!(shell.edges[0].curve.range_tuple().0, original_range.0);
+        assert_eq!(shell.edges[1].curve.range_tuple().1, original_range.1);
+        for edge in &shell.edges {
+            let (native, map) = edge
+                .curve
+                .to_modeling_with_parameter_map()
+                .expect("retained explicit surface-curve basis is not an implicit curve");
+            let range = edge.curve.range_tuple();
+            assert_eq!(map.kind, CurveParameterMapKind::Identity);
+            assert_eq!(map.source_range, range);
+            assert_eq!(map.native_range, range);
+            for t in [range.0, range.0 + 0.37 * (range.1 - range.0), range.1] {
+                let expected = Point3::new(2.0 * t.cos(), 2.0 * t.sin(), 10.0);
+                let derivative = Vector3::new(-2.0 * t.sin(), 2.0 * t.cos(), 0.0);
+                assert!(edge.curve.subs(t).near(&expected));
+                assert!(native.subs(t).near(&expected));
+                assert!(edge.curve.der(t).near(&derivative));
+                assert!(native.der(t).near(&derivative));
+                assert_eq!(map.source_to_native(t), Some(t));
+            }
+            let Curve3D::TrimmedCurve(restriction) = &edge.curve else {
+                panic!("the actual source restriction must remain attached");
+            };
+            let Curve3D::SurfaceCurve(original) = restriction.entity().curve().as_ref() else {
+                panic!("restriction retains its original surface-curve source");
+            };
+            assert_eq!(
+                original.master_representation(),
+                SurfaceCurveRepresentation::ParameterCurve0
+            );
+            // A parameter identity of the native 3D function is not a whole-
+            // domain certificate for this preferred pcurve/source association.
+            let SurfaceCurveAssociatedGeometry::ParameterCurve(preferred) =
+                &original.associated_geometry()[0]
+            else {
+                panic!("declared preferred master must retain its pcurve");
+            };
+            assert!(
+                original
+                    .declared_parameter_curve_ref_on(preferred.surface(), true,)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn missing_preferred_pcurve_master_is_a_typed_conversion_failure() {
+        for master in ["PCURVE_S1", "PCURVE_S2"] {
+            let source = line_source("SURFACE_CURVE", master);
+            let error = source
+                .to_modeling_with_parameter_map()
+                .expect_err("a bare surface is not the declared preferred pcurve");
+            assert_eq!(
+                error.downcast_ref::<ExactConversionError>(),
+                Some(&ExactConversionError::UnestablishedCurveCorrespondence)
+            );
+        }
+    }
+
+    #[test]
+    fn original_intersection_curve_never_receives_an_explicit_leader_identity() {
+        let source = line_source("INTERSECTION_CURVE", "CURVE_3D");
+        let (_, map) = source
+            .to_modeling_with_parameter_map()
+            .expect("genuine implicit source prepares its ordinary native representation");
+        assert!(matches!(
+            map.kind,
+            CurveParameterMapKind::Unavailable { .. }
+        ));
+        let error = source
+            .to_parameter_preserving_modeling()
+            .expect_err("an implicit source cannot be replaced by its guide");
+        assert_eq!(
+            error.downcast_ref::<ExactConversionError>(),
+            Some(&ExactConversionError::UnestablishedCurveCorrespondence)
+        );
+    }
+}

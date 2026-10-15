@@ -27,7 +27,7 @@ use super::validated_interval::{
 };
 use crate::{
     Curve, Curve2D, KnotVector, Matrix4, ParametricCurve, ParametricSurface, Plane, Point3,
-    Surface, SurfaceCurve, curve_owned_bytes, surface_owned_bytes,
+    Processor, Surface, SurfaceCurve, TrimmedCurve, curve_owned_bytes, surface_owned_bytes,
 };
 use std::mem::size_of;
 use std::sync::atomic::AtomicBool;
@@ -114,18 +114,37 @@ pub struct PreparedValidatedCurve<'a> {
 #[derive(Debug)]
 enum PreparedSource<'a> {
     Borrowed(&'a Curve),
-    Owned { curve: Box<Curve>, bytes: usize },
+    Owned {
+        curve: Box<Curve>,
+        bytes: usize,
+    },
+    Mapped {
+        transform: Matrix4,
+        range: (f64, f64),
+        orientation: bool,
+    },
 }
 impl PreparedSource<'_> {
-    fn curve(&self) -> &Curve {
+    fn curve(&self) -> Result<&Curve, ValidatedGeometryError> {
         match self {
-            Self::Borrowed(curve) => curve,
-            Self::Owned { curve, .. } => curve,
+            Self::Borrowed(curve) => Ok(curve),
+            Self::Owned { curve, .. } => Ok(curve),
+            Self::Mapped { .. } => Err(ValidatedGeometryError::InvalidInput),
+        }
+    }
+    fn mapping(&self) -> Result<(&Matrix4, (f64, f64), bool), ValidatedGeometryError> {
+        match self {
+            Self::Mapped {
+                transform,
+                range,
+                orientation,
+            } => Ok((transform, *range, *orientation)),
+            _ => Err(ValidatedGeometryError::InvalidInput),
         }
     }
     fn owned_bytes(&self) -> usize {
         match self {
-            Self::Borrowed(_) => 0,
+            Self::Borrowed(_) | Self::Mapped { .. } => 0,
             Self::Owned { bytes, .. } => *bytes,
         }
     }
@@ -162,6 +181,19 @@ impl PreparedValidatedCurve<'_> {
     /// Returns the ordered, gap-free, closed branch partition.
     pub fn pieces(&self) -> &[ValidatedCurvePiece] { &self.pieces }
 
+    /// Borrows this binding's already prepared basis, without root reselection.
+    ///
+    /// Its range is exactly the retained active interval mapped through the
+    /// original trim reflection, not an unused natural-domain extension.
+    pub fn mapped_basis(&self) -> Option<&Self> { self.mapped.as_deref() }
+
+    /// Borrows the unchanged native source of an unmapped binding.
+    ///
+    /// Mapped nodes retain their original operators and prepared basis rather
+    /// than a cloned recursive curve. Follow [`Self::mapped_basis`] to inspect
+    /// the original guide and carriers at the unmapped leaf.
+    pub fn native_curve(&self) -> Option<&Curve> { self.source.curve().ok() }
+
     /// Returns owned source and proof-capacity bytes, including this binding.
     pub fn retained_bytes(&self) -> usize {
         size_of::<Self>()
@@ -192,17 +224,14 @@ impl PreparedValidatedCurve<'_> {
         let range = interval_range(range)?;
         self.check_range(range)?;
         if let Some(child) = &self.mapped {
-            let Curve::TrimmedCurve(wrapper) = self.source.curve() else {
-                return Err(ValidatedGeometryError::InvalidInput);
-            };
-            let mapped =
-                reflected_trim_range(wrapper.orientation(), wrapper.entity().range(), range)?;
+            let (_, active, orientation) = self.source.mapping()?;
+            let mapped = reflected_trim_range(orientation, active, range)?;
             return child.is_smooth_on([mapped.lower, mapped.upper], budget, cancel);
         }
-        if !matches!(self.source.curve(), Curve::IntersectionCurve(_)) {
-            return curve_span_smooth(self.source.curve(), range, 1, false, budget, cancel);
+        if !matches!(self.source.curve()?, Curve::IntersectionCurve(_)) {
+            return curve_span_smooth(self.source.curve()?, range, 1, false, budget, cancel);
         }
-        let (first, second, leader) = carriers(self.source.curve())?;
+        let (first, second, leader) = carriers(self.source.curve()?)?;
         let mut projection = None;
         let mut covered = false;
         for piece in &self.pieces {
@@ -226,7 +255,7 @@ impl PreparedValidatedCurve<'_> {
                     .ok_or(ValidatedGeometryError::InvalidInput)?,
             );
             let tube = certify(
-                self.source.curve(),
+                self.source.curve()?,
                 piece.projection,
                 part,
                 original,
@@ -279,16 +308,13 @@ impl PreparedValidatedCurve<'_> {
                 continue;
             }
             let position = if let Some(child) = &self.mapped {
-                let Curve::TrimmedCurve(wrapper) = self.source.curve() else {
-                    return Err(ValidatedGeometryError::InvalidInput);
-                };
-                let mapped =
-                    reflected_trim_range(wrapper.orientation(), wrapper.entity().range(), part)?;
+                let (transform, active, orientation) = self.source.mapping()?;
+                let mapped = reflected_trim_range(orientation, active, part)?;
                 transform_prepared_position(
-                    *wrapper.transform(),
+                    *transform,
                     child.position_bounds([mapped.lower, mapped.upper], budget, cancel)?,
                 )?
-            } else if matches!(self.source.curve(), Curve::IntersectionCurve(_)) {
+            } else if matches!(self.source.curve()?, Curve::IntersectionCurve(_)) {
                 let original = flatten(
                     piece
                         .source_parameters
@@ -299,7 +325,7 @@ impl PreparedValidatedCurve<'_> {
                 for _ in 0..self.options.max_iterations {
                     budget.charge(1, cancel)?;
                     let tube = match certify(
-                        self.source.curve(),
+                        self.source.curve()?,
                         piece.projection,
                         part,
                         domain,
@@ -333,7 +359,7 @@ impl PreparedValidatedCurve<'_> {
                 position
             } else {
                 validated_curve_position_bounds(
-                    self.source.curve(),
+                    self.source.curve()?,
                     [part.lower, part.upper],
                     budget,
                     cancel,
@@ -364,9 +390,7 @@ impl PreparedValidatedCurve<'_> {
         let range = interval_range(range)?;
         self.check_range(range)?;
         if let Some(child) = &self.mapped {
-            let Curve::TrimmedCurve(wrapper) = self.source.curve() else {
-                return Err(ValidatedGeometryError::InvalidInput);
-            };
+            let (transform, active, orientation) = self.source.mapping()?;
             let mut result: Option<ValidatedCurveJet> = None;
             let mut projection = None;
             for piece in &self.pieces {
@@ -384,11 +408,10 @@ impl PreparedValidatedCurve<'_> {
                     return Err(ValidatedGeometryError::NonSmooth);
                 }
                 projection = Some(piece.projection);
-                let parameter =
-                    reflected_trim_range(wrapper.orientation(), wrapper.entity().range(), part)?;
+                let parameter = reflected_trim_range(orientation, active, part)?;
                 let jet = child.jet([parameter.lower, parameter.upper], budget, cancel)?;
-                let mut jet = transform_prepared_jet(*wrapper.transform(), jet)?;
-                if !wrapper.orientation() {
+                let mut jet = transform_prepared_jet(*transform, jet)?;
+                if !orientation {
                     jet.first = jet.first.map(std::ops::Neg::neg);
                 }
                 result = Some(match result {
@@ -398,9 +421,9 @@ impl PreparedValidatedCurve<'_> {
             }
             return result.ok_or(ValidatedGeometryError::ParameterOutOfRange);
         }
-        if !matches!(self.source.curve(), Curve::IntersectionCurve(_)) {
+        if !matches!(self.source.curve()?, Curve::IntersectionCurve(_)) {
             return validated_curve_piecewise_jet(
-                self.source.curve(),
+                self.source.curve()?,
                 [range.lower, range.upper],
                 budget,
                 cancel,
@@ -429,7 +452,7 @@ impl PreparedValidatedCurve<'_> {
                     .ok_or(ValidatedGeometryError::InvalidInput)?,
             );
             let tube = certify(
-                self.source.curve(),
+                self.source.curve()?,
                 piece.projection,
                 part,
                 parameters,
@@ -467,9 +490,9 @@ impl PreparedValidatedCurve<'_> {
         if !origin.into_iter().chain(direction).all(f64::is_finite) {
             return Err(ValidatedGeometryError::InvalidInput);
         }
-        if self.mapped.is_none() && !matches!(self.source.curve(), Curve::IntersectionCurve(_)) {
+        if self.mapped.is_none() && !matches!(self.source.curve()?, Curve::IntersectionCurve(_)) {
             match validated_curve_projected_jet(
-                self.source.curve(),
+                self.source.curve()?,
                 range,
                 origin,
                 direction,
@@ -494,8 +517,8 @@ impl PreparedValidatedCurve<'_> {
             result.first = result.first + factor * jet.first[axis];
             result.second = result.second + factor * jet.second[axis];
         }
-        if self.mapped.is_none() && matches!(self.source.curve(), Curve::IntersectionCurve(_)) {
-            let (first, second, _) = carriers(self.source.curve())?;
+        if self.mapped.is_none() && matches!(self.source.curve()?, Curve::IntersectionCurve(_)) {
+            let (first, second, _) = carriers(self.source.curve()?)?;
             let direction = direction.map(ValidatedInterval::point);
             let origin = origin.map(ValidatedInterval::point);
             let mut coefficients = [None; 2];
@@ -590,17 +613,14 @@ impl PreparedValidatedCurve<'_> {
         budget.charge(1, cancel)?;
         self.check_range(range)?;
         if let Some(child) = &self.mapped {
-            let Curve::TrimmedCurve(wrapper) = self.source.curve() else {
-                return Err(ValidatedGeometryError::InvalidInput);
-            };
-            let parameter =
-                reflected_trim_range(wrapper.orientation(), wrapper.entity().range(), range)?;
+            let (transform, active, orientation) = self.source.mapping()?;
+            let parameter = reflected_trim_range(orientation, active, range)?;
             let mut child_tolerance = tolerance;
             for _ in 0..self.options.max_iterations {
                 budget.charge(1, cancel)?;
                 let position =
                     child.position_enclosure(parameter, child_tolerance, budget, cancel)?;
-                let position = transform_prepared_position(*wrapper.transform(), position)?;
+                let position = transform_prepared_position(*transform, position)?;
                 if position.into_iter().all(|value| value.width() <= tolerance) {
                     return Ok(position);
                 }
@@ -611,9 +631,9 @@ impl PreparedValidatedCurve<'_> {
             }
             return Err(ValidatedGeometryError::Unresolved);
         }
-        if !matches!(self.source.curve(), Curve::IntersectionCurve(_)) {
+        if !matches!(self.source.curve()?, Curve::IntersectionCurve(_)) {
             return validated_curve_position_bounds(
-                self.source.curve(),
+                self.source.curve()?,
                 [range.lower, range.upper],
                 budget,
                 cancel,
@@ -639,7 +659,7 @@ impl PreparedValidatedCurve<'_> {
                     .ok_or(ValidatedGeometryError::InvalidInput)?,
             );
             let (_, enclosure) = refine_endpoint(
-                self.source.curve(),
+                self.source.curve()?,
                 piece.projection,
                 part,
                 initial,
@@ -683,15 +703,147 @@ pub fn prepared_validated_curve<'a>(
     prepare_validated_curve(curve, range, options, false, 0, budget, cancel)
 }
 
-fn prepare_validated_curve<'a>(
-    curve: &'a Curve,
+/// Consumes an original native curve and retains one immutable prepared branch.
+///
+/// This uses the same continuation, coordinate choices and closed-piece proof
+/// as [`prepared_validated_curve`], not a face/plane substitute. Original guides
+/// and carriers are moved, not cloned. Retained trim operators keep their exact
+/// active intervals, reflection anchors and spatial matrices; their owned basis
+/// boxes are reused. Queries never prepare or select another branch.
+///
+/// The complete owned source is accounted, with the native structural-depth
+/// limit and cancellation/work charges, before proof or capture allocation.
+/// Source payload and proof capacities share `options.max_retained_bytes`.
+/// As with the borrowed API, uniqueness is local to the certified connected
+/// tube; no assertion excludes other components outside it.
+pub fn prepared_validated_curve_owned(
+    curve: Curve,
+    range: [f64; 2],
+    options: &ValidatedCurveOptions,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<PreparedValidatedCurve<'static>, ValidatedGeometryError> {
+    let bytes = curve_owned_bytes(&curve, options.max_retained_bytes, budget, cancel)?;
+    let proof_capacity = options
+        .max_retained_bytes
+        .checked_sub(bytes)
+        .ok_or(ValidatedGeometryError::ResourceLimit)?;
+    if proof_capacity < size_of::<PreparedValidatedCurve<'static>>() {
+        return Err(ValidatedGeometryError::ResourceLimit);
+    }
+    validate_preparation_range(&curve, range, options, false, 0, budget, cancel)?;
+    match curve {
+        Curve::TrimmedCurve(wrapper)
+            if retained_implicit_basis(wrapper.entity().curve(), 1, budget, cancel)? =>
+        {
+            prepare_owned_mapped(wrapper, range, options, 0, budget, cancel)
+        }
+        curve => prepare_owned_leaf(Box::new(curve), Some(bytes), range, options, budget, cancel),
+    }
+}
+
+fn prepare_owned_box(
+    curve: Box<Curve>,
+    range: [f64; 2],
+    options: &ValidatedCurveOptions,
+    depth: usize,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<PreparedValidatedCurve<'static>, ValidatedGeometryError> {
+    validate_preparation_range(&curve, range, options, true, depth, budget, cancel)?;
+    if let Curve::TrimmedCurve(wrapper) = curve.as_ref()
+        && retained_implicit_basis(wrapper.entity().curve(), depth + 1, budget, cancel)?
+    {
+        let Curve::TrimmedCurve(wrapper) = *curve else {
+            return Err(ValidatedGeometryError::InvalidInput);
+        };
+        prepare_owned_mapped(wrapper, range, options, depth, budget, cancel)
+    } else {
+        prepare_owned_leaf(curve, None, range, options, budget, cancel)
+    }
+}
+
+fn prepare_owned_leaf(
+    curve: Box<Curve>,
+    bytes: Option<usize>,
+    range: [f64; 2],
+    options: &ValidatedCurveOptions,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<PreparedValidatedCurve<'static>, ValidatedGeometryError> {
+    let bytes = match bytes {
+        Some(bytes) => bytes,
+        None => curve_owned_bytes(&curve, options.max_retained_bytes, budget, cancel)?,
+    };
+    let mut proof_options = *options;
+    proof_options.max_retained_bytes = options
+        .max_retained_bytes
+        .checked_sub(bytes)
+        .ok_or(ValidatedGeometryError::ResourceLimit)?;
+    if proof_options.max_retained_bytes < size_of::<PreparedValidatedCurve<'static>>() {
+        return Err(ValidatedGeometryError::ResourceLimit);
+    }
+    // Unmapped preparation retains no reference outside its private source
+    // slot. Move the proven pieces unchanged, then replace that borrowed slot
+    // with the very same owned native object, without another root search.
+    let (range, pieces) = {
+        let prepared = prepare_unmapped_curve(&curve, range, &proof_options, budget, cancel)?;
+        (prepared.range, prepared.pieces)
+    };
+    Ok(PreparedValidatedCurve {
+        source: PreparedSource::Owned { curve, bytes },
+        range,
+        pieces,
+        options: *options,
+        mapped: None,
+    })
+}
+
+fn prepare_owned_mapped(
+    wrapper: Processor<TrimmedCurve<Box<Curve>>, Matrix4>,
+    range: [f64; 2],
+    options: &ValidatedCurveOptions,
+    depth: usize,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<PreparedValidatedCurve<'static>, ValidatedGeometryError> {
+    if !(0..4).all(|i| (0..4).all(|j| wrapper.transform()[i][j].is_finite())) {
+        return Err(ValidatedGeometryError::InvalidInput);
+    }
+    let (trim, transform, orientation) = wrapper.into_parts();
+    let (basis, active) = trim.into_parts();
+    let native = reflected_trim_range(orientation, active, interval_range(range)?)?;
+    let child = prepare_owned_box(
+        basis,
+        [native.lower, native.upper],
+        options,
+        depth + 1,
+        budget,
+        cancel,
+    )?;
+    finish_mapped_curve(
+        PreparedSource::Mapped {
+            transform,
+            range: active,
+            orientation,
+        },
+        child,
+        range,
+        options,
+        budget,
+        cancel,
+    )
+}
+
+fn validate_preparation_range(
+    curve: &Curve,
     range: [f64; 2],
     options: &ValidatedCurveOptions,
     conventional_extension: bool,
     depth: usize,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<PreparedValidatedCurve<'a>, ValidatedGeometryError> {
+) -> Result<(), ValidatedGeometryError> {
     budget.charge(1, cancel)?;
     if depth > crate::geometry::MAX_NATIVE_GEOMETRY_NESTING {
         return Err(ValidatedGeometryError::ResourceLimit);
@@ -711,11 +863,6 @@ fn prepare_validated_curve<'a>(
     if options.max_retained_bytes < size_of::<PreparedValidatedCurve<'_>>() {
         return Err(ValidatedGeometryError::ResourceLimit);
     }
-    // Range and numerical proposal methods can recurse through native sources;
-    // reject excessive source nesting before invoking any of those methods.
-    if depth == 0 {
-        curve_owned_bytes(curve, usize::MAX, budget, cancel)?;
-    }
     let native = curve
         .try_range_tuple()
         .ok_or(ValidatedGeometryError::InvalidInput)?;
@@ -727,11 +874,46 @@ fn prepare_validated_curve<'a>(
     {
         return Err(ValidatedGeometryError::ParameterOutOfRange);
     }
+    Ok(())
+}
+
+fn prepare_validated_curve<'a>(
+    curve: &'a Curve,
+    range: [f64; 2],
+    options: &ValidatedCurveOptions,
+    conventional_extension: bool,
+    depth: usize,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<PreparedValidatedCurve<'a>, ValidatedGeometryError> {
+    // Guard native recursive range/proposal evaluation before entering it.
+    if depth == 0 {
+        curve_owned_bytes(curve, usize::MAX, budget, cancel)?;
+    }
+    validate_preparation_range(
+        curve,
+        range,
+        options,
+        conventional_extension,
+        depth,
+        budget,
+        cancel,
+    )?;
     if let Curve::TrimmedCurve(wrapper) = curve
         && retained_implicit_basis(wrapper.entity().curve(), depth + 1, budget, cancel)?
     {
         return prepare_mapped_curve(curve, range, options, depth, budget, cancel);
     }
+    prepare_unmapped_curve(curve, range, options, budget, cancel)
+}
+
+fn prepare_unmapped_curve<'a>(
+    curve: &'a Curve,
+    range: [f64; 2],
+    options: &ValidatedCurveOptions,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<PreparedValidatedCurve<'a>, ValidatedGeometryError> {
     if !matches!(curve, Curve::IntersectionCurve(_)) {
         let jet = validated_curve_piecewise_jet(curve, range, budget, cancel)?;
         budget.charge(1, cancel)?;
@@ -973,6 +1155,29 @@ fn prepare_mapped_curve<'a>(
         budget,
         cancel,
     )?;
+    finish_mapped_curve(
+        PreparedSource::Mapped {
+            transform: *wrapper.transform(),
+            range: wrapper.entity().range(),
+            orientation: wrapper.orientation(),
+        },
+        child,
+        range,
+        options,
+        budget,
+        cancel,
+    )
+}
+
+fn finish_mapped_curve<'a>(
+    source: PreparedSource<'a>,
+    child: PreparedValidatedCurve<'a>,
+    range: [f64; 2],
+    options: &ValidatedCurveOptions,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<PreparedValidatedCurve<'a>, ValidatedGeometryError> {
+    let (transform, active, orientation) = source.mapping()?;
     let overhead = size_of::<PreparedValidatedCurve<'_>>()
         .checked_add(child.retained_bytes())
         .ok_or(ValidatedGeometryError::ResourceLimit)?;
@@ -993,7 +1198,7 @@ fn prepare_mapped_curve<'a>(
     }
     for index in 0..child.pieces.len() {
         budget.charge(1, cancel)?;
-        let child_index = if wrapper.orientation() {
+        let child_index = if orientation {
             index
         } else {
             child.pieces.len() - 1 - index
@@ -1002,21 +1207,18 @@ fn prepare_mapped_curve<'a>(
         let end = if index + 1 == child.pieces.len() {
             range[1]
         } else {
-            let boundary = if wrapper.orientation() {
+            let boundary = if orientation {
                 piece.parameter[1]
             } else {
                 piece.parameter[0]
             };
-            let mapped = reflected_trim_range(
-                wrapper.orientation(),
-                wrapper.entity().range(),
-                ValidatedInterval::point(boundary),
-            )?;
+            let mapped =
+                reflected_trim_range(orientation, active, ValidatedInterval::point(boundary))?;
             if mapped.upper <= start || mapped.lower >= range[1] {
                 continue;
             }
             if mapped.lower != mapped.upper {
-                let next = if wrapper.orientation() {
+                let next = if orientation {
                     child_index + 1
                 } else {
                     child_index - 1
@@ -1035,17 +1237,13 @@ fn prepare_mapped_curve<'a>(
             budget.charge(1, cancel)?;
             length -= 1;
             let (part, subdivision) = pending[length];
-            let mapped = reflected_trim_range(
-                wrapper.orientation(),
-                wrapper.entity().range(),
-                interval_range(part)?,
-            )?;
+            let mapped = reflected_trim_range(orientation, active, interval_range(part)?)?;
             let attempt = child
                 .jet([mapped.lower, mapped.upper], budget, cancel)
-                .and_then(|jet| transform_prepared_jet(*wrapper.transform(), jet));
+                .and_then(|jet| transform_prepared_jet(*transform, jet));
             match attempt {
                 Ok(mut jet) => {
-                    if !wrapper.orientation() {
+                    if !orientation {
                         jet.first = jet.first.map(std::ops::Neg::neg);
                     }
                     reserve_native_vec(
@@ -1087,7 +1285,7 @@ fn prepare_mapped_curve<'a>(
     }
     budget.charge(1, cancel)?;
     Ok(PreparedValidatedCurve {
-        source: PreparedSource::Borrowed(curve),
+        source,
         range,
         pieces,
         options: *options,
@@ -1288,7 +1486,7 @@ fn clone_coordinate_guide(
                 clone_coordinate_guide(wrapper.entity().curve(), depth + 1, budget, cancel)?;
             budget.charge(1, cancel)?;
             Ok(Curve::TrimmedCurve(wrapper.map_ref(|trim| {
-                crate::TrimmedCurve::new(Box::new(basis), trim.range())
+                TrimmedCurve::new(Box::new(basis), trim.range())
             })))
         }
         _ => Ok(curve.clone()),
@@ -1463,37 +1661,30 @@ fn refine_endpoint(
     for _ in 0..options.max_iterations {
         budget.charge(1, cancel)?;
         let tube = certify(curve, projection, parameter, domain, budget, cancel)?;
-        let center = domain.map(ValidatedInterval::midpoint);
-        let values = system(
-            curve,
-            projection,
-            parameter,
-            center.map(ValidatedInterval::point),
-            budget,
-            cancel,
-        )?
-        .value;
-        let correction = matrix_vector(tube.inverse, values);
-        let delta = std::array::from_fn(|i| domain[i] - ValidatedInterval::point(center[i]));
-        let error = interval_matrix_vector(tube.defect, delta);
+        // A successful Krawczyk inclusion already bounds this same exact root.
+        // Keep a relative interior margin when contracting: reducing an affine
+        // coordinate to one ulp while a nonlinear coordinate still converges
+        // can make the next strict inclusion fail solely on arithmetic noise.
+        // The new box contains the proven image and remains inside the previous
+        // uniqueness box; the next iteration independently certifies it again.
         domain = std::array::from_fn(|i| {
-            let contraction = ValidatedInterval::point(center[i]) - correction[i] + error[i];
-            // Inclusion above guarantees nonempty intersection.
-            domain[i].intersection(contraction).unwrap_or(domain[i])
+            let padding = domain[i].width() * 0.0625;
+            ValidatedInterval {
+                lower: (tube.rooted_domain[i].lower - padding)
+                    .next_down()
+                    .max(domain[i].lower),
+                upper: (tube.rooted_domain[i].upper + padding)
+                    .next_up()
+                    .min(domain[i].upper),
+            }
         });
-        let narrowed = system(curve, projection, parameter, domain, budget, cancel)?;
-        let position = intersect3(narrowed.surfaces[0].position, narrowed.surfaces[1].position)?;
+        let position = intersect3(tube.surfaces[0].position, tube.surfaces[1].position)?;
         if position
             .into_iter()
             .all(|interval| interval.width() <= options.endpoint_tolerance)
         {
             return Ok((domain, position));
         }
-        // Preserve strict inclusion when rounding stops improving a small box.
-        domain = domain.map(|interval| ValidatedInterval {
-            lower: interval.lower.next_down(),
-            upper: interval.upper.next_up(),
-        });
     }
     Err(ValidatedGeometryError::Unresolved)
 }
@@ -2822,6 +3013,223 @@ mod continuation_regressions {
                 &mut ValidatedGeometryBudget::new(0),
                 &AtomicBool::new(false)
             ),
+            Err(ValidatedGeometryError::ResourceLimit)
+        ));
+    }
+
+    #[test]
+    fn owned_original_nonlinear_binding_preserves_connected_branch_and_direct_uvs() {
+        // A genuine two-surface intersection, not a face/plane replacement:
+        // S(u,v) = (2u-1, 2v-1, (2u-1)^2), intersected with z=1/4.
+        // There are two components x=+/-1/2. The original guide selects +1/2;
+        // the retained connected tube must never reselect the other component.
+        let controls = [(-1.0, 1.0), (0.0, -1.0), (1.0, 1.0)]
+            .into_iter()
+            .map(|(x, z)| vec![Vector4::new(x, -1.0, z, 1.0), Vector4::new(x, 1.0, z, 1.0)])
+            .collect();
+        let curved = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+            (KnotVector::bezier_knot(2), KnotVector::bezier_knot(1)),
+            controls,
+        )));
+        let plane = Surface::Plane(Plane::new(
+            Point3::new(-1.0, -1.0, 0.25),
+            Point3::new(1.0, -1.0, 0.25),
+            Point3::new(-1.0, 1.0, 0.25),
+        ));
+        for (u, x) in [(0.25, -0.5), (0.75, 0.5)] {
+            for v in [0.25, 0.5, 0.75] {
+                let expected = Point3::new(x, 2.0 * v - 1.0, 0.25);
+                assert_eq!(curved.subs(u, v), expected);
+                assert_eq!(plane.subs(u, v), expected);
+            }
+        }
+        let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+            Box::new(curved),
+            Box::new(plane),
+            Box::new(Curve::Line(Line(
+                Point3::new(0.5, -0.5, 0.25),
+                Point3::new(0.5, 0.5, 0.25),
+            ))),
+            None,
+            None,
+        ));
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(8_000_000);
+        let options = ValidatedCurveOptions::default();
+        let borrowed =
+            prepared_validated_curve(&curve, [0.0, 1.0], &options, &mut budget, &cancel).unwrap();
+        let owned: PreparedValidatedCurve<'static> = prepared_validated_curve_owned(
+            curve.clone(),
+            [0.0, 1.0],
+            &options,
+            &mut budget,
+            &cancel,
+        )
+        .unwrap();
+        for prepared in [&borrowed, &owned] {
+            // Each carrier's actual UV trace is (3/4, 1/4+t/2).
+            // Check whole-piece UV coverage as well as independent world P/D;
+            // a nearby component or a copied guide cannot satisfy this receipt.
+            for piece in prepared.pieces() {
+                let parameters = piece.source_parameters.expect("Original carrier UV tube");
+                for carrier in parameters {
+                    assert!(carrier[0].lower > 0.5 && carrier[0].lower <= 0.75);
+                    assert!(carrier[0].upper >= 0.75);
+                    for t in piece.parameter {
+                        let v = 0.25 + 0.5 * t;
+                        assert!(carrier[1].lower <= v && v <= carrier[1].upper);
+                    }
+                }
+            }
+            for parameter in [0.0, 0.125, 0.5, 0.875, 1.0] {
+                let point = prepared.evaluate(parameter, &mut budget, &cancel).unwrap();
+                for (axis, expected) in [0.5, parameter - 0.5, 0.25].into_iter().enumerate() {
+                    assert!(
+                        point.error[axis].lower <= expected && expected <= point.error[axis].upper
+                    );
+                    assert!(point.error[axis].width() <= options.endpoint_tolerance);
+                }
+            }
+            let image = prepared
+                .position_bounds([0.125, 0.875], &mut budget, &cancel)
+                .unwrap();
+            assert!(image[0].lower > 0.0);
+            assert!(image[1].lower <= -0.375 && image[1].upper >= 0.375);
+            let jet = prepared.jet([0.25, 0.75], &mut budget, &cancel).unwrap();
+            for (axis, derivative) in [0.0, 1.0, 0.0].into_iter().enumerate() {
+                assert!(jet.first[axis].lower <= derivative && derivative <= jet.first[axis].upper);
+                assert!(jet.second[axis].lower <= 0.0 && jet.second[axis].upper >= 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn owned_original_nested_trim_reuses_the_same_reflections_and_pose() {
+        let mut inner = Processor::with_transform(
+            TrimmedCurve::new(Box::new(plane_intersection(false)), (0.125, 0.875)),
+            Matrix4::from_translation(crate::Vector3::new(2.0, 3.0, 5.0)),
+        );
+        inner.invert();
+        let mut outer = Processor::with_transform(
+            TrimmedCurve::new(Box::new(Curve::TrimmedCurve(inner)), (0.25, 0.75)),
+            Matrix4::from_nonuniform_scale(2.0, 3.0, 4.0),
+        );
+        outer.invert();
+        let curve = Curve::TrimmedCurve(outer);
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(4_000_000);
+        let options = ValidatedCurveOptions::default();
+        let owned = prepared_validated_curve_owned(
+            curve.clone(),
+            [0.25, 0.75],
+            &options,
+            &mut budget,
+            &cancel,
+        )
+        .unwrap();
+        assert!(owned.retained_bytes() <= options.max_retained_bytes);
+        let basis = owned.mapped_basis().unwrap().mapped_basis().unwrap();
+        for parameter in [0.25, 0.5, 0.75] {
+            let native = basis.native_curve().unwrap().subs(parameter);
+            let point = basis.evaluate(parameter, &mut budget, &cancel).unwrap();
+            for (axis, expected) in [0.0, parameter, 0.0].into_iter().enumerate() {
+                assert!((native[axis] - expected).abs() < 1.0e-9);
+                assert!(point.error[axis].lower <= expected && expected <= point.error[axis].upper);
+            }
+        }
+        assert!(matches!(
+            basis.evaluate(0.125, &mut budget, &cancel),
+            Err(ValidatedGeometryError::ParameterOutOfRange)
+        ));
+        // Both original inverse anchors sum to one, so the two reflections
+        // compose to t. The two spatial maps give (4, 9+3t, 20).
+        for parameter in [0.25, 0.375, 0.5, 0.75] {
+            let native = curve.subs(parameter);
+            let point = owned.evaluate(parameter, &mut budget, &cancel).unwrap();
+            for (axis, expected) in [4.0, 9.0 + 3.0 * parameter, 20.0].into_iter().enumerate() {
+                assert!((native[axis] - expected).abs() < 1.0e-9);
+                assert!(point.error[axis].lower <= expected && expected <= point.error[axis].upper);
+            }
+        }
+        let jet = owned.jet([0.25, 0.75], &mut budget, &cancel).unwrap();
+        for (axis, derivative) in [0.0, 3.0, 0.0].into_iter().enumerate() {
+            assert!(jet.first[axis].lower <= derivative && derivative <= jet.first[axis].upper);
+            assert!(jet.second[axis].lower <= 0.0 && jet.second[axis].upper >= 0.0);
+        }
+        assert!(
+            owned
+                .is_smooth_on([0.25, 0.75], &mut budget, &cancel)
+                .unwrap()
+        );
+        assert!(matches!(
+            owned.evaluate(0.125, &mut budget, &cancel),
+            Err(ValidatedGeometryError::ParameterOutOfRange)
+        ));
+    }
+
+    #[test]
+    fn owned_original_binding_refuses_nonunique_roots_and_resource_exhaustion() {
+        // Coincident xy carriers and the guide's y=t plane leave every x a
+        // solution: two independent native surface points witness nonuniqueness.
+        let plane = Plane::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
+        assert_eq!(plane.subs(0.0, 0.5), Point3::new(0.0, 0.5, 0.0));
+        assert_eq!(plane.subs(1.0, 0.5), Point3::new(1.0, 0.5, 0.0));
+        let options = ValidatedCurveOptions::default();
+        let cancel = AtomicBool::new(false);
+        assert!(matches!(
+            prepared_validated_curve_owned(
+                plane_intersection(true),
+                [0.0, 1.0],
+                &options,
+                &mut ValidatedGeometryBudget::new(1_000_000),
+                &cancel,
+            ),
+            Err(ValidatedGeometryError::Singular | ValidatedGeometryError::NonTransverse)
+        ));
+        assert!(matches!(
+            prepared_validated_curve_owned(
+                plane_intersection(false),
+                [0.0, 1.0],
+                &options,
+                &mut ValidatedGeometryBudget::new(0),
+                &cancel,
+            ),
+            Err(ValidatedGeometryError::ResourceLimit)
+        ));
+        assert!(matches!(
+            prepared_validated_curve_owned(
+                plane_intersection(false),
+                [0.0, 1.0],
+                &options,
+                &mut ValidatedGeometryBudget::new(1_000_000),
+                &AtomicBool::new(true),
+            ),
+            Err(ValidatedGeometryError::Cancelled)
+        ));
+        let curve = plane_intersection(false);
+        let mut budget = ValidatedGeometryBudget::new(1_000_000);
+        let source_bytes = curve_owned_bytes(&curve, usize::MAX, &mut budget, &cancel).unwrap();
+        let too_small = ValidatedCurveOptions {
+            max_retained_bytes: source_bytes,
+            ..options
+        };
+        assert!(matches!(
+            prepared_validated_curve_owned(curve, [0.0, 1.0], &too_small, &mut budget, &cancel,),
+            Err(ValidatedGeometryError::ResourceLimit)
+        ));
+        let mut deep = plane_intersection(false);
+        for _ in 0..=crate::geometry::MAX_NATIVE_GEOMETRY_NESTING {
+            deep = Curve::TrimmedCurve(Processor::new(TrimmedCurve::new(
+                Box::new(deep),
+                (0.0, 1.0),
+            )));
+        }
+        assert!(matches!(
+            prepared_validated_curve_owned(deep, [0.0, 1.0], &options, &mut budget, &cancel,),
             Err(ValidatedGeometryError::ResourceLimit)
         ));
     }

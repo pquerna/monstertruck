@@ -16,6 +16,14 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- STEP `SURFACE_CURVE` and `SEAM_CURVE` retain their original explicit leader,
+  kind, declared master and associated geometry, including closed restrictions.
+  Two associated surfaces alone no longer turn an explicit source into a
+  projected intersection. Missing declared PCURVE masters fail conversion.
+  Leader parameter-map identity does not certify preferred-master equivalence:
+  callers still need whole original PCURVE/surface correspondence evidence.
+  Genuine `INTERSECTION_CURVE` remains implicit through nested restrictions and
+  reports unavailable leader correspondence until validated continuation.
 - Validated UV geometry follows native `Matrix3<Point2>` affine upper-row
   semantics rather than inventing perspective division. Exact endpoints,
   regularity, Taylor enclosures and scalar projections preserve original
@@ -135,6 +143,17 @@ monstertruck 0.4.0.
   Samples use the prepared binding, not legacy projected endpoint recovery.
   Singular, nontransverse, nonsmooth or unresolved cells refuse explicitly;
   internal source knots below C1 are not presumed geometrically smooth.
+  `prepared_validated_curve_owned` consumes the original native curve for a
+  reusable lifetime-independent binding, preserving the same selected branch,
+  direct carrier UV tubes, trim reflections and spatial matrices. Capture
+  accounts owned payload and proof capacities together before allocation.
+  Point, whole-image and derivative queries reuse that binding without
+  cloning carriers or reselecting roots. Tube-local uniqueness neither
+  excludes other components nor replaces original trim-incidence proofs.
+  A caller-certified whole-boundary enclosure from those same retained branches
+  can feed the existing native face-ruling bound without preparing roots again.
+  This conditional theorem does not certify supplied intervals' incidence or
+  boundary completeness.
 - Bounded native trim domains retain declared coedges, seam branches, source
   vertices and joint/pole strata. Exact dyadic affine and tensor-boundary
   identities provide UV routes for ordinary rational patches without fitting.

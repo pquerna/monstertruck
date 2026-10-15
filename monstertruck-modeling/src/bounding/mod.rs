@@ -86,7 +86,10 @@ use crate::*;
 use std::sync::atomic::AtomicBool;
 
 mod validated;
-pub use validated::{validated_face_bounding_box, validated_inverse_affine_point};
+pub use validated::{
+    validated_face_bounding_box, validated_face_bounding_box_with_boundary_enclosure,
+    validated_inverse_affine_point,
+};
 
 /// How much an analytic sphere's axis-aligned bounding box exceeds the sphere:
 /// `(2r)^3 / (4/3 pi r^3) = 6 / pi`, independent of the radius.

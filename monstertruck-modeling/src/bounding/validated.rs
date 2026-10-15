@@ -155,6 +155,32 @@ pub fn validated_face_bounding_box(
 ) -> Result<BoundingBox<Point3>, ValidatedGeometryError> {
     budget.charge(1, cancel)?;
     let boundary = boundary_box(face, budget, cancel)?;
+    validated_face_bounding_box_with_boundary_enclosure(face, boundary, budget, cancel)
+}
+
+/// Applies the native compact-face ruling theorem to a caller-certified boundary.
+///
+/// # Required geometric preconditions
+///
+/// The caller must already have admitted the compact face topology and proved
+/// that `boundary` encloses the WHOLE original actual oriented face boundary,
+/// including every wire and edge, in this face's native spatial units. For
+/// implicit edges this must be the whole-image enclosure of the same retained
+/// original prepared branches, not fresh independently selected roots, sampled
+/// points, polygon guides, mesh vertices or an unproved UV candidate box.
+///
+/// This function validates finite ordered intervals and applies the same plane,
+/// extrusion or straight-revolution theorem as [`validated_face_bounding_box`].
+/// It does not validate arbitrary supplied intervals' boundary incidence,
+/// completeness, orientation or correspondence. It never prepares edge roots.
+pub fn validated_face_bounding_box_with_boundary_enclosure(
+    face: &Face,
+    boundary: [Interval; 3],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<BoundingBox<Point3>, ValidatedGeometryError> {
+    budget.charge(1, cancel)?;
+    let boundary = finite(boundary)?;
     let bounds = face.with_surface(|surface| -> Result<[Interval; 3], ValidatedGeometryError> {
         match surface {
             Surface::Plane(_) => Ok(boundary),
@@ -290,6 +316,125 @@ mod tests {
         let bounds = validated_face_bounding_box(&face, &mut budget, &cancel).expect("planar hull");
         assert_eq!(bounds.min(), Point3::new(0.0, 0.0, 8.0));
         assert_eq!(bounds.max(), Point3::new(2.0, 3.0, 8.0));
+    }
+
+    #[test]
+    fn retained_original_implicit_boundary_encloses_the_face_without_repreparing_roots() {
+        let points = [
+            Point3::new(0.0, 0.0, 8.0),
+            Point3::new(2.0, 0.0, 8.0),
+            Point3::new(2.0, 3.0, 8.0),
+            Point3::new(0.0, 3.0, 8.0),
+        ];
+        let vertices = points.map(Vertex::new);
+        let carrier = Plane::new(
+            Point3::new(0.0, 0.0, 8.0),
+            Point3::new(1.0, 0.0, 8.0),
+            Point3::new(0.0, 1.0, 8.0),
+        );
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(4_000_000);
+        let mut prepared = Vec::new();
+        let mut edges = Vec::new();
+        for i in 0..4 {
+            let next = (i + 1) % 4;
+            let side = Plane::new(
+                points[i],
+                points[next],
+                Point3::new(points[i].x, points[i].y, points[i].z + 1.0),
+            );
+            let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+                Box::new(Surface::Plane(carrier)),
+                Box::new(Surface::Plane(side)),
+                Box::new(Curve::Line(Line(points[i], points[next]))),
+                None,
+                None,
+            ));
+            prepared.push(
+                prepared_validated_curve_owned(
+                    curve.clone(),
+                    [0.0, 1.0],
+                    &ValidatedCurveOptions::default(),
+                    &mut budget,
+                    &cancel,
+                )
+                .unwrap(),
+            );
+            edges.push(Edge::new(&vertices[i], &vertices[next], curve));
+        }
+        let face = Face::new(vec![Wire::from(edges)], Surface::Plane(carrier));
+        let mut boundary: Option<[Interval; 3]> = None;
+        for binding in &prepared {
+            let image = binding
+                .position_bounds([0.0, 1.0], &mut budget, &cancel)
+                .unwrap();
+            boundary = Some(match boundary {
+                None => image,
+                Some(previous) => std::array::from_fn(|axis| previous[axis].hull(image[axis])),
+            });
+        }
+        // One theorem charge cannot prepare even one implicit edge: the bound
+        // must consume the already certified complete boundary, not reselect it.
+        let bounds = validated_face_bounding_box_with_boundary_enclosure(
+            &face,
+            boundary.unwrap(),
+            &mut ValidatedGeometryBudget::new(1),
+            &cancel,
+        )
+        .unwrap();
+        for x in [0.0, 0.5, 2.0] {
+            for y in [0.0, 1.5, 3.0] {
+                let actual = carrier.subs(x, y);
+                assert!(bounds.min().x <= actual.x && actual.x <= bounds.max().x);
+                assert!(bounds.min().y <= actual.y && actual.y <= bounds.max().y);
+                assert_eq!(bounds.min().z, actual.z);
+                assert_eq!(bounds.max().z, actual.z);
+            }
+        }
+        assert!(bounds.min().x >= -1.0e-8 && bounds.max().x <= 2.0 + 1.0e-8);
+        assert!(bounds.min().y >= -1.0e-8 && bounds.max().y <= 3.0 + 1.0e-8);
+        for bad in [
+            Interval {
+                lower: 1.0,
+                upper: -1.0,
+            },
+            Interval {
+                lower: f64::NAN,
+                upper: 1.0,
+            },
+            Interval {
+                lower: 0.0,
+                upper: f64::INFINITY,
+            },
+        ] {
+            assert!(matches!(
+                validated_face_bounding_box_with_boundary_enclosure(
+                    &face,
+                    [bad; 3],
+                    &mut ValidatedGeometryBudget::new(1),
+                    &cancel,
+                ),
+                Err(ValidatedGeometryError::ConditioningFailure)
+            ));
+        }
+        assert!(matches!(
+            validated_face_bounding_box_with_boundary_enclosure(
+                &face,
+                boundary.unwrap(),
+                &mut ValidatedGeometryBudget::new(0),
+                &cancel,
+            ),
+            Err(ValidatedGeometryError::ResourceLimit)
+        ));
+        assert!(matches!(
+            validated_face_bounding_box_with_boundary_enclosure(
+                &face,
+                boundary.unwrap(),
+                &mut ValidatedGeometryBudget::new(1),
+                &AtomicBool::new(true),
+            ),
+            Err(ValidatedGeometryError::Cancelled)
+        ));
     }
 
     #[test]

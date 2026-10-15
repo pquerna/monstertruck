@@ -14,6 +14,9 @@ impl<C> TrimmedCurve<C> {
     /// Returns the trim range as `(start, end)`.
     #[inline(always)]
     pub const fn range(&self) -> (f64, f64) { self.range }
+    /// Consumes the wrapper without applying or discarding its parameter range.
+    #[inline(always)]
+    pub fn into_parts(self) -> (C, (f64, f64)) { (self.curve, self.range) }
 }
 
 impl<C: ParametricCurveTrait> ParametricCurveTrait for TrimmedCurve<C> {

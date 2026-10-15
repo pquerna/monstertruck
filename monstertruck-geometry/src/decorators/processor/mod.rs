@@ -35,6 +35,10 @@ impl<E, T: One> Processor<E, T> {
     #[inline(always)]
     pub const fn orientation(&self) -> bool { self.orientation }
 
+    /// Consumes the processor, retaining its entity, transform and orientation.
+    #[inline(always)]
+    pub fn into_parts(self) -> (E, T, bool) { (self.entity, self.transform, self.orientation) }
+
     #[inline(always)]
     fn sign(&self) -> f64 {
         match self.orientation {

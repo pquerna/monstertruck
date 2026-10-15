@@ -354,15 +354,6 @@ impl EdgeCurve {
                         )))
                     }))
                 };
-                let associated_surface = |entry: &PcurveOrSurface| -> Result<
-                    step_geometry::Surface,
-                    StepConvertingError,
-                > {
-                    match entry {
-                        PcurveOrSurface::Pcurve(x) => (&x.basis_surface).try_into(),
-                        PcurveOrSurface::Surface(x) => x.as_ref().try_into(),
-                    }
-                };
                 let associated_geometry = c
                     .associated_geometry
                     .iter()
@@ -396,36 +387,12 @@ impl EdgeCurve {
                         step_geometry::SurfaceCurveRepresentation::ParameterCurve1
                     }
                 };
-                if closed_range.is_none()
-                    && associated_geometry.len() >= 2
-                    && associated_geometry.iter().all(|entry| {
-                        matches!(
-                            entry,
-                            step_geometry::SurfaceCurveAssociatedGeometry::Surface(_)
-                        )
-                    })
-                {
-                    let surface0 = c
-                        .associated_geometry
-                        .first()
-                        .ok_or("The 0-indexed associated geometry is missing.")?;
-                    let surface1 = c
-                        .associated_geometry
-                        .get(1)
-                        .ok_or("The 1-indexed associated geometry is missing.")?;
-                    Curve3D::IntersectionCurve(geom::IntersectionCurve::new(
-                        Box::new(associated_surface(surface0)?),
-                        Box::new(associated_surface(surface1)?),
-                        Box::new(leader),
-                    ))
-                } else {
-                    Curve3D::SurfaceCurve(step_geometry::SurfaceCurve3D::new(
-                        kind,
-                        Box::new(leader),
-                        associated_geometry,
-                        master_representation,
-                    ))
-                }
+                Curve3D::SurfaceCurve(step_geometry::SurfaceCurve3D::new(
+                    kind,
+                    Box::new(leader),
+                    associated_geometry,
+                    master_representation,
+                ))
             }
         };
         if !same_sense {

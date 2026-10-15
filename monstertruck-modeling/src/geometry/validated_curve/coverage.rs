@@ -84,7 +84,7 @@ pub fn validated_face_plane_coverage(
         let mut matches = Vec::new();
         for candidate in candidates {
             budget.charge(1, cancel)?;
-            let Ok((s0, s1, _)) = carriers(candidate.source.curve()) else {
+            let Ok((s0, s1, _)) = candidate.source.curve().and_then(carriers) else {
                 continue;
             };
             let index = if matches!(s1, Surface::Plane(other) if other == plane)
@@ -187,7 +187,7 @@ fn candidate_covers(
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, ValidatedGeometryError> {
-    let (_, _, leader) = carriers(candidate.source.curve())?;
+    let (_, _, leader) = carriers(candidate.source.curve()?)?;
     let plane_parameters = plane_parameters(plane, position)?;
     let source = [interval_range(cell[0])?, interval_range(cell[1])?];
     let q = if source_index == 0 {
