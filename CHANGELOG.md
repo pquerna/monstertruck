@@ -22,6 +22,8 @@ monstertruck 0.4.0.
   and retains the original projection. Complete subpath derivatives, outer
   brackets, shared-root uniqueness and whole-cell coverage remain mandatory;
   depth, iteration, work, storage and cancellation limits are unchanged.
+  Searches retain nested proved root images and stop when their hull cannot
+  contain the requested cell, instead of repeating impossible contractions.
 - Native face/plane coverage accepts explicit original-coedge endpoint bindings
   after the prepared candidate slice. Optional bounded endpoint closure certifies
   the actual original trim roots and unique transverse continuation, including

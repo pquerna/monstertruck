@@ -108,6 +108,10 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   and root-image contraction use the existing depth, iteration, work and
   cancellation limits; full-span monotonicity, actual outer root brackets and
   fresh common-root/whole-cell uniqueness remain mandatory.
+  Nested root-image domains are reused, and an excluded query immediately
+  returns to original-cell subdivision. Each paired contraction attempts the
+  full proof; once its strict path axis is available, derivative-only refinement
+  stops rather than exhausting the iteration allowance.
   Interpolated coordinate residuals retain their common parameter coefficient
   before interval evaluation, including when endpoint normals differ.
 

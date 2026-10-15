@@ -888,61 +888,42 @@ fn joined_neighborhoods_cover(
     mut diagnostic: Option<&mut JunctionDiagnostics<'_>>,
 ) -> Result<bool, ValidatedGeometryError> {
     let (budget, cancel) = execution;
-    if joined_paths_cover(
-        first,
-        second,
-        coordinate,
-        *cell.domain,
-        *cell.position,
-        (&mut *budget, cancel),
-        diagnostic.as_deref_mut(),
-    )? {
+    if matches!(
+        joined_paths_cover(
+            first,
+            second,
+            coordinate,
+            *cell.domain,
+            *cell.position,
+            (&mut *budget, cancel),
+            diagnostic.as_deref_mut(),
+        )?,
+        JoinedPaths::Covered
+    ) {
         return Ok(true);
     }
     let (first_curve, first_original, first_back) = first;
     let (second_curve, second_original, second_back) = second;
-    let first_box = flatten(
+    let mut first_domain = flatten(
         first_original
             .source_parameters
             .ok_or(ValidatedGeometryError::InvalidInput)?,
     );
-    let mut second_box = flatten(
+    let mut second_domain = flatten(
         second_original
             .source_parameters
             .ok_or(ValidatedGeometryError::InvalidInput)?,
     );
-    if cell.swap_second {
-        second_box = [second_box[2], second_box[3], second_box[0], second_box[1]];
-    }
-    for axis in 0..4 {
-        let separation = if first_box[axis].upper < second_box[axis].lower {
-            Some([first_box[axis].upper, second_box[axis].lower])
-        } else if second_box[axis].upper < first_box[axis].lower {
-            Some([second_box[axis].upper, first_box[axis].lower])
-        } else {
-            None
-        };
-        if let Some(bounds) = separation {
-            // Both actual endpoint roots already satisfy the shared coordinate.
-            // Disjoint old tubes therefore cannot select one common original
-            // root, regardless of how short a subpath is subsequently proved.
-            if let Some(diagnostic) = diagnostic.as_deref_mut() {
-                diagnostic.record(
-                    ValidatedPlaneJunctionRejection::SharedRootUniqueness,
-                    Some(axis as u8),
-                    Some(bounds),
-                    None,
-                );
-            }
-            return Ok(false);
-        }
-    }
     let mut first_range = first_original.parameter;
     let mut second_range = second_original.parameter;
     let depth = first_curve
         .options
         .max_depth
         .min(second_curve.options.max_depth);
+    let iterations = first_curve
+        .options
+        .max_iterations
+        .min(second_curve.options.max_iterations);
     for _ in 0..depth {
         budget.charge(2, cancel)?;
         let first_middle = first_range[0] * 0.5 + first_range[1] * 0.5;
@@ -956,76 +937,152 @@ fn joined_neighborhoods_cover(
         }
         first_range[usize::from(!first_back)] = first_middle;
         second_range[usize::from(!second_back)] = second_middle;
-        let Some(first_piece) =
-            certified_endpoint_subpath(first_curve, first_original, first_range, budget, cancel)?
-        else {
-            continue;
-        };
-        let Some(second_piece) = certified_endpoint_subpath(
-            second_curve,
-            second_original,
-            second_range,
-            budget,
-            cancel,
-        )?
-        else {
-            continue;
-        };
-        let first_box = flatten(
-            first_piece
-                .source_parameters
-                .ok_or(ValidatedGeometryError::InvalidInput)?,
-        );
-        let mut second_box = flatten(
-            second_piece
-                .source_parameters
-                .ok_or(ValidatedGeometryError::InvalidInput)?,
-        );
-        if cell.swap_second {
-            second_box = [second_box[2], second_box[3], second_box[0], second_box[1]];
-        }
-        let domain = std::array::from_fn(|i| first_box[i].hull(second_box[i]));
-        if !(0..4).all(|i| {
-            domain[i].lower <= cell.query[i].lower && cell.query[i].upper <= domain[i].upper
-        }) {
-            continue;
-        }
-        if joined_paths_cover(
-            (first_curve, &first_piece, first_back),
-            (second_curve, &second_piece, second_back),
-            coordinate,
-            domain,
-            *cell.position,
-            (&mut *budget, cancel),
-            diagnostic.as_deref_mut(),
-        )? {
-            return Ok(true);
+        for _ in 0..iterations {
+            budget.charge(1, cancel)?;
+            // Every later domain is nested inside these known root enclosures.
+            // If their hull cannot contain this query, no shorter endpoint
+            // subpath can repair it: let the original cell subdivide instead.
+            let Some(domain) = junction_domain(
+                &first_domain,
+                &second_domain,
+                cell,
+                diagnostic.as_deref_mut(),
+            ) else {
+                return Ok(false);
+            };
+            let Some(first) = certified_endpoint_subpath(
+                first_curve,
+                first_original,
+                first_range,
+                first_domain,
+                budget,
+                cancel,
+            )?
+            else {
+                break;
+            };
+            let Some(second) = certified_endpoint_subpath(
+                second_curve,
+                second_original,
+                second_range,
+                second_domain,
+                budget,
+                cancel,
+            )?
+            else {
+                break;
+            };
+            let stationary =
+                first.next_domain == first_domain && second.next_domain == second_domain;
+            // These padded images already enclose the SAME selected roots over
+            // the full current spans. Carry them forward, never reset to the
+            // original coarse tubes, even when the next operation halves a span.
+            first_domain = first.next_domain;
+            second_domain = second.next_domain;
+            match joined_paths_cover(
+                (first_curve, &first.piece, first_back),
+                (second_curve, &second.piece, second_back),
+                coordinate,
+                domain,
+                *cell.position,
+                (&mut *budget, cancel),
+                diagnostic.as_deref_mut(),
+            )? {
+                JoinedPaths::Covered => return Ok(true),
+                // Once a usable strict full-span axis exists, further
+                // derivative contraction is unnecessary. The remaining
+                // original-root proof needs a smaller path domain instead.
+                JoinedPaths::ShorterPaths => break,
+                JoinedPaths::SharperJets if stationary => break,
+                JoinedPaths::SharperJets => {}
+            }
         }
     }
     Ok(false)
+}
+
+fn junction_domain(
+    first: &[ValidatedInterval; 4],
+    second: &[ValidatedInterval; 4],
+    cell: &JunctionCell<'_>,
+    mut diagnostic: Option<&mut JunctionDiagnostics<'_>>,
+) -> Option<[ValidatedInterval; 4]> {
+    let second_axis = |axis| {
+        if cell.swap_second {
+            (axis + 2) % 4
+        } else {
+            axis
+        }
+    };
+    let domain = std::array::from_fn(|axis| first[axis].hull(second[second_axis(axis)]));
+    for axis in 0..4 {
+        let second = second[second_axis(axis)];
+        let separation = if first[axis].upper < second.lower {
+            Some([first[axis].upper, second.lower])
+        } else if second.upper < first[axis].lower {
+            Some([second.upper, first[axis].lower])
+        } else {
+            None
+        };
+        if let Some(bounds) = separation {
+            // Both actual endpoint roots satisfy the shared coordinate.
+            // Strictly separated retained root enclosures cannot select one
+            // common original root, independently of further subdivision.
+            if let Some(diagnostic) = diagnostic.as_deref_mut() {
+                diagnostic.record(
+                    ValidatedPlaneJunctionRejection::SharedRootUniqueness,
+                    Some(axis as u8),
+                    Some(bounds),
+                    None,
+                );
+            }
+            return None;
+        }
+        let failure = if cell.query[axis].lower < domain[axis].lower {
+            Some((
+                ValidatedPlaneJunctionRejection::TubeLower,
+                [cell.query[axis].lower, domain[axis].lower],
+            ))
+        } else if domain[axis].upper < cell.query[axis].upper {
+            Some((
+                ValidatedPlaneJunctionRejection::TubeUpper,
+                [domain[axis].upper, cell.query[axis].upper],
+            ))
+        } else {
+            None
+        };
+        if let Some((rejection, bounds)) = failure {
+            if let Some(diagnostic) = diagnostic.as_deref_mut() {
+                diagnostic.record(rejection, Some(axis as u8), Some(bounds), None);
+            }
+            return None;
+        }
+    }
+    Some(domain)
+}
+
+struct EndpointNeighborhood {
+    piece: ValidatedCurvePiece,
+    next_domain: [ValidatedInterval; 4],
 }
 
 fn certified_endpoint_subpath(
     candidate: &PreparedValidatedCurve<'_>,
     original: &ValidatedCurvePiece,
     range: [f64; 2],
+    domain: [ValidatedInterval; 4],
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<Option<ValidatedCurvePiece>, ValidatedGeometryError> {
+) -> Result<Option<EndpointNeighborhood>, ValidatedGeometryError> {
     let parameter = interval_range(range)?;
-    let old_domain = flatten(
-        original
-            .source_parameters
-            .ok_or(ValidatedGeometryError::InvalidInput)?,
-    );
-    // Restrict only the existing native parameter interval and projection.
-    // The old uniqueness tube already selects this exact branch throughout
-    // the subspan: no numerical seed or independent root choice is introduced.
-    let mut tube = match certify(
+    // The initial domain is the old uniqueness tube. Later domains contain
+    // its proved root images and remain nested inside it. Restrict only the
+    // native parameter span and retain the original projection and branch.
+    let tube = match certify(
         candidate.source.curve()?,
         original.projection,
         parameter,
-        old_domain,
+        domain,
         budget,
         cancel,
     ) {
@@ -1033,51 +1090,40 @@ fn certified_endpoint_subpath(
         Err(error) if splittable(error) => return Ok(None),
         Err(error) => return Err(error),
     };
-    for _ in 0..candidate.options.max_iterations {
-        budget.charge(1, cancel)?;
-        let next = std::array::from_fn(|i| {
-            let padding = tube.domain[i].width() * 0.0625;
-            ValidatedInterval {
-                lower: (tube.rooted_domain[i].lower - padding)
-                    .next_down()
-                    .max(tube.domain[i].lower),
-                upper: (tube.rooted_domain[i].upper + padding)
-                    .next_up()
-                    .min(tube.domain[i].upper),
-            }
-        });
-        if next == tube.domain {
-            break;
-        }
-        // Every contraction contains the previously proved Krawczyk image
-        // and stays inside the original tube. Fresh inclusion independently
-        // certifies the SAME selected root for every point of the full span.
-        match certify(
-            candidate.source.curve()?,
-            original.projection,
-            parameter,
-            next,
-            budget,
-            cancel,
-        ) {
-            Ok(refined) => tube = refined,
-            Err(error) if splittable(error) => break,
-            Err(error) => return Err(error),
-        }
-    }
     let jet = match implicit_jet(&tube) {
         Ok(jet) => jet,
         Err(error) if splittable(error) => return Ok(None),
         Err(error) => return Err(error),
     };
-    Ok(Some(ValidatedCurvePiece {
-        parameter: range,
-        jet,
-        source_parameters: Some(unflatten(tube.domain)),
-        contraction_bound: tube.rho,
-        surface_residual: subtract3(tube.surfaces[0].position, tube.surfaces[1].position),
-        projection: original.projection,
+    let next_domain = std::array::from_fn(|i| {
+        let padding = tube.domain[i].width() * 0.0625;
+        ValidatedInterval {
+            lower: (tube.rooted_domain[i].lower - padding)
+                .next_down()
+                .max(tube.domain[i].lower),
+            upper: (tube.rooted_domain[i].upper + padding)
+                .next_up()
+                .min(tube.domain[i].upper),
+        }
+    });
+    Ok(Some(EndpointNeighborhood {
+        piece: ValidatedCurvePiece {
+            parameter: range,
+            jet,
+            source_parameters: Some(unflatten(tube.domain)),
+            contraction_bound: tube.rho,
+            surface_residual: subtract3(tube.surfaces[0].position, tube.surfaces[1].position),
+            projection: original.projection,
+        },
+        next_domain,
     }))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum JoinedPaths {
+    Covered,
+    SharperJets,
+    ShorterPaths,
 }
 
 fn joined_paths_cover(
@@ -1088,10 +1134,11 @@ fn joined_paths_cover(
     position: [ValidatedInterval; 3],
     execution: (&mut ValidatedGeometryBudget, &AtomicBool),
     mut diagnostic: Option<&mut JunctionDiagnostics<'_>>,
-) -> Result<bool, ValidatedGeometryError> {
+) -> Result<JoinedPaths, ValidatedGeometryError> {
     let (budget, cancel) = execution;
     let (first_curve, first_piece, first_back) = first;
     let (second_curve, second_piece, second_back) = second;
+    let mut monotone = false;
     for axis in 0..3 {
         budget.charge(1, cancel)?;
         let away = |piece: &ValidatedCurvePiece, back: bool| {
@@ -1150,6 +1197,7 @@ fn joined_paths_cover(
             }
             continue;
         }
+        monotone = true;
         let first_outer = first_curve
             .evaluate(
                 first_piece.parameter[usize::from(!first_back)],
@@ -1242,7 +1290,7 @@ fn joined_paths_cover(
             budget,
             cancel,
         ) {
-            Ok(_) => return Ok(true),
+            Ok(_) => return Ok(JoinedPaths::Covered),
             Err(error) if splittable(error) => {
                 if let Some(diagnostic) = diagnostic.as_deref_mut() {
                     diagnostic.record(
@@ -1256,7 +1304,11 @@ fn joined_paths_cover(
             Err(error) => return Err(error),
         }
     }
-    Ok(false)
+    Ok(if monotone {
+        JoinedPaths::ShorterPaths
+    } else {
+        JoinedPaths::SharperJets
+    })
 }
 
 pub(super) fn plane_axes(plane: &Plane) -> ([ValidatedInterval; 3], [ValidatedInterval; 3]) {
@@ -1879,8 +1931,8 @@ mod plane_zero_cell_regressions {
         let first_box = flatten(first_piece.source_parameters.unwrap());
         let second_box = flatten(second_piece.source_parameters.unwrap());
         let domain = std::array::from_fn(|i| first_box[i].hull(second_box[i]));
-        assert!(
-            !joined_paths_cover(
+        assert_eq!(
+            joined_paths_cover(
                 (&curves[0], first_piece, true),
                 (&curves[1], second_piece, true),
                 coordinate,
@@ -1890,6 +1942,7 @@ mod plane_zero_cell_regressions {
                 None,
             )
             .unwrap(),
+            JoinedPaths::SharperJets,
             "whole-piece cached slopes cannot establish strict monotonicity"
         );
         let matches = [(0, &curves[0], 0), (1, &curves[1], 0)];
