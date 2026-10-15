@@ -98,8 +98,9 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
 - Generated face/plane endpoints may share a proposed `CoordinatePlane` through
   `ValidatedFacePlaneSource.endpoint_coordinate_planes`. Exact common-coordinate
   root uniqueness, strict path monotonicity and complete joined continuation
-  must certify before their union covers an original cell; overlapping tubes
-  or nearby endpoint positions do not establish a junction. Interpolated
+  must certify before their union covers an original cell, including a single
+  candidate's own front/back junction. Overlapping tubes, nearby endpoint
+  positions or a closed guide alone do not establish a junction. Interpolated
   coordinate residuals retain their common parameter coefficient before
   interval evaluation, including when endpoint normals differ.
 

@@ -627,12 +627,20 @@ fn junction_covers(
     let plane_uv = plane_parameters(plane, position)?;
     let source_uv = [interval_range(cell[0])?, interval_range(cell[1])?];
     for (first_index, &(_, first, first_source)) in matches.iter().enumerate() {
-        for &(_, second, second_source) in &matches[first_index + 1..] {
+        for (second_offset, &(_, second, second_source)) in
+            matches[first_index..].iter().enumerate()
+        {
             for first_back in [false, true] {
                 let Some((first_piece, coordinate)) = endpoint_coordinate(first, first_back) else {
                     continue;
                 };
                 for second_back in [false, true] {
+                    // A closed candidate has one actual front/back junction,
+                    // not a junction between an end and itself. The identical
+                    // fresh original-root proof remains mandatory.
+                    if second_offset == 0 && (first_back || !second_back) {
+                        continue;
+                    }
                     budget.charge(1, cancel)?;
                     let Some((second_piece, other)) = endpoint_coordinate(second, second_back)
                     else {
@@ -1065,8 +1073,8 @@ fn exact_curve2d(
 mod plane_zero_cell_regressions {
     use super::*;
     use crate::{
-        BsplineSurface, Edge, Face, Invertible, KnotVector, Line, Point2, Point3, Processor,
-        RevolutionSurface, TrimDomainLimits, TrimmedCurve, ValidatedCurveOptions,
+        BsplineCurve, BsplineSurface, Edge, Face, Invertible, KnotVector, Line, Point2, Point3,
+        Processor, RevolutionSurface, TrimDomainLimits, TrimmedCurve, ValidatedCurveOptions,
         ValidatedFacePlaneSource, Vector3, Wire, builder,
         prepare_face_parameter_domain_with_uncertainty, prepared_face_plane_curve,
     };
@@ -1122,6 +1130,160 @@ mod plane_zero_cell_regressions {
         assert!(independent.width() > 1.0e6);
         assert!(correlated.contains_zero());
         assert!(correlated.width() < 1.0e-7);
+    }
+
+    fn closed_original_candidate(
+        back_offset: f64,
+    ) -> (
+        Surface,
+        Plane,
+        PreparedValidatedCurve<'static>,
+        [[f64; 2]; 2],
+    ) {
+        // A closed original intersection in a nonperiodic chart. Inversion
+        // swaps the independent UV gauges; no angular quotient is admitted.
+        let coefficients = [(-1.0, 1.0), (0.0, -1.0), (1.0, 1.0)];
+        let surface = Surface::BsplineSurface(BsplineSurface::new(
+            (KnotVector::bezier_knot(2), KnotVector::bezier_knot(2)),
+            coefficients
+                .into_iter()
+                .map(|(x, zx)| {
+                    coefficients
+                        .into_iter()
+                        .map(|(y, zy)| Point3::new(x, y, zx + zy))
+                        .collect()
+                })
+                .collect(),
+        ))
+        .inverse();
+        let plane = Plane::new(
+            Point3::new(0.0, 0.0, 0.25),
+            Point3::new(1.0, 0.0, 0.25),
+            Point3::new(0.0, 1.0, 0.25),
+        );
+        let angle: f64 = 0.35;
+        let point = |angle: f64| Point3::new(0.5 * angle.cos(), 0.5 * angle.sin(), 0.25);
+        let first = point(angle);
+        let guide = Curve::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(
+                (0_usize..=34)
+                    .map(|index| index.saturating_sub(1).min(32) as f64)
+                    .collect::<Vec<_>>(),
+            ),
+            (0..=32)
+                .map(|index| {
+                    if index == 32 {
+                        first
+                    } else {
+                        point(angle + TAU * index as f64 / 32.0)
+                    }
+                })
+                .collect(),
+        ));
+        let coordinate = CoordinatePlane {
+            normal: [0.0, 1.0, 0.0],
+            offset: first.y,
+        };
+        let chart = [(first.y + 1.0) * 0.5, (first.x + 1.0) * 0.5];
+        let curve = prepared_face_plane_curve(
+            &guide,
+            ValidatedFacePlaneSource {
+                surface: &surface,
+                initial_chart: Some(chart),
+                endpoint_coordinate_planes: [
+                    Some(coordinate),
+                    Some(CoordinatePlane {
+                        offset: coordinate.offset + back_offset,
+                        ..coordinate
+                    }),
+                ],
+            },
+            &plane,
+            [0.0, 32.0],
+            &ValidatedCurveOptions::default(),
+            &mut ValidatedGeometryBudget::new(2_000_000),
+            &AtomicBool::new(false),
+        )
+        .expect("whole closed original branch on the same inverted source chart");
+        let cell = chart.map(|value| [value - 1.0e-12, value + 1.0e-12]);
+        (surface, plane, curve, cell)
+    }
+
+    #[test]
+    fn closed_original_candidate_joins_its_own_front_and_back() {
+        let (surface, plane, curve, cell) = closed_original_candidate(0.0);
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(2_000_000);
+        let (cell, position) = plane_zero_cell(
+            &surface,
+            cell,
+            axis(2),
+            axis(2).map(|value| value * ValidatedInterval::point(0.25)),
+            &mut budget,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            !candidate_covers(
+                &curve,
+                0,
+                cell,
+                position,
+                &plane,
+                (&mut budget, &cancel),
+                None,
+            )
+            .unwrap(),
+            "the cell straddles the finite prepared range's two ends"
+        );
+        assert!(
+            junction_covers(
+                &[(0, &curve, 0)],
+                cell,
+                position,
+                &plane,
+                &mut budget,
+                &cancel,
+            )
+            .unwrap(),
+            "the two ends require an actual shared original-root proof"
+        );
+    }
+
+    #[test]
+    fn closed_guide_cannot_authorize_a_gap_between_original_candidate_ends() {
+        let (surface, plane, curve, cell) = closed_original_candidate(-1.0e-6);
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(2_000_000);
+        let front = curve.evaluate(0.0, &mut budget, &cancel).unwrap().error[1];
+        let back = curve.evaluate(32.0, &mut budget, &cancel).unwrap().error[1];
+        assert!(
+            back.upper < front.lower,
+            "the closed guide retained a genuine original-root gap"
+        );
+        let (cell, position) = plane_zero_cell(
+            &surface,
+            cell,
+            axis(2),
+            axis(2).map(|value| value * ValidatedInterval::point(0.25)),
+            &mut budget,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            !junction_covers(
+                &[(0, &curve, 0)],
+                cell,
+                position,
+                &plane,
+                &mut budget,
+                &cancel,
+            )
+            .unwrap(),
+            "closed guide endpoints are not original continuation authority"
+        );
     }
 
     fn negative_taper_junction(

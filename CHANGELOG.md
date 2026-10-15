@@ -55,6 +55,10 @@ monstertruck 0.4.0.
 - Nested periodic trim inverse queries lift the basis parameter by its declared
   period into the original raw trim range before clipping or rejection, keeping
   shifted original charts rather than selecting the wrong endpoint.
+- Generated junction coverage includes a closed candidate's own front/back
+  pair under the same fresh common-original-root uniqueness and strict joined
+  continuation obligations as distinct candidates. Closed guide endpoints do
+  not authorize an actual gap between original branches.
 
 - STEP `SURFACE_CURVE` and `SEAM_CURVE` retain their original explicit leader,
   kind, declared master and associated geometry, including closed restrictions.
