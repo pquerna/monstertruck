@@ -67,8 +67,8 @@ pub use validated_curve::{
 };
 pub use validated_interval::{
     ValidatedCurveJet, ValidatedCurveJet2D, ValidatedGeometryBudget, ValidatedGeometryError,
-    ValidatedInterval, ValidatedScalarCurveJet, ValidatedSurfaceJet, validated_boundary_jet,
-    validated_curve_jet, validated_curve_projected_jet, validated_curve2d_jet, validated_sin_cos,
-    validated_surface_jet,
+    ValidatedInterval, ValidatedPlaneCoverageRejection, ValidatedPlaneCoverageWitness,
+    ValidatedScalarCurveJet, ValidatedSurfaceJet, validated_boundary_jet, validated_curve_jet,
+    validated_curve_projected_jet, validated_curve2d_jet, validated_sin_cos, validated_surface_jet,
 };
 pub use validated_phase::{validated_asin, validated_atan2};

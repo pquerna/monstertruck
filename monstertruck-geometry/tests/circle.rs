@@ -75,3 +75,25 @@ fn parameter_division() {
         assert!(p.to_vec().magnitude() > 0.95);
     }
 }
+
+#[test]
+fn nested_periodic_trim_preserves_the_original_raw_parameter_range() {
+    for start in [-TAU, TAU] {
+        let range = (start, start + PI);
+        let curve = TrimmedCurve::new(
+            TrimmedCurve::new(UnitCircle::<Point2>::new(), (0.0, TAU)),
+            range,
+        );
+        let expected = start + 3.0 * PI / 8.0;
+        let point = curve.evaluate(expected);
+        let nearest = curve.search_nearest_parameter(point, range, 100).unwrap();
+        assert!((nearest - expected).abs() < 1.0e-12);
+        assert!(curve.evaluate(nearest).distance2(point) < 1.0e-24);
+        let exact = curve.search_parameter(point, range, 100).unwrap();
+        assert!((exact - expected).abs() < 1.0e-12);
+        let outside = UnitCircle::<Point2>::new().evaluate(start + 1.5 * PI);
+        assert!(curve.search_parameter(outside, range, 100).is_none());
+        let closest = curve.search_nearest_parameter(outside, range, 100).unwrap();
+        assert!(closest == range.0 || closest == range.1);
+    }
+}

@@ -31,6 +31,45 @@ pub struct ValidatedInterval {
     pub upper: f64,
 }
 
+/// The actual failed inequality in a terminal original-plane candidate proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValidatedPlaneCoverageRejection {
+    /// Query lower bound lies below the original uniqueness tube.
+    TubeLower,
+    /// Query upper bound lies above the original uniqueness tube.
+    TubeUpper,
+    /// The prepared coordinate has no consistent strict derivative sign.
+    CoordinateMonotonicity,
+    /// An increasing coordinate's low-end residual is not nonpositive.
+    IncreasingLowBracket,
+    /// An increasing coordinate's high-end residual is not nonnegative.
+    IncreasingHighBracket,
+    /// A decreasing coordinate's low-end residual is not nonnegative.
+    DecreasingLowBracket,
+    /// A decreasing coordinate's high-end residual is not nonpositive.
+    DecreasingHighBracket,
+}
+
+/// Fixed-size evidence from an existing terminal-depth candidate attempt.
+///
+/// This is a refusal diagnostic, never a geometry or continuation receipt.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ValidatedPlaneCoverageWitness {
+    /// Index in the original query's unchanged candidate enumeration.
+    pub candidate_index: usize,
+    /// First piece in the actual attempted contiguous prepared-piece group.
+    pub first_piece_index: usize,
+    /// Number of pieces in that group, at most three.
+    pub piece_count: u8,
+    /// The deciding inequality, with no altered error classification.
+    pub rejection: ValidatedPlaneCoverageRejection,
+    /// Source-system coordinate 0..3 for tube rejection; 4 for scalar projection.
+    pub coordinate: u8,
+    /// Tube rejection: offending query bound, then original tube bound.
+    /// Other stages: the raw derivative or endpoint residual interval bounds.
+    pub bounds: [f64; 2],
+}
+
 /// Failure to establish a native interval geometry certificate.
 #[derive(Clone, Copy, Debug, PartialEq, Error)]
 pub enum ValidatedGeometryError {
@@ -63,7 +102,7 @@ pub enum ValidatedGeometryError {
     Unresolved,
     /// Complete original-plane coverage remained unresolved at a named proof operation.
     #[error(
-        "validated plane coverage unresolved during {operation}; original parameter box {parameter_box:?}"
+        "validated plane coverage unresolved during {operation}; original parameter box {parameter_box:?}; terminal candidate witness {witness:?}"
     )]
     PlaneCoverageUnresolved {
         /// The bounded proof operation that failed, without changing its classification.
@@ -71,6 +110,8 @@ pub enum ValidatedGeometryError {
         /// Actual unresolved closed box in the unchanged original covering chart.
         /// Absent when the failing proof has no single original source cell.
         parameter_box: Option<[[f64; 2]; 2]>,
+        /// Best-progress actual candidate attempt, collected only at terminal depth.
+        witness: Option<ValidatedPlaneCoverageWitness>,
     },
     /// Continuation could not establish a single connected local branch.
     #[error("ambiguous intersection continuation branch")]

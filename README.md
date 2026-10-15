@@ -62,6 +62,9 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
 - `parameter_range()` fix for non-clamped B-splines.
 - Surface `parameter_division` recursion guard + decorrelated jitter (partial port of upstream [`7b1f4171`](https://github.com/ricosjp/truck/commit/7b1f4171)).
 - `UnitCircle::search_{nearest_}parameter` honors `hint` across the period (upstream [`f563ae53`](https://github.com/ricosjp/truck/commit/f563ae53) + [`86e4ed75`](https://github.com/ricosjp/truck/commit/86e4ed75)).
+- Nested periodic trim inverse queries lift a basis proposal by its declared
+  period into the original trim range before clipping or rejecting it. Stored
+  ranges and curve evaluations are unchanged.
 - STEP `Axis2Placement3d` guards parallel `axis`/`ref_direction`; revolved-line-to-cylinder conversion drops the spurious inversion (upstream [`524f5f53`](https://github.com/ricosjp/truck/commit/524f5f53)); rational trim boundaries preserved through the load path; inverted-processor sample alignment.
 - Certified original trim endpoint closure uses identified, material-oriented
   original coedges and their retained prepared boundary branches. Endpoint
@@ -87,6 +90,11 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   Unresolved plane coverage retains the actual original parameter box when a
   single failing cell exists, without rewrapping its chart or changing the
   resource, cancellation or conditioning error category.
+  At terminal subdivision depth, an optional fixed-size candidate witness names
+  the actual candidate and contiguous piece group, failed containment/monotonicity/
+  bracket inequality, coordinate, and raw decisive bounds. It records existing
+  proof attempts only: no rerun, allocation, ordinary-cell tracing or geometry
+  authority. Census failures without an attempted cell retain no witness.
 - Generated face/plane endpoints may share a proposed `CoordinatePlane` through
   `ValidatedFacePlaneSource.endpoint_coordinate_planes`. Exact common-coordinate
   root uniqueness, strict path monotonicity and complete joined continuation

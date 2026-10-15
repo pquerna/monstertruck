@@ -6,6 +6,7 @@ use super::{
 use crate::{
     Conic2D, Curve, Curve2D, ParameterBoxClassification, Plane, PreparedFaceParameterDomain,
     Surface, TrimDomainError, ValidatedGeometryBudget, ValidatedGeometryError, ValidatedInterval,
+    ValidatedPlaneCoverageRejection, ValidatedPlaneCoverageWitness,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -218,6 +219,7 @@ pub fn validated_face_plane_coverage(
             let mut root_cell = cell;
             let enclosure = plane_zero_cell(surface, cell, normal, origin, budget, cancel);
             let mut covered = false;
+            let mut witness = None;
             match enclosure {
                 Ok(None) => {
                     result.excluded_cells += 1;
@@ -228,7 +230,16 @@ pub fn validated_face_plane_coverage(
                     for &(candidate_index, candidate, index) in &matches {
                         budget.charge(1, cancel)?;
                         if candidate_covers(
-                            candidate, index, root_cell, position, plane, budget, cancel,
+                            candidate,
+                            index,
+                            root_cell,
+                            position,
+                            plane,
+                            (&mut *budget, cancel),
+                            (depth == options.max_depth).then_some(CandidateDiagnostics {
+                                candidate_index,
+                                witness: &mut witness,
+                            }),
                         )? {
                             covered = true;
                             break;
@@ -296,6 +307,7 @@ pub fn validated_face_plane_coverage(
                 return Err(ValidatedGeometryError::PlaneCoverageUnresolved {
                     operation: "complete original face cells / subdivision depth",
                     parameter_box: Some(root_cell),
+                    witness,
                 });
             }
             let (axis, middle) = split_cell(surface, root_cell, budget, cancel)?;
@@ -303,6 +315,7 @@ pub fn validated_face_plane_coverage(
                 return Err(ValidatedGeometryError::PlaneCoverageUnresolved {
                     operation: "complete original face cells / finite split",
                     parameter_box: Some(root_cell),
+                    witness,
                 });
             }
             let mut lower = root_cell;
@@ -350,6 +363,7 @@ fn coverage_context(
         ValidatedGeometryError::PlaneCoverageUnresolved {
             operation,
             parameter_box,
+            witness: None,
         }
     } else {
         error
@@ -414,15 +428,53 @@ fn plane_zero_cell(
     Ok(Some((cell, jet.position)))
 }
 
+struct CandidateDiagnostics<'a> {
+    candidate_index: usize,
+    witness: &'a mut Option<ValidatedPlaneCoverageWitness>,
+}
+
+impl CandidateDiagnostics<'_> {
+    fn record(
+        &mut self,
+        group: (usize, usize),
+        rejection: ValidatedPlaneCoverageRejection,
+        coordinate: u8,
+        bounds: [f64; 2],
+    ) {
+        use ValidatedPlaneCoverageRejection as R;
+        let progress = |stage| match stage {
+            R::TubeLower | R::TubeUpper => 0,
+            R::CoordinateMonotonicity => 1,
+            _ => 2,
+        };
+        if self.witness.is_some_and(|previous| {
+            progress(previous.rejection) > progress(rejection)
+                || (progress(previous.rejection) == progress(rejection)
+                    && usize::from(previous.piece_count) >= group.1)
+        }) {
+            return;
+        }
+        *self.witness = Some(ValidatedPlaneCoverageWitness {
+            candidate_index: self.candidate_index,
+            first_piece_index: group.0,
+            piece_count: group.1 as u8,
+            rejection,
+            coordinate,
+            bounds,
+        });
+    }
+}
+
 fn candidate_covers(
     candidate: &PreparedValidatedCurve<'_>,
     source_index: usize,
     cell: [[f64; 2]; 2],
     position: [ValidatedInterval; 3],
     plane: &Plane,
-    budget: &mut ValidatedGeometryBudget,
-    cancel: &AtomicBool,
+    execution: (&mut ValidatedGeometryBudget, &AtomicBool),
+    mut diagnostic: Option<CandidateDiagnostics<'_>>,
 ) -> Result<bool, ValidatedGeometryError> {
+    let (budget, cancel) = execution;
     let (_, _, leader) = carriers(candidate.source.curve()?)?;
     let plane_parameters = plane_parameters(plane, position)?;
     let source = [interval_range(cell[0])?, interval_range(cell[1])?];
@@ -459,6 +511,23 @@ fn candidate_covers(
                         .ok_or(ValidatedGeometryError::InvalidInput)?,
                 );
                 if !(0..4).all(|i| box4[i].lower <= q[i].lower && q[i].upper <= box4[i].upper) {
+                    if let Some(diagnostic) = diagnostic.as_mut()
+                        && let Some(axis) = (0..4)
+                            .find(|&i| box4[i].lower > q[i].lower || q[i].upper > box4[i].upper)
+                    {
+                        let (rejection, bounds) = if box4[axis].lower > q[axis].lower {
+                            (
+                                ValidatedPlaneCoverageRejection::TubeLower,
+                                [q[axis].lower, box4[axis].lower],
+                            )
+                        } else {
+                            (
+                                ValidatedPlaneCoverageRejection::TubeUpper,
+                                [q[axis].upper, box4[axis].upper],
+                            )
+                        };
+                        diagnostic.record((start, count), rejection, axis as u8, bounds);
+                    }
                     contains = false;
                     break;
                 }
@@ -478,6 +547,14 @@ fn candidate_covers(
                     None
                 };
                 if sign.is_none() || monotonicity.is_some_and(|previous| Some(previous) != sign) {
+                    if let Some(diagnostic) = diagnostic.as_mut() {
+                        diagnostic.record(
+                            (start, count),
+                            ValidatedPlaneCoverageRejection::CoordinateMonotonicity,
+                            4,
+                            [derivative.lower, derivative.upper],
+                        );
+                    }
                     contains = false;
                     break;
                 }
@@ -521,6 +598,16 @@ fn candidate_covers(
             };
             if bracket {
                 return Ok(true);
+            }
+            if let Some(diagnostic) = diagnostic.as_mut() {
+                use ValidatedPlaneCoverageRejection as R;
+                let (rejection, bounds) = match monotonicity {
+                    Some(true) if low.upper > 0.0 => (R::IncreasingLowBracket, low),
+                    Some(true) => (R::IncreasingHighBracket, high),
+                    _ if low.lower < 0.0 => (R::DecreasingLowBracket, low),
+                    _ => (R::DecreasingHighBracket, high),
+                };
+                diagnostic.record((start, count), rejection, 4, [bounds.lower, bounds.upper]);
             }
         }
     }
@@ -1107,7 +1194,16 @@ mod plane_zero_cell_regressions {
         .unwrap();
         for curve in &curves {
             assert!(
-                !candidate_covers(curve, 0, cell, position, &plane, &mut budget, &cancel,).unwrap(),
+                !candidate_covers(
+                    curve,
+                    0,
+                    cell,
+                    position,
+                    &plane,
+                    (&mut budget, &cancel),
+                    None
+                )
+                .unwrap(),
                 "neither incident finite range represents both sides of the junction"
             );
         }
@@ -1332,8 +1428,8 @@ mod plane_zero_cell_regressions {
                     root_cell,
                     position,
                     &plane,
-                    &mut budget,
-                    &cancel,
+                    (&mut budget, &cancel),
+                    None,
                 )
                 .unwrap(),
                 expected

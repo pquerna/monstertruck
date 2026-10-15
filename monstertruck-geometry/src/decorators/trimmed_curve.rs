@@ -19,6 +19,23 @@ impl<C> TrimmedCurve<C> {
     pub fn into_parts(self) -> (C, (f64, f64)) { (self.curve, self.range) }
 }
 
+impl<C: ParametricCurveTrait> TrimmedCurve<C> {
+    fn lift_periodic_parameter(&self, t: f64) -> f64 {
+        let (start, end) = self.range;
+        if t >= start && t <= end {
+            return t;
+        }
+        let Some(period) = self.curve.period().filter(|p| p.is_finite() && *p > 0.0) else {
+            return t;
+        };
+        // A nested basis restriction can return its own period despite the
+        // caller's hint. Lift the proposal into the original trim's period
+        // before clipping; never change the stored range or its evaluations.
+        let turns = ((start.midpoint(end) - t) / period).round();
+        turns.mul_add(period, t)
+    }
+}
+
 impl<C: ParametricCurveTrait> ParametricCurveTrait for TrimmedCurve<C> {
     type Point = C::Point;
     type Vector = C::Vector;
@@ -72,6 +89,7 @@ where
         let candidate = self
             .curve
             .search_nearest_parameter(pt, hint, trials)
+            .map(|t| self.lift_periodic_parameter(t))
             .filter(|t| t.is_finite())
             .map(|t| t.clamp(start, end));
         [Some(start), candidate, Some(end)]
@@ -85,12 +103,15 @@ where
     }
 }
 
-impl<C: SearchParameter<CurveParameter>> SearchParameter<CurveParameter> for TrimmedCurve<C> {
-    type Point = C::Point;
+impl<C> SearchParameter<CurveParameter> for TrimmedCurve<C>
+where C: ParametricCurveTrait
+        + SearchParameter<CurveParameter, Point = <C as ParametricCurveTrait>::Point>
+{
+    type Point = <C as ParametricCurveTrait>::Point;
     #[inline(always)]
     fn search_parameter<H: Into<SearchParameterHint1D>>(
         &self,
-        pt: C::Point,
+        pt: Self::Point,
         hint: H,
         trials: usize,
     ) -> Option<f64> {
@@ -103,6 +124,7 @@ impl<C: SearchParameter<CurveParameter>> SearchParameter<CurveParameter> for Tri
         };
         self.curve
             .search_parameter(pt, hint, trials)
+            .map(|t| self.lift_periodic_parameter(t))
             .filter(|t| t.is_finite() && *t >= start && *t <= end)
     }
 }
