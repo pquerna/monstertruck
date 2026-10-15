@@ -35,9 +35,14 @@ monstertruck 0.4.0.
   and defers trim winding until whole-cell zero/tube proofs need it. Correlated
   axial/radial Rodrigues coefficients avoid artificial full-period height motion;
   original curve, profile, transforms and all work/storage bounds remain intact.
+- Generated face/plane preparation accepts explicit shared endpoint-coordinate
+  proposals. Coverage certifies common original roots and monotone joined paths,
+  rejecting actual gaps and distinct components despite overlapping old tubes.
+  Interpolated coordinate residuals preserve the shared parameter coefficient,
+  avoiding noncontracting dependency loss when endpoint normals change.
 - Retained trim projection rejects inactive raw parameters and off-trim nearest
   points, preferring the original spatial trim over periodic carrier inversion.
-  Trim-aware meshing preserves the resulting per-use source chart across coedges.
+  Both direct sampling and shared-edge projection preserve the per-use chart.
 
 - STEP `SURFACE_CURVE` and `SEAM_CURVE` retain their original explicit leader,
   kind, declared master and associated geometry, including closed restrictions.

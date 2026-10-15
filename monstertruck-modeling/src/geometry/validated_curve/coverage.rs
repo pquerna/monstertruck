@@ -1,5 +1,6 @@
 use super::{
-    PreparedValidatedCurve, carriers, dot3, flatten, interval_range, projection_jet, subtract3,
+    CoordinatePlane, PreparedValidatedCurve, Projection, ValidatedCurvePiece, carriers, certify,
+    dot3, flatten, interval_range, projection_jet, projection_residual, subtract3,
     validated_surface_piecewise_jet as validated_surface_jet,
 };
 use crate::{
@@ -266,6 +267,10 @@ pub fn validated_face_plane_coverage(
                             }
                         }
                     }
+                    if !covered {
+                        covered =
+                            junction_covers(&matches, root_cell, position, plane, budget, cancel)?;
+                    }
                 }
                 Err(error) if splittable(error) => {}
                 Err(error) => return Err(error),
@@ -489,8 +494,18 @@ fn candidate_covers(
                 budget,
                 cancel,
             )?;
-            let low = dot3(low.normal, position) - low.offset;
-            let high = dot3(high.normal, position) - high.offset;
+            let low = projection_residual(
+                first.projection,
+                ValidatedInterval::point(first.parameter[0]),
+                low,
+                position,
+            );
+            let high = projection_residual(
+                last.projection,
+                ValidatedInterval::point(last.parameter[1]),
+                high,
+                position,
+            );
             let bracket = if monotonicity == Some(true) {
                 low.upper <= 0.0 && high.lower >= 0.0
             } else {
@@ -499,6 +514,191 @@ fn candidate_covers(
             if bracket {
                 return Ok(true);
             }
+        }
+    }
+    Ok(false)
+}
+/// An exact shared coordinate proposes a junction, never a proximity weld.
+/// First prove both retained ends are the same original root. Then prove a
+/// common monotone coordinate on their sealed paths covers the entire cell.
+fn junction_covers(
+    matches: &[(usize, &PreparedValidatedCurve<'_>, usize)],
+    cell: [[f64; 2]; 2],
+    position: [ValidatedInterval; 3],
+    plane: &Plane,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, ValidatedGeometryError> {
+    let plane_uv = plane_parameters(plane, position)?;
+    let source_uv = [interval_range(cell[0])?, interval_range(cell[1])?];
+    for (first_index, &(_, first, first_source)) in matches.iter().enumerate() {
+        for &(_, second, second_source) in &matches[first_index + 1..] {
+            for first_back in [false, true] {
+                let Some((first_piece, coordinate)) = endpoint_coordinate(first, first_back) else {
+                    continue;
+                };
+                for second_back in [false, true] {
+                    budget.charge(1, cancel)?;
+                    let Some((second_piece, other)) = endpoint_coordinate(second, second_back)
+                    else {
+                        continue;
+                    };
+                    if !coordinate.same_plane(other) {
+                        continue;
+                    }
+                    let first_box = flatten(
+                        first_piece
+                            .source_parameters
+                            .ok_or(ValidatedGeometryError::InvalidInput)?,
+                    );
+                    let mut second_box = flatten(
+                        second_piece
+                            .source_parameters
+                            .ok_or(ValidatedGeometryError::InvalidInput)?,
+                    );
+                    if first_source != second_source {
+                        second_box = [second_box[2], second_box[3], second_box[0], second_box[1]];
+                    }
+                    let domain = std::array::from_fn(|i| first_box[i].hull(second_box[i]));
+                    let q = if first_source == 0 {
+                        [source_uv[0], source_uv[1], plane_uv[0], plane_uv[1]]
+                    } else {
+                        [plane_uv[0], plane_uv[1], source_uv[0], source_uv[1]]
+                    };
+                    if !(0..4)
+                        .all(|i| domain[i].lower <= q[i].lower && q[i].upper <= domain[i].upper)
+                    {
+                        continue;
+                    }
+                    if joined_paths_cover(
+                        (first, first_piece, first_back),
+                        (second, second_piece, second_back),
+                        coordinate,
+                        domain,
+                        position,
+                        budget,
+                        cancel,
+                    )? {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn endpoint_coordinate<'a>(
+    candidate: &'a PreparedValidatedCurve<'_>,
+    back: bool,
+) -> Option<(&'a ValidatedCurvePiece, CoordinatePlane)> {
+    let piece = if back {
+        candidate.pieces.last()?
+    } else {
+        candidate.pieces.first()?
+    };
+    let Projection::BetweenPlanes { parameter, planes } = piece.projection else {
+        return None;
+    };
+    let end = usize::from(back);
+    (piece.parameter[end] == parameter[end]).then_some((piece, planes[end]))
+}
+
+fn joined_paths_cover(
+    first: (&PreparedValidatedCurve<'_>, &ValidatedCurvePiece, bool),
+    second: (&PreparedValidatedCurve<'_>, &ValidatedCurvePiece, bool),
+    coordinate: CoordinatePlane,
+    domain: [ValidatedInterval; 4],
+    position: [ValidatedInterval; 3],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, ValidatedGeometryError> {
+    let (first_curve, first_piece, first_back) = first;
+    let (second_curve, second_piece, second_back) = second;
+    for axis in 0..3 {
+        budget.charge(1, cancel)?;
+        let away = |piece: &ValidatedCurvePiece, back: bool| {
+            let derivative = piece.jet.first[axis];
+            if derivative.lower > 0.0 {
+                Some(!back)
+            } else if derivative.upper < 0.0 {
+                Some(back)
+            } else {
+                None
+            }
+        };
+        let (Some(first_positive), Some(second_positive)) = (
+            away(first_piece, first_back),
+            away(second_piece, second_back),
+        ) else {
+            continue;
+        };
+        if first_positive == second_positive || position[axis].lower >= position[axis].upper {
+            continue;
+        }
+        let first_outer = first_curve
+            .evaluate(
+                first_piece.parameter[usize::from(!first_back)],
+                budget,
+                cancel,
+            )?
+            .error[axis];
+        let second_outer = second_curve
+            .evaluate(
+                second_piece.parameter[usize::from(!second_back)],
+                budget,
+                cancel,
+            )?
+            .error[axis];
+        let (lower, upper) = if first_positive {
+            (second_outer, first_outer)
+        } else {
+            (first_outer, second_outer)
+        };
+        if lower.upper > position[axis].lower || position[axis].upper > upper.lower {
+            continue;
+        }
+        // Both old endpoint roots lie in this common domain and satisfy these
+        // exact shared coefficients. Fresh uniqueness, not box intersection,
+        // proves equality even when their numerical enclosures have width.
+        let shared = Projection::BetweenPlanes {
+            parameter: [0.0, 1.0],
+            planes: [coordinate; 2],
+        };
+        match certify(
+            first_curve.source.curve()?,
+            shared,
+            super::ZERO,
+            domain,
+            budget,
+            cancel,
+        ) {
+            Ok(_) => {}
+            Err(error) if splittable(error) => continue,
+            Err(error) => return Err(error),
+        }
+        let mut normal = [0.0; 3];
+        normal[axis] = 1.0;
+        let range = [position[axis].lower, position[axis].upper];
+        let projection = Projection::BetweenPlanes {
+            parameter: range,
+            planes: range.map(|offset| CoordinatePlane { normal, offset }),
+        };
+        // The two now-joined sealed paths stay in the common domain. Their
+        // strict opposite away-directions and outer bracket represent every
+        // coordinate in the cell. Uniqueness in this new coordinate identifies
+        // every original cell root with that represented path.
+        match certify(
+            first_curve.source.curve()?,
+            projection,
+            position[axis],
+            domain,
+            budget,
+            cancel,
+        ) {
+            Ok(_) => return Ok(true),
+            Err(error) if splittable(error) => {}
+            Err(error) => return Err(error),
         }
     }
     Ok(false)
@@ -771,9 +971,9 @@ mod plane_zero_cell_regressions {
     use super::*;
     use crate::{
         BsplineSurface, Edge, Face, Invertible, KnotVector, Line, Point2, Point3, Processor,
-        RevolutionSurface, TrimDomainLimits, ValidatedCurveOptions, ValidatedFacePlaneSource,
-        Vector3, Wire, builder, prepare_face_parameter_domain_with_uncertainty,
-        prepared_face_plane_curve,
+        RevolutionSurface, TrimDomainLimits, TrimmedCurve, ValidatedCurveOptions,
+        ValidatedFacePlaneSource, Vector3, Wire, builder,
+        prepare_face_parameter_domain_with_uncertainty, prepared_face_plane_curve,
     };
     use monstertruck_core::EuclideanSpace;
     use monstertruck_topology::trimmed::TrimmedFace;
@@ -792,6 +992,242 @@ mod plane_zero_cell_regressions {
 
     fn axis(index: usize) -> [ValidatedInterval; 3] {
         std::array::from_fn(|i| ValidatedInterval::point(if i == index { 1.0 } else { 0.0 }))
+    }
+
+    #[test]
+    fn changed_coordinate_normal_retains_its_shared_parameter_coefficient() {
+        let guide = Curve::Line(Line(Point3::origin(), Point3::new(1.0, 1.0, 0.0)));
+        let projection = Projection::BetweenPlanes {
+            parameter: [0.0, 1.0],
+            planes: [
+                CoordinatePlane {
+                    normal: [1.0, 0.0, 0.0],
+                    offset: 1.0e6,
+                },
+                CoordinatePlane {
+                    normal: [0.0, 1.0, 0.0],
+                    offset: -1.0e6,
+                },
+            ],
+        };
+        // Every coordinate plane passes through this exact point. Independent
+        // intervalizations of normal(t) and offset(t) lose that identity.
+        let point = [1.0e6, -1.0e6, 0.0].map(ValidatedInterval::point);
+        let parameter = interval_range([0.0, 1.0]).unwrap();
+        let jet = projection_jet(
+            &guide,
+            projection,
+            parameter,
+            &mut ValidatedGeometryBudget::new(100),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let independent = dot3(jet.normal, point) - jet.offset;
+        let correlated = projection_residual(projection, parameter, jet, point);
+        assert!(independent.width() > 1.0e6);
+        assert!(correlated.contains_zero());
+        assert!(correlated.width() < 1.0e-7);
+    }
+
+    fn negative_taper_junction(
+        second_offset: f64,
+    ) -> (Surface, Plane, [PreparedValidatedCurve<'static>; 2]) {
+        // Retain an independent raw profile gauge, negative covering-chart
+        // angle, and two oppositely parameterized generated incident guides.
+        let profile = Curve::TrimmedCurve(Processor::new(TrimmedCurve::new(
+            Box::new(Curve::Line(Line(
+                Point3::new(6.0, 0.0, 0.0),
+                Point3::new(6.0 + 1.0 / 6.0, 0.0, -1.0),
+            ))),
+            (-12.0, 0.0),
+        )));
+        let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+            profile,
+            Point3::origin(),
+            Vector3::unit_z(),
+        )))
+        .inverse();
+        let plane = Plane::new(
+            Point3::new(0.0, 0.0, 6.0),
+            Point3::new(1.0, 0.0, 6.0),
+            Point3::new(0.0, 1.0, 6.0),
+        );
+        let angle: f64 = -2.77439351226111;
+        let point = |angle: f64| Point3::new(5.0 * angle.cos(), 5.0 * angle.sin(), 6.0);
+        let cancel = AtomicBool::new(false);
+        let curves = [-0.04, 0.04].map(|delta| {
+            let guide = Curve::Line(Line(point(angle + delta), point(angle)));
+            prepared_face_plane_curve(
+                &guide,
+                ValidatedFacePlaneSource {
+                    surface: &surface,
+                    initial_chart: Some([angle + delta, -6.0]),
+                    endpoint_coordinate_planes: [
+                        None,
+                        Some(CoordinatePlane {
+                            normal: [0.0, 1.0, 0.0],
+                            offset: point(angle).y + if delta > 0.0 { second_offset } else { 0.0 },
+                        }),
+                    ],
+                },
+                &plane,
+                [0.0, 1.0],
+                &ValidatedCurveOptions::default(),
+                &mut ValidatedGeometryBudget::new(2_000_000),
+                &cancel,
+            )
+            .expect("the original tapered carrier certifies each generated incident path")
+        });
+        (surface, plane, curves)
+    }
+
+    #[test]
+    fn negative_taper_cross_candidate_junction_has_constructive_original_coverage() {
+        let (surface, plane, curves) = negative_taper_junction(0.0);
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(2_000_000);
+        let cell = [[-2.77439351226211, -2.77439351226011], [-6.0; 2]];
+        let (_, position) = plane_zero_cell(
+            &surface,
+            cell,
+            axis(2),
+            axis(2).map(|x| x * ValidatedInterval::point(6.0)),
+            &mut budget,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        for curve in &curves {
+            assert!(
+                !candidate_covers(curve, 0, cell, position, &plane, &mut budget, &cancel,).unwrap(),
+                "neither incident finite range represents both sides of the junction"
+            );
+        }
+        let (_, first_coordinate) = endpoint_coordinate(&curves[0], true).unwrap();
+        let (_, second_coordinate) = endpoint_coordinate(&curves[1], true).unwrap();
+        assert_ne!(first_coordinate, second_coordinate);
+        assert!(first_coordinate.same_plane(second_coordinate));
+        let matches = [(0, &curves[0], 0), (1, &curves[1], 0)];
+        assert!(junction_covers(&matches, cell, position, &plane, &mut budget, &cancel,).unwrap());
+        for (allowance, cancelled, expected) in [
+            (0, false, ValidatedGeometryError::ResourceLimit),
+            (2_000_000, true, ValidatedGeometryError::Cancelled),
+        ] {
+            assert_eq!(
+                junction_covers(
+                    &matches,
+                    cell,
+                    position,
+                    &plane,
+                    &mut ValidatedGeometryBudget::new(allowance),
+                    &AtomicBool::new(cancelled),
+                )
+                .unwrap_err(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn overlapping_original_tubes_do_not_authorize_a_generated_junction_gap() {
+        let (surface, plane, curves) = negative_taper_junction(-1.0e-6);
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(2_000_000);
+        let cell = [[-2.77439351226211, -2.77439351226011], [-6.0; 2]];
+        let (_, position) = plane_zero_cell(
+            &surface,
+            cell,
+            axis(2),
+            axis(2).map(|x| x * ValidatedInterval::point(6.0)),
+            &mut budget,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        let first = flatten(curves[0].pieces.last().unwrap().source_parameters.unwrap());
+        let second = flatten(curves[1].pieces.last().unwrap().source_parameters.unwrap());
+        assert!((0..4).all(|i| first[i].intersection(second[i]).is_some()));
+        assert!(
+            !junction_covers(
+                &[(0, &curves[0], 0), (1, &curves[1], 0)],
+                cell,
+                position,
+                &plane,
+                &mut budget,
+                &cancel,
+            )
+            .unwrap(),
+            "proximity and overlapping uniqueness tubes cannot close an actual gap"
+        );
+    }
+
+    #[test]
+    fn equal_generated_coordinate_does_not_weld_distinct_original_components() {
+        let surface = Surface::BsplineSurface(BsplineSurface::new(
+            (KnotVector::bezier_knot(2), KnotVector::bezier_knot(1)),
+            [(-1.0, 1.0), (0.0, -1.0), (1.0, 1.0)]
+                .into_iter()
+                .map(|(x, z)| vec![Point3::new(x, -1.0, z), Point3::new(x, 1.0, z)])
+                .collect(),
+        ));
+        let plane = Plane::new(
+            Point3::new(0.0, 0.0, 0.25),
+            Point3::new(1.0, 0.0, 0.25),
+            Point3::new(0.0, 1.0, 0.25),
+        );
+        let shared = CoordinatePlane {
+            normal: [0.0, 1.0, 0.0],
+            offset: 0.0,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(2_000_000);
+        let curves = [(0.25, -0.5, true), (0.75, 0.5, false)].map(|(u, x, back)| {
+            let guide = Curve::Line(Line(
+                Point3::new(x, if back { -0.5 } else { 0.0 }, 0.25),
+                Point3::new(x, if back { 0.0 } else { 0.5 }, 0.25),
+            ));
+            prepared_face_plane_curve(
+                &guide,
+                ValidatedFacePlaneSource {
+                    surface: &surface,
+                    initial_chart: Some([u, if back { 0.25 } else { 0.5 }]),
+                    endpoint_coordinate_planes: if back {
+                        [None, Some(shared)]
+                    } else {
+                        [Some(shared), None]
+                    },
+                },
+                &plane,
+                [0.0, 1.0],
+                &ValidatedCurveOptions::default(),
+                &mut budget,
+                &cancel,
+            )
+            .unwrap()
+        });
+        let cell = [[0.25; 2], [0.5 - 1.0e-12, 0.5 + 1.0e-12]];
+        let (_, position) = plane_zero_cell(
+            &surface,
+            cell,
+            axis(2),
+            axis(2).map(|x| x * ValidatedInterval::point(0.25)),
+            &mut budget,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            !junction_covers(
+                &[(0, &curves[0], 0), (1, &curves[1], 0)],
+                cell,
+                position,
+                &plane,
+                &mut budget,
+                &cancel,
+            )
+            .unwrap(),
+            "the common original uniqueness proof must exclude a second component"
+        );
     }
 
     #[test]
@@ -866,6 +1302,7 @@ mod plane_zero_cell_regressions {
             ValidatedFacePlaneSource {
                 surface: &surface,
                 initial_chart: Some([0.75, 0.25]),
+                endpoint_coordinate_planes: [None; 2],
             },
             &plane,
             [0.0, 1.0],

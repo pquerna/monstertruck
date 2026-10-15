@@ -139,6 +139,7 @@ fn coverage(
         ValidatedFacePlaneSource {
             surface: &surface,
             initial_chart: None,
+            endpoint_coordinate_planes: [None; 2],
         },
         &plane,
         range,
@@ -485,6 +486,7 @@ fn periodic_original_seam_root_seeds_complete_closed_face_coverage() {
         ValidatedFacePlaneSource {
             surface: &surface,
             initial_chart: None,
+            endpoint_coordinate_planes: [None; 2],
         },
         &plane,
         range,
@@ -502,6 +504,7 @@ fn periodic_original_seam_root_seeds_complete_closed_face_coverage() {
         ValidatedFacePlaneSource {
             surface: &surface,
             initial_chart: Some(initial_chart.map(ValidatedInterval::midpoint)),
+            endpoint_coordinate_planes: [None; 2],
         },
         &plane,
         range,

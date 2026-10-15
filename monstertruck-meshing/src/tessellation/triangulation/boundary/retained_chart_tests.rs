@@ -60,3 +60,52 @@ fn retained_trim_projection_keeps_original_negative_covering_chart() {
             .all(|point| { surface.subs(point.x, point.y).near(&point.point) })
     );
 }
+
+#[test]
+fn direct_retained_trim_preserves_a_shifted_negative_covering_chart() {
+    let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+        Curve::Line(Line(Point3::new(2.0, 0.0, 0.0), Point3::new(1.0, 0.0, 3.0))),
+        Point3::origin(),
+        Vector3::unit_z(),
+    )));
+    let start = -0.31;
+    let charts = [
+        Curve2D::Line(Line(
+            Point2::new(0.35, start),
+            Point2::new(0.35, start - PI),
+        )),
+        Curve2D::Line(Line(
+            Point2::new(0.35, start - PI),
+            Point2::new(0.35, start - TAU),
+        )),
+    ];
+    let originals = charts.each_ref().map(|chart| {
+        Curve::ParameterCurve(ParameterCurve::new(
+            chart.clone(),
+            Box::new(surface.clone()),
+        ))
+    });
+    let trims = charts
+        .each_ref()
+        .map(|chart| ParameterCurve::new(chart, &surface));
+    let boundary = PolyBoundaryPiece::try_new_from_trimmed(
+        &surface,
+        trims
+            .iter()
+            .zip(&originals)
+            .map(|(trim, original)| (true, Some(trim), original)),
+        0.001,
+    )
+    .expect("direct original trims must retain their declared covering chart");
+    let (lower, upper) = boundary.0.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(lower, upper), point| (lower.min(point.y), upper.max(point.y)),
+    );
+    assert!(lower <= start - TAU + 1.0e-10 && upper <= start + 1.0e-10);
+    assert!(
+        boundary
+            .0
+            .iter()
+            .all(|point| surface.subs(point.x, point.y).near(&point.point))
+    );
+}

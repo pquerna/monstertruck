@@ -151,10 +151,39 @@ impl PreparedSource<'_> {
     }
 }
 
+/// A stored coordinate proposal for an original carrier intersection.
+///
+/// Equal coefficients at incident generated ends propose a common junction;
+/// only fresh original-carrier uniqueness can certify that junction.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct CoordinatePlane {
-    normal: [f64; 3],
-    offset: f64,
+pub struct CoordinatePlane {
+    /// Finite nonzero normal. Preparation may negate all coefficients together.
+    pub normal: [f64; 3],
+    /// Finite plane offset in the same native spatial gauge as the carriers.
+    pub offset: f64,
+}
+
+impl CoordinatePlane {
+    fn aligned_to(self, reference: Self) -> Self {
+        if (0..3)
+            .map(|i| self.normal[i] * reference.normal[i])
+            .sum::<f64>()
+            < 0.0
+        {
+            self.negated()
+        } else {
+            self
+        }
+    }
+
+    fn negated(self) -> Self {
+        Self {
+            normal: self.normal.map(|value| -value),
+            offset: -self.offset,
+        }
+    }
+
+    fn same_plane(self, other: Self) -> bool { self == other || self == other.negated() }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -788,7 +817,14 @@ fn prepare_owned_leaf(
     // slot. Move the proven pieces unchanged, then replace that borrowed slot
     // with the very same owned native object, without another root search.
     let (range, pieces) = {
-        let prepared = prepare_unmapped_curve(&curve, range, &proof_options, None, budget, cancel)?;
+        let prepared = prepare_unmapped_curve(
+            &curve,
+            range,
+            &proof_options,
+            SourcePreparation::default(),
+            budget,
+            cancel,
+        )?;
         (prepared.range, prepared.pieces)
     };
     Ok(PreparedValidatedCurve {
@@ -905,14 +941,27 @@ fn prepare_validated_curve<'a>(
     {
         return prepare_mapped_curve(curve, range, options, depth, budget, cancel);
     }
-    prepare_unmapped_curve(curve, range, options, None, budget, cancel)
+    prepare_unmapped_curve(
+        curve,
+        range,
+        options,
+        SourcePreparation::default(),
+        budget,
+        cancel,
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+struct SourcePreparation {
+    initial_chart: Option<[f64; 2]>,
+    endpoint_coordinate_planes: [Option<CoordinatePlane>; 2],
 }
 
 fn prepare_unmapped_curve<'a>(
     curve: &'a Curve,
     range: [f64; 2],
     options: &ValidatedCurveOptions,
-    initial_source_chart: Option<[f64; 2]>,
+    source_preparation: SourcePreparation,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<PreparedValidatedCurve<'a>, ValidatedGeometryError> {
@@ -948,6 +997,7 @@ fn prepare_unmapped_curve<'a>(
         leader,
         range,
         options.max_retained_bytes - size_of::<PreparedValidatedCurve<'_>>(),
+        source_preparation.endpoint_coordinate_planes,
         budget,
         cancel,
     )?;
@@ -956,7 +1006,7 @@ fn prepare_unmapped_curve<'a>(
         validated_projection_leader_jet(leader, [range[0], range[0]], budget, cancel)?
             .position
             .map(ValidatedInterval::midpoint);
-    let seed0 = match initial_source_chart {
+    let seed0 = match source_preparation.initial_chart {
         Some(seed) => seed,
         None => nearest_seed(surface0, leader_start, options, budget, cancel)?,
     };
@@ -1389,6 +1439,11 @@ pub struct ValidatedFacePlaneSource<'a> {
     /// This does not certify a branch or replace full continuation and coverage.
     /// In particular it does not modify any retained original master selection.
     pub initial_chart: Option<[f64; 2]>,
+    /// Optional exact shared coordinates at the generated front and back.
+    ///
+    /// Incident guides must retain identical coefficients. These proposals
+    /// never replace original trim incidence or a common uniqueness proof.
+    pub endpoint_coordinate_planes: [Option<CoordinatePlane>; 2],
 }
 
 /// Binds a native guide to its authoritative source-face and section-plane roots.
@@ -1414,6 +1469,7 @@ pub fn prepared_face_plane_curve(
     let ValidatedFacePlaneSource {
         surface,
         initial_chart,
+        endpoint_coordinate_planes,
     } = source;
     let interval = interval_range(range)?;
     if interval.lower >= interval.upper
@@ -1425,6 +1481,14 @@ pub fn prepared_face_plane_curve(
         || !options.endpoint_tolerance.is_finite()
         || options.endpoint_tolerance <= 0.0
         || initial_chart.is_some_and(|chart| !chart.into_iter().all(f64::is_finite))
+        || endpoint_coordinate_planes
+            .into_iter()
+            .flatten()
+            .any(|coordinate| {
+                !coordinate.offset.is_finite()
+                    || !coordinate.normal.into_iter().all(f64::is_finite)
+                    || coordinate.normal.into_iter().all(|value| value == 0.0)
+            })
     {
         return Err(ValidatedGeometryError::InvalidInput);
     }
@@ -1481,7 +1545,17 @@ pub fn prepared_face_plane_curve(
         pieces,
         mapped,
         ..
-    } = prepare_unmapped_curve(&owned, range, &bounded, initial_chart, budget, cancel)?;
+    } = prepare_unmapped_curve(
+        &owned,
+        range,
+        &bounded,
+        SourcePreparation {
+            initial_chart,
+            endpoint_coordinate_planes,
+        },
+        budget,
+        cancel,
+    )?;
     drop(mapped);
     drop(source);
     budget.charge(1, cancel)?;
@@ -1582,7 +1656,7 @@ fn system(
     )?;
     let difference = subtract3(surface0.position, surface1.position);
     let point = scale3(add3(surface0.position, surface1.position), 0.5);
-    let plane = dot3(plane_jet.normal, point) - plane_jet.offset;
+    let plane = projection_residual(projection, parameter, plane_jet, point);
     let columns = [
         surface0.du,
         surface0.dv,
@@ -2506,15 +2580,50 @@ fn projection_jet(
     }
 }
 
+fn projection_residual(
+    projection: Projection,
+    parameter: ValidatedInterval,
+    jet: PlaneJet,
+    point: [ValidatedInterval; 3],
+) -> ValidatedInterval {
+    let Projection::BetweenPlanes {
+        parameter: range,
+        planes: [first, last],
+    } = projection
+    else {
+        return dot3(jet.normal, point) - jet.offset;
+    };
+    let value = |plane: CoordinatePlane| {
+        dot3(plane.normal.map(ValidatedInterval::point), point)
+            - ValidatedInterval::point(plane.offset)
+    };
+    if parameter.lower == parameter.upper {
+        if parameter.lower == range[0] {
+            return value(first);
+        }
+        if parameter.lower == range[1] {
+            return value(last);
+        }
+    }
+    // The SAME interpolation parameter multiplies normal and offset. Form
+    // their combined coefficient before multiplying its interval; otherwise
+    // a short path with a changed coordinate normal can incur an irreducible
+    // overestimate proportional to its absolute world position.
+    value(first)
+        + (parameter - ValidatedInterval::point(range[0]))
+            * (dot3(jet.first, point) - jet.offset_first)
+}
+
 fn coordinate_spans(
     leader: &Curve,
     range: [f64; 2],
     memory_limit: usize,
+    endpoint_coordinate_planes: [Option<CoordinatePlane>; 2],
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<Vec<([f64; 2], Projection)>, ValidatedGeometryError> {
     match check_leader_knots(leader, interval_range(range)?, budget, cancel) {
-        Ok(()) => {
+        Ok(()) if endpoint_coordinate_planes.iter().all(Option::is_none) => {
             budget.charge(1, cancel)?;
             let mut result = Vec::new();
             reserve_native_vec(&mut result, memory_limit, 0, budget, cancel)?;
@@ -2522,6 +2631,7 @@ fn coordinate_spans(
             return Ok(result);
         }
         Err(ValidatedGeometryError::NonSmooth) => {}
+        Ok(()) => {}
         Err(error) => return Err(error),
     }
     budget.charge(1, cancel)?;
@@ -2559,10 +2669,16 @@ fn coordinate_spans(
     reserve_native_vec(&mut knots, memory_limit, 0, budget, cancel)?;
     knots.push(range[1]);
     let mut result = Vec::new();
-    let mut previous = coordinate_plane(leader, knots[0], None, budget, cancel)?;
+    let natural_start = coordinate_plane(leader, knots[0], None, budget, cancel)?;
+    let mut previous = endpoint_coordinate_planes[0].map_or(natural_start, |coordinate| {
+        coordinate.aligned_to(natural_start)
+    });
     for pair in knots.windows(2) {
         budget.charge(1, cancel)?;
-        let next = coordinate_plane(leader, pair[1], Some(previous), budget, cancel)?;
+        let next = match endpoint_coordinate_planes[1].filter(|_| pair[1] == range[1]) {
+            Some(coordinate) => coordinate.aligned_to(previous),
+            None => coordinate_plane(leader, pair[1], Some(previous), budget, cancel)?,
+        };
         let parameter = [pair[0], pair[1]];
         if parameter[0] >= parameter[1] {
             return Err(ValidatedGeometryError::InvalidInput);

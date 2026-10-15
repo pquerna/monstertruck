@@ -264,7 +264,16 @@ impl PolyBoundaryPiece {
                         acc.extend(boundary);
                         acc
                     });
-            Self::from_parameter_boundary(surface, concatenated)
+            // A parameter boundary already selects the covering chart for
+            // these edge uses. Rewrapping it changes retained seam branches.
+            let points = concatenated
+                .into_iter()
+                .map(|uv| {
+                    (uv.x.is_finite() && uv.y.is_finite())
+                        .then(|| SurfacePoint::from((uv, surface.evaluate(uv.x, uv.y))))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Self::from_surface_points(points)
         })
     }
 

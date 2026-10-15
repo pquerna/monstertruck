@@ -63,9 +63,9 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
 - Surface `parameter_division` recursion guard + decorrelated jitter (partial port of upstream [`7b1f4171`](https://github.com/ricosjp/truck/commit/7b1f4171)).
 - `UnitCircle::search_{nearest_}parameter` honors `hint` across the period (upstream [`f563ae53`](https://github.com/ricosjp/truck/commit/f563ae53) + [`86e4ed75`](https://github.com/ricosjp/truck/commit/86e4ed75)).
 - STEP `Axis2Placement3d` guards parallel `axis`/`ref_direction`; revolved-line-to-cylinder conversion drops the spurious inversion (upstream [`524f5f53`](https://github.com/ricosjp/truck/commit/524f5f53)); rational trim boundaries preserved through the load path; inverted-processor sample alignment.
-- Certified native face/plane coverage closes finite section endpoints only through
-  identified original, material-oriented trim coedges and their retained prepared
-  boundary branches. Endpoint bindings are genealogy, not geometric proof: the
+- Certified original trim endpoint closure uses identified, material-oriented
+  original coedges and their retained prepared boundary branches. Endpoint
+  bindings are genealogy, not geometric proof: the
   complete trim-root census, transverse crossing and unique common continuation
   must still certify. Nonzero chart correspondence error is retained explicitly.
   Optional closure is disabled by default; enabled closure returns sealed physical
@@ -82,14 +82,21 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   or validated candidate tubes can discharge a cell before trim winding.
   Revolution enclosures form constant axial/radial Rodrigues coefficients before
   applying the original profile, preserving correlated full-period coordinates.
+- Generated face/plane endpoints may share a proposed `CoordinatePlane` through
+  `ValidatedFacePlaneSource.endpoint_coordinate_planes`. Exact common-coordinate
+  root uniqueness, strict path monotonicity and complete joined continuation
+  must certify before their union covers an original cell; overlapping tubes
+  or nearby endpoint positions do not establish a junction. Interpolated
+  coordinate residuals retain their common parameter coefficient before
+  interval evaluation, including when endpoint normals differ.
 
 **Meshing**
 - Triangulation/tessellation pipeline rewritten; CDT trim-constraint handling rebuilt across [`b60b1604`](https://github.com/virtualritz/monstertruck/commit/b60b1604)/[`46b21f9f`](https://github.com/virtualritz/monstertruck/commit/46b21f9f)/[`f35d3b6d`](https://github.com/virtualritz/monstertruck/commit/f35d3b6d)/[`7c5ce2d2`](https://github.com/virtualritz/monstertruck/commit/7c5ce2d2) (skip conflicting, avoid invalid, preserve split, split through vertices).
 - `PolyBoundary::include` gets an AABB early reject; double tessellation removed in `step-to-mesh`.
 - Tessellation benchmark example + baseline log for regression tracking.
 - Retained trim projection requires an active original raw parameter and matching
-  spatial point before returning source UV. Trim-aware boundary projection keeps
-  that original chart instead of wrapping each coedge into a canonical period.
+  spatial point before returning source UV. Direct trim sampling and shared-edge
+  boundary projection keep that chart instead of rewrapping each coedge.
 
 **Boolean Operations**
 - Reverted upstream's [`700138cb`](https://github.com/virtualritz/monstertruck/commit/700138cb)-equivalent boolean rewrite after bisect confirmed it regressed `punched_cube` and `adjacent_cubes_or` (output shells came back `Oriented`, not `Closed`); we keep the upstream-derived single-ray algorithm wrapped in our `Result` layer.
