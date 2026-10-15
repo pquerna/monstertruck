@@ -1,7 +1,8 @@
 //! Original per-use trim charts must survive candidate boundary projection.
 use super::*;
 use monstertruck_geometry::prelude::{
-    Line, ParameterCurve, Point2, Point3, Processor, RevolutionSurface, Vector3,
+    Line, ParameterCurve, Point2, Point3, Processor, RevolutionSurface,
+    TrimBoundaryProjectionError, Vector3,
 };
 use monstertruck_modeling::{Curve, Curve2D, Surface};
 use std::f64::consts::{PI, TAU};
@@ -27,10 +28,9 @@ fn retained_trim_projection_keeps_original_negative_covering_chart() {
         .each_ref()
         .map(|chart| ParameterCurve::new(chart, &surface));
     // A point on the same carrier is not necessarily on this original trim.
-    assert!(
-        trims[0]
-            .project_boundary_point(surface.subs(0.6, -0.5), None)
-            .is_none()
+    assert_eq!(
+        trims[0].project_boundary_point(surface.subs(0.6, -0.5), None),
+        Err(TrimBoundaryProjectionError::Refused)
     );
     let polylines = trims.each_ref().map(|trim| {
         (0..=16)
@@ -107,5 +107,33 @@ fn direct_retained_trim_preserves_a_shifted_negative_covering_chart() {
             .0
             .iter()
             .all(|point| surface.subs(point.x, point.y).near(&point.point))
+    );
+}
+
+#[test]
+fn retained_trim_projection_refuses_another_curve_on_the_same_carrier() {
+    let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+        Curve::Line(Line(Point3::new(2.0, 0.0, 0.0), Point3::new(1.0, 0.0, 3.0))),
+        Point3::origin(),
+        Vector3::unit_z(),
+    )));
+    let chart = Curve2D::Line(Line(Point2::new(0.35, -0.2), Point2::new(0.35, -1.2)));
+    let trim = ParameterCurve::new(&chart, &surface);
+    let original = Curve::ParameterCurve(ParameterCurve::new(
+        chart.clone(),
+        Box::new(surface.clone()),
+    ));
+    let other_curve = (0..=16)
+        .map(|index| surface.subs(0.6, -0.2 - index as f64 / 16.0))
+        .collect::<PolylineCurve>();
+    let boundary = PolyBoundaryPiece::try_new_from_aligned_trimmed(
+        &surface,
+        iter::once((Some(&trim), &original, other_curve)),
+        &|source: &Surface, point: Point3, hint| source.search_parameter(point, hint, 100),
+        0.001,
+    );
+    assert!(
+        boundary.is_none(),
+        "carrier membership cannot replace membership on the explicit original trim"
     );
 }

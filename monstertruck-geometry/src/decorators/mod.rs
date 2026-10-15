@@ -1,5 +1,6 @@
 use crate::{prelude::*, *};
 use std::ops::{Deref, DerefMut, Mul};
+use std::result::Result as StdResult;
 
 /// revolution
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -224,6 +225,15 @@ pub struct ParameterCurve<C, S> {
     surface: S,
 }
 
+/// Why a spatial point could not be projected onto an exact trim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrimBoundaryProjectionError {
+    /// This parameter-only trim does not provide a spatial carrier.
+    Unsupported,
+    /// Projection could not establish an active point on the original trim.
+    Refused,
+}
+
 /// Samples exact native trim geometry in surface parameter space.
 ///
 /// Exactness describes the native trim's provenance, not the returned polyline.
@@ -236,8 +246,15 @@ pub trait ExactTrimBoundary2D {
     fn exact_trim_boundary_2d(&self, tolerance: f64) -> Vec<Point2>;
 
     /// Projects a point on the spatial boundary back onto this trim boundary.
-    fn project_boundary_point(&self, _point: Point3, _hint: Option<f64>) -> Option<(f64, Point2)> {
-        None
+    ///
+    /// `Unsupported` permits a caller to propose UV through its carrier.
+    /// `Refused` must not be replaced by a projection onto another carrier curve.
+    fn project_boundary_point(
+        &self,
+        _point: Point3,
+        _hint: Option<f64>,
+    ) -> StdResult<(f64, Point2), TrimBoundaryProjectionError> {
+        Err(TrimBoundaryProjectionError::Unsupported)
     }
 }
 

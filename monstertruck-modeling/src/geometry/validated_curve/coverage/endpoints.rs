@@ -916,8 +916,12 @@ pub(super) fn endpoint_covers(
             ValidatedGeometryError::Unresolved,
         ));
     }
+    // The stored UV circuit fixes material membership. The prepared identity
+    // includes face-use inversion, which reverses winding but cannot change
+    // that membership. Recover the absolute stored-wire direction first.
+    let absolute_orientation = boundary.identity.orientation == domain.face().orientation();
     let material_positive = sign(-root.derivative * determinant)
-        .map(|x| if boundary.identity.orientation { x } else { !x })
+        .map(|x| if absolute_orientation { x } else { !x })
         .ok_or(ValidatedGeometryError::NonTransverse)?;
     let candidate_positive =
         sign(endpoint_jet.first[axis]).ok_or(ValidatedGeometryError::NonTransverse)?;

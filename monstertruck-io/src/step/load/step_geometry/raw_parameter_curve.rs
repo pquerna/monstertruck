@@ -1,6 +1,6 @@
 use super::*;
 use crate::step::{ParameterChart, SurfaceParameterChart};
-use monstertruck_geometry::prelude::ExactTrimBoundary2D;
+use monstertruck_geometry::prelude::{ExactTrimBoundary2D, TrimBoundaryProjectionError};
 use std::result::Result;
 
 type SourcePair = monstertruck_geometry::prelude::ParameterCurve<Box<Curve2D>, Box<Surface>>;
@@ -336,7 +336,11 @@ impl ExactTrimBoundary2D for StepParameterCurve {
         decoded_parameter_curve(self).exact_trim_boundary_2d(tolerance)
     }
 
-    fn project_boundary_point(&self, point: Point3, hint: Option<f64>) -> Option<(f64, Point2)> {
+    fn project_boundary_point(
+        &self,
+        point: Point3,
+        hint: Option<f64>,
+    ) -> Result<(f64, Point2), TrimBoundaryProjectionError> {
         decoded_parameter_curve(self).project_boundary_point(point, hint)
     }
 }

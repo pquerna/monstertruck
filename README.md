@@ -67,7 +67,9 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
   original coedges and their retained prepared boundary branches. Endpoint
   bindings are genealogy, not geometric proof: the
   complete trim-root census, transverse crossing and unique common continuation
-  must still certify. Nonzero chart correspondence error is retained explicitly.
+  must still certify. Material membership removes the face-use inversion parity
+  from the material-oriented coedge identity before testing endpoint direction.
+  Nonzero chart correspondence error is retained explicitly.
   Optional closure is disabled by default; enabled closure returns sealed physical
   extension, arc-length, position and plane-error bounds for independent chord and
   signed-area accounting, under the same work, storage and cancellation limits.
@@ -97,6 +99,8 @@ Per-crate detail and porting verdicts live in [`TRUCK-PARITY.md`](TRUCK-PARITY.m
 - Retained trim projection requires an active original raw parameter and matching
   spatial point before returning source UV. Direct trim sampling and shared-edge
   boundary projection keep that chart instead of rewrapping each coedge.
+  `TrimBoundaryProjectionError` distinguishes an unsupported parameter-only trim
+  from a refused spatial trim; carrier projection cannot override that refusal.
 
 **Boolean Operations**
 - Reverted upstream's [`700138cb`](https://github.com/virtualritz/monstertruck/commit/700138cb)-equivalent boolean rewrite after bisect confirmed it regressed `punched_cube` and `adjacent_cubes_or` (output shells came back `Oriented`, not `Closed`); we keep the upstream-derived single-ray algorithm wrapped in our `Result` layer.

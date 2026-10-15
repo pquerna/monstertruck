@@ -15,6 +15,9 @@ enum Case {
     RawBoundaryGauge,
     ScaledBoundary,
     ScaledRawBoundaryGauge,
+    InvertedRawBoundaryGauge,
+    InvertedRawGaugeWrongEnd,
+    InvertedHole,
     NearWrongSource,
     Interior,
     WrongCandidate,
@@ -79,6 +82,13 @@ fn coverage(
     } else {
         1.0
     };
+    let raw_boundary_gauge = matches!(
+        case,
+        Case::RawBoundaryGauge
+            | Case::ScaledRawBoundaryGauge
+            | Case::InvertedRawBoundaryGauge
+            | Case::InvertedRawGaugeWrongEnd
+    );
     let (wire, trims, boundaries) = rectangle_with_gauge(
         [
             Point2::new(-3.0, -2.0),
@@ -86,7 +96,7 @@ fn coverage(
             Point2::new(3.0, 2.0),
             Point2::new(-3.0, 2.0),
         ],
-        matches!(case, Case::RawBoundaryGauge | Case::ScaledRawBoundaryGauge),
+        raw_boundary_gauge,
         boundary_scale,
     );
     let surface = Surface::Plane(Plane::new(
@@ -94,7 +104,7 @@ fn coverage(
         Point3::new(1.0, 0.0, 0.0),
         Point3::new(0.0, 1.0, 0.0),
     ));
-    let (wires, trim_wires) = if matches!(case, Case::Hole) {
+    let (wires, trim_wires) = if matches!(case, Case::Hole | Case::InvertedHole) {
         // Clockwise inner circuit removes a two-by-two material region.
         let (hole, hole_trims, _) = rectangle([
             Point2::new(-1.0, -1.0),
@@ -106,7 +116,14 @@ fn coverage(
     } else {
         (vec![wire], vec![trims])
     };
-    let trimmed = TrimmedFace::new(Face::new(wires, surface.clone()), trim_wires);
+    let mut face = Face::new(wires, surface.clone());
+    if matches!(
+        case,
+        Case::InvertedRawBoundaryGauge | Case::InvertedRawGaugeWrongEnd | Case::InvertedHole
+    ) {
+        face.invert();
+    }
+    let trimmed = TrimmedFace::new(face, trim_wires);
     let cancel = AtomicBool::new(false);
     let mut preparation = ValidatedGeometryBudget::new(2_000_000);
     let domain = prepare_face_parameter_domain_with_uncertainty(
@@ -148,7 +165,7 @@ fn coverage(
         &cancel,
     )
     .expect("regular transverse original face/plane continuation");
-    let boundary_range = if matches!(case, Case::RawBoundaryGauge | Case::ScaledRawBoundaryGauge) {
+    let boundary_range = if raw_boundary_gauge {
         [2.0, 5.0]
     } else {
         [0.0, 1.0]
@@ -205,7 +222,7 @@ fn coverage(
     ];
     match case {
         Case::WrongCandidate => bindings[0].candidate_index = 1,
-        Case::WrongEnd => bindings[0].endpoint_is_back = true,
+        Case::WrongEnd | Case::InvertedRawGaugeWrongEnd => bindings[0].endpoint_is_back = true,
         Case::WrongCut => bindings[0].source_cut_parameter = 0.0,
         Case::WrongEdge => bindings[0].original_edge_id = domain.coedges()[1].identity.edge_id,
         Case::WrongBoundary => bindings[0].boundary = &top,
@@ -306,6 +323,17 @@ fn normalized_original_source_matches_native_builder_scaled_edge() {
 #[test]
 fn normalized_original_source_preserves_active_raw_restriction_when_scaled() {
     assert_physical_receipts(1.0 / 3.0, Case::ScaledRawBoundaryGauge);
+}
+
+#[test]
+fn inverted_face_preserves_original_material_side_with_independent_raw_gauge() {
+    assert_physical_receipts(1.0 / 3.0, Case::InvertedRawBoundaryGauge);
+}
+
+#[test]
+fn inverted_face_does_not_authorize_wrong_end_or_omitted_hole_roots() {
+    assert!(coverage(1.0 / 3.0, Case::InvertedRawGaugeWrongEnd).is_err());
+    assert!(coverage(0.0, Case::InvertedHole).is_err());
 }
 
 #[test]

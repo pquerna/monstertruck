@@ -43,6 +43,11 @@ monstertruck 0.4.0.
 - Retained trim projection rejects inactive raw parameters and off-trim nearest
   points, preferring the original spatial trim over periodic carrier inversion.
   Both direct sampling and shared-edge projection preserve the per-use chart.
+- Original endpoint material-side tests remove face-use inversion parity from
+  stored coedge identity, preserving geometric membership under face inversion.
+- Spatial trim projection returns a typed unsupported/refused result. Only
+  parameter-only trims may use carrier projection; a refused original spatial
+  trim tries direct retained-chart sampling instead of silently changing charts.
 
 - STEP `SURFACE_CURVE` and `SEAM_CURVE` retain their original explicit leader,
   kind, declared master and associated geometry, including closed restrictions.

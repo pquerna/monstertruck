@@ -7,7 +7,8 @@
 
 use super::*;
 use mesh::spade_round;
-use std::sync::OnceLock;
+use monstertruck_geometry::prelude::TrimBoundaryProjectionError;
+use std::{result::Result as StdResult, sync::OnceLock};
 
 /// Trials for the verified nearest-parameter rung, matching the 100 the
 /// robust path's `search_nearest_parameter_sp` uses by default.
@@ -290,38 +291,40 @@ impl PolyBoundaryPiece {
         <C as ExactParameterBoundary2D<S>>::BoundaryCurve: ExactTrimBoundary2D,
     {
         wire.map(|(trim_curve, edge_curve, polyline)| {
-            trim_curve
-                .and_then(|trim_curve| {
-                    let mut previous_t = None;
-                    polyline
-                        .iter()
-                        .copied()
-                        .map(|point| {
-                            let (t, uv) = trim_curve.project_boundary_point(point, previous_t)?;
-                            // A retained trim already selects its source chart.
-                            // Rewrapping each coedge into the carrier's default
-                            // period destroys that association at shared seams.
-                            if !uv.x.is_finite() || !uv.y.is_finite() {
-                                return None;
-                            }
-                            previous_t = Some(t);
-                            Some(SurfacePoint::from((uv, point)))
-                        })
-                        .collect::<Option<Vec<_>>>()
+            if let Some(trim_curve) = trim_curve {
+                let mut previous_t = None;
+                // Unsupported parameter-only trims still need carrier UV
+                // proposals. A refused spatial trim must instead let the
+                // caller try its direct original-chart candidate.
+                let projected = polyline
+                    .iter()
+                    .copied()
+                    .map(|point| {
+                        let (t, uv) = trim_curve.project_boundary_point(point, previous_t)?;
+                        if !uv.x.is_finite() || !uv.y.is_finite() {
+                            return Err(TrimBoundaryProjectionError::Refused);
+                        }
+                        previous_t = Some(t);
+                        Ok(SurfacePoint::from((uv, point)))
+                    })
+                    .collect::<StdResult<Vec<_>, _>>();
+                match projected {
+                    Ok(points) => return Some(points),
+                    Err(TrimBoundaryProjectionError::Refused) => return None,
+                    Err(TrimBoundaryProjectionError::Unsupported) => {}
+                }
+            }
+            let mut previous = None;
+            polyline
+                .iter()
+                .copied()
+                .map(|point| {
+                    let (u, v) = sp(surface, point, previous)
+                        .and_then(|uv| Self::normalize_uv(surface, uv, previous))?;
+                    previous = Some((u, v));
+                    Some(SurfacePoint::from((Point2::new(u, v), point)))
                 })
-                .or_else(|| {
-                    let mut previous = None;
-                    polyline
-                        .iter()
-                        .copied()
-                        .map(|point| {
-                            let (u, v) = sp(surface, point, previous)
-                                .and_then(|uv| Self::normalize_uv(surface, uv, previous))?;
-                            previous = Some((u, v));
-                            Some(SurfacePoint::from((Point2::new(u, v), point)))
-                        })
-                        .collect::<Option<Vec<_>>>()
-                })
+                .collect::<Option<Vec<_>>>()
                 .or_else(|| {
                     edge_curve
                         .parameter_boundary_2d(surface, tolerance)

@@ -245,7 +245,11 @@ where
         lifted_trim_boundary_2d(self, tolerance)
     }
 
-    fn project_boundary_point(&self, point: Point3, hint: Option<f64>) -> Option<(f64, Point2)> {
+    fn project_boundary_point(
+        &self,
+        point: Point3,
+        hint: Option<f64>,
+    ) -> StdResult<(f64, Point2), TrimBoundaryProjectionError> {
         // A boundary is walked from the trim's start. A trim closed in space
         // but open in parameter space matches its start with both ends, and
         // an unseeded search can land on the far one, sending every later
@@ -260,7 +264,7 @@ where
             && seed <= range.1
             && self.evaluate(seed).near(&point)
         {
-            return Some((seed, self.curve().evaluate(seed)));
+            return Ok((seed, self.curve().evaluate(seed)));
         }
         let hint = Some(seed);
         // Project on the actual spatial trim before inverting its carrier.
@@ -283,6 +287,7 @@ where
                     .filter(on_active_trim)
             })
             .map(|t| (t, self.curve().subs(t)))
+            .ok_or(TrimBoundaryProjectionError::Refused)
     }
 }
 
