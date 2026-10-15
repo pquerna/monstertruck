@@ -2005,7 +2005,8 @@ mod tensor_factor_regressions {
 mod retained_trim_regressions {
     use super::*;
     use crate::{
-        Invertible, Line, Matrix3, Matrix4, Point2, Point3, Processor, Tolerance, TrimmedCurve, UnitCircle,
+        Invertible, Line, Matrix3, Matrix4, Point2, Point3, Processor, Tolerance, TrimmedCurve,
+        UnitCircle,
     };
 
     #[test]
