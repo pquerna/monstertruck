@@ -16,6 +16,10 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Surface-parameter joint admission can reuse the same bounded singular-stratum
+  proof as native face-domain preparation. The certificate encloses the complete
+  spherical-pole connector against the original shared vertex and caller's
+  physical allowance; ordinary chart gaps and period aliases remain refusals.
 - Prepared intersection-curve jets contract nested original root images over
   the complete requested subspan before enclosing first and second derivatives.
   This resolves coarse uniqueness-tube Green-integral bounds without pointwise

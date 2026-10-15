@@ -36,7 +36,7 @@ pub use natural_boundary::NaturalBoundaryJointEvidence;
 pub use natural_boundary::certified_curve2d_endpoint_coordinate;
 pub use natural_boundary::certified_curve2d_is_straight_regular;
 pub use planar::certified_planar_parameter_curve;
-pub use poles::{SphericalPole, TrimJointKind};
+pub use poles::{SphericalPole, TrimJointKind, certified_surface_parameter_joint};
 
 /// Borrowed access to an authoritative native UV trim without carrier copies.
 pub trait NativeTrimCurve {

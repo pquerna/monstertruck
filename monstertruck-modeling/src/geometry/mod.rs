@@ -48,8 +48,8 @@ pub use validated_trim::{
     certified_affine_surface_parameter_curve, certified_curve2d_endpoint_coordinate,
     certified_curve2d_is_straight_regular, certified_extrusion_parameter_curve,
     certified_planar_parameter_curve, certified_surface_boundary_parameter_curve,
-    certified_surface_isocurve_parameter_curve, prepare_face_parameter_domain,
-    prepare_face_parameter_domain_with_natural_boundaries,
+    certified_surface_isocurve_parameter_curve, certified_surface_parameter_joint,
+    prepare_face_parameter_domain, prepare_face_parameter_domain_with_natural_boundaries,
     prepare_face_parameter_domain_with_uncertainty,
 };
 
