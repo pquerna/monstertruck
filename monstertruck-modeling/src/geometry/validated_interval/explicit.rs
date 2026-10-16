@@ -1013,6 +1013,119 @@ fn spline_surface<P, const N: usize>(
     .map(|value| value.values)
 }
 
+/// Original-coefficient tensor identity, admitted only for two complete bases.
+///
+/// In i-major order the first row is retained once; all other original controls
+/// are visited once. Differences precede any scalar functional, so an additive
+/// source does not acquire artificial cross-axis Taylor dependence.
+pub(super) struct TensorCoefficients<const N: usize> {
+    partition: bool,
+    origin: [f64; N],
+    row: [f64; N],
+    columns: [[ValidatedInterval; N]; MAX_DEGREE + 1],
+}
+
+// Actual maximum homogeneous layout, including the first-row interval buffer.
+pub(crate) const TENSOR_COEFFICIENT_WORKSPACE_BYTES: usize = size_of::<TensorCoefficients<4>>();
+
+// Shared named tensor state for full and K=1/2 projected evaluation: two basis
+// arrays, coefficient identity, original evidence, both independent output
+// arrays, span hull and the existing rational subdivision stack. This is not an
+// RSS/compiler-frame bound. Recursive native geometry still obeys
+// MAX_NATIVE_GEOMETRY_NESTING.
+pub(crate) const TENSOR_EVALUATOR_FIXED_BYTES: usize = 2 * size_of::<[Taylor; MAX_DEGREE + 2]>()
+    + TENSOR_COEFFICIENT_WORKSPACE_BYTES
+    + size_of::<ControlEvidence<4>>()
+    + 2 * size_of::<[Taylor; 4]>()
+    + size_of::<Option<ControlSum<4>>>()
+    + size_of::<[([Taylor; 2], usize); 49]>();
+
+impl<const N: usize> TensorCoefficients<N> {
+    pub(super) fn new(partition: bool) -> Self {
+        Self {
+            partition,
+            origin: [0.0; N],
+            row: [0.0; N],
+            columns: [[super::ZERO; N]; MAX_DEGREE + 1],
+        }
+    }
+
+    pub(super) fn origin_difference(&self, point: [f64; N]) -> [ValidatedInterval; N] {
+        std::array::from_fn(|axis| {
+            ValidatedInterval::point(point[axis]) - ValidatedInterval::point(self.origin[axis])
+        })
+    }
+
+    // Original hull/evidence collection has already validated this coefficient.
+    pub(super) fn term(
+        &mut self,
+        point: [f64; N],
+        [i, j]: [usize; 2],
+        [a, b]: [Taylor; 2],
+        product: Taylor,
+    ) -> ([ValidatedInterval; N], Taylor) {
+        if !self.partition {
+            return (point.map(ValidatedInterval::point), product);
+        }
+        if i == 0 && j == 0 {
+            self.origin = point;
+            self.row = point;
+            return (point.map(ValidatedInterval::point), Taylor::constant(1.0));
+        }
+        let difference = |origin: [f64; N]| {
+            std::array::from_fn(|axis| {
+                ValidatedInterval::point(point[axis]) - ValidatedInterval::point(origin[axis])
+            })
+        };
+        if i == 0 {
+            self.columns[j] = difference(self.origin);
+            return (self.columns[j], b);
+        }
+        if j == 0 {
+            self.row = point;
+            return (difference(self.origin), a);
+        }
+        let row_difference: [ValidatedInterval; N] = difference(self.row);
+        let mixed = std::array::from_fn(|axis| row_difference[axis] - self.columns[j][axis]);
+        let factor = if mixed.iter().any(|coefficient| *coefficient != super::ZERO) {
+            product
+        } else {
+            Taylor::ZERO
+        };
+        (mixed, factor)
+    }
+}
+
+pub(super) fn add_tensor_term<const K: usize>(
+    values: &mut [Taylor; K],
+    coefficients: [ValidatedInterval; K],
+    basis: Taylor,
+) {
+    for (value, coefficient) in values.iter_mut().zip(coefficients) {
+        if coefficient != super::ZERO {
+            *value = *value + Taylor::interval(coefficient) * basis;
+        }
+    }
+}
+
+/// Intersect independent Taylor proofs on the identical complete source cell.
+/// An inconsistent coefficient is a failure, never a choice of one proof.
+pub(super) fn intersect_tensor_values<const K: usize>(
+    values: &mut [Taylor; K],
+    original: &[Taylor; K],
+) -> Result<(), ValidatedGeometryError> {
+    for (value, original) in values.iter_mut().zip(original) {
+        for i in 0..4 {
+            for j in 0..4 - i {
+                value.0[i][j] = value.0[i][j]
+                    .intersection(original.0[i][j])
+                    .ok_or(ValidatedGeometryError::ConditioningFailure)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 // Keep each tensor's source data, UV Taylor pair, and execution context together.
 fn surface_sum<P, const N: usize>(
     (knots, controls): (&(KnotVector, KnotVector), &[Vec<P>]),
@@ -1076,14 +1189,35 @@ fn surface_sum<P, const N: usize>(
             let (iv, lv, bv) = basis(&knots.1, nv, pv, sv, v, budget, cancel)?;
             let partition_unity = su >= pu && su < nu && sv >= pv && sv < nv;
             let mut value = [Taylor::ZERO; N];
+            let mut original = [Taylor::ZERO; N];
             let mut evidence = ControlEvidence::new(weight_axis);
+            let mut tensor = TensorCoefficients::new(partition_unity);
             for i in 0..lu {
                 for j in 0..lv {
                     budget.charge(1, cancel)?;
                     let p = control(&controls[iu + i][iv + j]);
-                    let basis = bu[i] * bv[j];
-                    evidence.include(p, basis, partition_unity, &mut value)?;
+                    evidence.observe(p)?;
+                    let product = bu[i] * bv[j];
+                    let (coefficient, basis) = tensor.term(p, [i, j], [bu[i], bv[j]], product);
+                    if partition_unity {
+                        budget.charge(1, cancel)?;
+                        if i == 0 && j == 0 {
+                            original = p.map(Taylor::constant);
+                        } else {
+                            let residual = if i == 0 || j == 0 {
+                                coefficient
+                            } else {
+                                tensor.origin_difference(p)
+                            };
+                            add_tensor_term(&mut original, residual, product);
+                        }
+                    }
+                    add_tensor_term(&mut value, coefficient, basis);
                 }
+            }
+            if partition_unity {
+                budget.charge(10 * N, cancel)?;
+                intersect_tensor_values(&mut value, &original)?;
             }
             let nonnegative = knots.0[su] <= u.0[0][0].lower
                 && u.0[0][0].upper <= knots.0[su + 1]
@@ -1539,17 +1673,28 @@ impl<const N: usize> ControlEvidence<N> {
         partition_unity: bool,
         values: &mut [Taylor; N],
     ) -> Result<(), ValidatedGeometryError> {
-        if !point.into_iter().all(f64::is_finite) {
-            return Err(ValidatedGeometryError::InvalidInput);
-        }
-        // Partition unity removes the constant origin before basis evaluation.
-        // The original coefficients still own every hull and denominator proof.
+        self.observe(point)?;
+        // Curves need only the one-axis origin identity.
         let first = self.origin.is_none();
         let origin = self
             .origin
             .get_or_insert(if partition_unity { point } else { [0.0; N] });
         if first {
             *values = origin.map(Taylor::constant);
+        }
+        for i in 0..N {
+            let coefficient = if point[i] == origin[i] {
+                ValidatedInterval::point(0.0)
+            } else {
+                ValidatedInterval::point(point[i]) - ValidatedInterval::point(origin[i])
+            };
+            values[i] = values[i] + Taylor::interval(coefficient) * basis;
+        }
+        Ok(())
+    }
+    fn observe(&mut self, point: [f64; N]) -> Result<(), ValidatedGeometryError> {
+        if !point.into_iter().all(f64::is_finite) {
+            return Err(ValidatedGeometryError::InvalidInput);
         }
         for i in 0..N {
             let value = ValidatedInterval::point(point[i]);
@@ -1574,12 +1719,6 @@ impl<const N: usize> ControlEvidence<N> {
                     }
                 }
             }
-            let coefficient = if point[i] == origin[i] {
-                ValidatedInterval::point(0.0)
-            } else {
-                ValidatedInterval::point(point[i]) - ValidatedInterval::point(origin[i])
-            };
-            values[i] = values[i] + Taylor::interval(coefficient) * basis;
         }
         Ok(())
     }
@@ -1914,7 +2053,240 @@ mod native_extrusion_jet_tests {
 #[cfg(test)]
 mod tensor_factor_regressions {
     use super::*;
-    use crate::{BsplineSurface, NurbsSurface, Vector4};
+    use crate::{BsplineSurface, NurbsSurface, Point3, Vector4};
+
+    fn contains(bound: ValidatedInterval, value: f64) {
+        assert!(
+            bound.lower <= value && value <= bound.upper,
+            "{bound:?} excludes {value}"
+        );
+    }
+
+    #[test]
+    fn dual_tensor_proof_retains_one_origin_bounds_without_rereading_controls() {
+        let knot = KnotVector::bezier_knot(3);
+        let knots = (knot.clone(), knot);
+        let controls: Vec<Vec<[f64; 3]>> = (0..4)
+            .map(|i| {
+                (0..4)
+                    .map(|j| {
+                        let (i, j) = (i as f64, j as f64);
+                        [
+                            i + j * j,
+                            3.0 * i * i - j,
+                            5.0 * i * j - 2.0 * i.powi(3) + j.powi(3),
+                        ]
+                    })
+                    .collect()
+            })
+            .collect();
+        let t = Taylor::variable(ValidatedInterval::new(0.125, 0.375).unwrap(), 0);
+        let cases = [
+            [t, Taylor::constant(0.125) + t + t * t],
+            [
+                Taylor::variable(ValidatedInterval::new(0.1, 0.9).unwrap(), 0),
+                Taylor::variable(ValidatedInterval::new(0.2, 0.8).unwrap(), 1),
+            ],
+        ];
+        for uv in cases {
+            let cancel = AtomicBool::new(false);
+            let mut budget = ValidatedGeometryBudget::new(1_000_000);
+            let visits = std::cell::Cell::new(0);
+            let value = surface_sum(
+                (&knots, &controls),
+                uv,
+                |point| {
+                    visits.set(visits.get() + 1);
+                    *point
+                },
+                None,
+                false,
+                (&mut budget, &cancel),
+            )
+            .unwrap()
+            .values;
+            assert_eq!(visits.get(), 16);
+            let (_, lu, bu) = basis(&knots.0, 4, 3, 3, uv[0], &mut budget, &cancel).unwrap();
+            let (_, lv, bv) = basis(&knots.1, 4, 3, 3, uv[1], &mut budget, &cancel).unwrap();
+            let mut original = [Taylor::ZERO; 3];
+            let mut evidence = ControlEvidence::new(None);
+            for (i, a) in bu[..lu].iter().enumerate() {
+                for (j, b) in bv[..lv].iter().enumerate() {
+                    evidence
+                        .include(controls[i][j], *a * *b, true, &mut original)
+                        .unwrap();
+                }
+            }
+            let original = evidence.finish(original, true, true).unwrap().values;
+            for (value, original) in value.into_iter().zip(original) {
+                for i in 0..4 {
+                    for j in 0..4 - i {
+                        assert!(original.0[i][j].lower <= value.0[i][j].lower);
+                        assert!(value.0[i][j].upper <= original.0[i][j].upper);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn additive_original_tensor_retains_axis_hessians_on_wide_boxes() {
+        let q = [0.25, -0.25, 0.25];
+        for offset in [0.0, 1_073_741_824.0] {
+            for (a, b) in [(1.0, 1.0), (-4.0, 8.0), (8.0, -4.0)] {
+                let knots = KnotVector::bezier_knot(2);
+                let surface = Surface::BsplineSurface(BsplineSurface::new(
+                    (knots.clone(), knots),
+                    (0..3)
+                        .map(|i| {
+                            (0..3)
+                                .map(|j| {
+                                    Point3::new(
+                                        i as f64 / 2.0,
+                                        j as f64 / 2.0,
+                                        offset + a * q[i] + b * q[j],
+                                    )
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                ));
+                let mut previous = None;
+                for v in [[0.1, 0.9], [0.25, 0.5], [-1.0, 2.0]] {
+                    let jet = validated_surface_jet(
+                        &surface,
+                        [[0.1, 0.9], v],
+                        &mut ValidatedGeometryBudget::new(1_000_000),
+                        &AtomicBool::new(false),
+                    )
+                    .unwrap();
+                    assert_eq!(jet.duv, [super::super::ZERO; 3]);
+                    contains(jet.duu[2], 2.0 * a);
+                    contains(jet.dvv[2], 2.0 * b);
+                    assert!(jet.duu[2].width() < 1.0e-10);
+                    assert!(jet.dvv[2].width() < 1.0e-10);
+                    if let Some(previous) = previous {
+                        assert_eq!(jet.duu, previous);
+                    }
+                    previous = Some(jet.duu);
+                    for u in [0.1_f64, 0.5, 0.9] {
+                        for v in [v[0], v[1]] {
+                            contains(
+                                jet.position[2],
+                                offset + a * (u - 0.5).powi(2) + b * (v - 0.5).powi(2),
+                            );
+                            contains(jet.du[2], 2.0 * a * (u - 0.5));
+                            contains(jet.dv[2], 2.0 * b * (v - 0.5));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_original_tensor_encloses_an_independent_polynomial_law() {
+        for (a, b, c) in [(2.0, 3.0, -4.0), (-1.0, -5.0, 8.0)] {
+            let knots = KnotVector::bezier_knot(2);
+            let square = [0.0, 0.0, 1.0];
+            let surface = Surface::BsplineSurface(BsplineSurface::new(
+                (knots.clone(), knots),
+                (0..3)
+                    .map(|i| {
+                        (0..3)
+                            .map(|j| {
+                                let (u, v) = (i as f64 / 2.0, j as f64 / 2.0);
+                                Point3::new(u, v, a * square[i] + b * u * v + c * square[j])
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            ));
+            let jet = validated_surface_jet(
+                &surface,
+                [[0.1, 0.9], [0.2, 0.8]],
+                &mut ValidatedGeometryBudget::new(1_000_000),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            contains(jet.duv[2], b);
+            contains(jet.duu[2], 2.0 * a);
+            contains(jet.dvv[2], 2.0 * c);
+            for u in [0.1, 0.5, 0.9] {
+                for v in [0.2, 0.5, 0.8] {
+                    contains(jet.position[2], a * u * u + b * u * v + c * v * v);
+                    contains(jet.du[2], 2.0 * a * u + b * v);
+                    contains(jet.dv[2], b * u + 2.0 * c * v);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn additive_hessians_keep_every_original_smooth_knot_span() {
+        let knots = KnotVector::from(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0]);
+        let q = [0.25, 0.0, 0.0, 0.25];
+        let linear = [0.0, 0.25, 0.75, 1.0];
+        let surface = Surface::BsplineSurface(BsplineSurface::new(
+            (knots.clone(), knots),
+            (0..4)
+                .map(|i| {
+                    (0..4)
+                        .map(|j| Point3::new(linear[i], linear[j], q[i] + q[j]))
+                        .collect()
+                })
+                .collect(),
+        ));
+        let jet = validated_surface_jet(
+            &surface,
+            [[0.1, 0.9]; 2],
+            &mut ValidatedGeometryBudget::new(1_000_000),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(jet.duv, [super::super::ZERO; 3]);
+        contains(jet.duu[2], 2.0);
+        contains(jet.dvv[2], 2.0);
+        assert!(jet.duu[2].width() < 1.0e-10);
+        assert!(jet.dvv[2].width() < 1.0e-10);
+        for u in [0.1_f64, 0.5, 0.9] {
+            for v in [0.1_f64, 0.5, 0.9] {
+                contains(jet.position[2], (u - 0.5).powi(2) + (v - 0.5).powi(2));
+                contains(jet.du[2], 2.0 * (u - 0.5));
+                contains(jet.dv[2], 2.0 * (v - 0.5));
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_source_partition_keeps_the_original_flat_basis_sum() {
+        let knots = (
+            KnotVector::from(vec![0.0, 1.0, 2.0, 3.0, 4.0]),
+            KnotVector::bezier_knot(1),
+        );
+        let controls = vec![vec![[7.0], [7.0]], vec![[7.0], [7.0]]];
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(1_000_000);
+        let u = Taylor::variable(ValidatedInterval::new(0.25, 0.75).unwrap(), 0);
+        let v = Taylor::variable(ValidatedInterval::new(0.1, 0.9).unwrap(), 1);
+        let value = surface_sum(
+            (&knots, &controls),
+            [u, v],
+            |p| *p,
+            None,
+            false,
+            (&mut budget, &cancel),
+        )
+        .unwrap()
+        .values[0];
+        // On the first original unclamped span only B_0,2(u)=u²/2 survives.
+        for u in [0.25, 0.5, 0.75] {
+            contains(value.0[0][0], 3.5 * u * u);
+            contains(value.0[1][0], 7.0 * u);
+            contains(value.0[2][0], 3.5);
+        }
+        assert!(value.0[0][0].upper < 7.0);
+    }
 
     #[test]
     fn affine_tensor_factor_keeps_mixed_and_second_derivatives_exact_zero() {

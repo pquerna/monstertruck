@@ -1,5 +1,6 @@
 use super::explicit::{
-    basis, clipped_parameter, curve_taylor_with_extension, curve2d_taylor, processed_parameter,
+    TensorCoefficients, add_tensor_term, basis, clipped_parameter, curve_taylor_with_extension,
+    curve2d_taylor, intersect_tensor_values, processed_parameter,
     processed_parameter_with_extension, surface_taylor_with_policy, validate_knots_with_policy,
 };
 use super::{
@@ -107,13 +108,8 @@ pub(crate) fn projected_surface_functionals(
                     functionals[1].homogeneous(point)?,
                 ])
             },
-            |point, reference| {
-                let point = [
-                    I::point(point[0]) - I::point(reference[0]),
-                    I::point(point[1]) - I::point(reference[1]),
-                    I::point(point[2]) - I::point(reference[2]),
-                    ZERO,
-                ];
+            |difference| {
+                let point = [difference[0], difference[1], difference[2], ZERO];
                 Ok([
                     functionals[0].homogeneous(point)?,
                     functionals[1].homogeneous(point)?,
@@ -136,8 +132,7 @@ pub(crate) fn projected_surface_functionals(
                     functionals[1].homogeneous(point)?,
                 ])
             },
-            |point, reference| {
-                let point = std::array::from_fn(|i| I::point(point[i]) - I::point(reference[i]));
+            |point| {
                 Ok([
                     functionals[0].homogeneous(point)?,
                     functionals[1].homogeneous(point)?,
@@ -816,7 +811,11 @@ fn projected_tensor<P, const N: usize>(
                 projection.center,
             )?])
         },
-        |point, reference| Ok([dot_difference(point, reference, projection.direction)?]),
+        |point| {
+            Ok([(0..N)
+                .map(|i| point[i] * projection.direction[i])
+                .fold(ZERO, |a, b| a + b)])
+        },
         SplineProjectionPolicy {
             rational,
             allow_c0: false,
@@ -831,7 +830,7 @@ fn projected_tensor_functionals<P, const N: usize, const K: usize>(
     uv: [Taylor; 2],
     control: impl Fn(&P) -> [f64; N],
     coefficient: impl Fn([f64; N]) -> Result<[I; K], E>,
-    difference: impl Fn([f64; N], [f64; N]) -> Result<[I; K], E>,
+    difference: impl Fn([I; N]) -> Result<[I; K], E>,
     policy: SplineProjectionPolicy,
     execution: &mut ProjectionExecution<'_>,
 ) -> Result<[Taylor; K], E> {
@@ -885,7 +884,7 @@ fn projected_tensor_cell<P, const N: usize, const K: usize>(
     [u, v]: [Taylor; 2],
     control: &impl Fn(&P) -> [f64; N],
     coefficient: &impl Fn([f64; N]) -> Result<[I; K], E>,
-    difference: &impl Fn([f64; N], [f64; N]) -> Result<[I; K], E>,
+    difference: &impl Fn([I; N]) -> Result<[I; K], E>,
     SplineProjectionPolicy { rational, allow_c0 }: SplineProjectionPolicy,
     execution: &mut ProjectionExecution<'_>,
 ) -> Result<[Taylor; K], E> {
@@ -958,17 +957,11 @@ fn projected_tensor_cell<P, const N: usize, const K: usize>(
             };
             let (iv, lv, bv) = basis(&knots.1, nv, pv, sv, v, execution.budget, execution.cancel)?;
             let partition = su >= pu && su < nu && sv >= pv && sv < nv;
-            let reference = if partition {
-                control(&controls[iu][iv])
-            } else {
-                [0.0; N]
-            };
-            let mut numerator = if partition {
-                coefficient(reference)?.map(Taylor::interval)
-            } else {
-                [Taylor::ZERO; K]
-            };
-            let mut denominator = Taylor::constant(if partition { reference[N - 1] } else { 0.0 });
+            let mut tensor = TensorCoefficients::new(partition);
+            let mut numerator = [Taylor::ZERO; K];
+            let mut denominator = [Taylor::ZERO];
+            let mut original_numerator = [Taylor::ZERO; K];
+            let mut original_denominator = [Taylor::ZERO];
             let mut numerator_hull: [Option<I>; K] = [None; K];
             let mut denominator_hull: Option<I> = None;
             for (i, a) in bu[..lu].iter().enumerate() {
@@ -976,27 +969,62 @@ fn projected_tensor_cell<P, const N: usize, const K: usize>(
                     execution.budget.charge(1, execution.cancel)?;
                     let point = control(&controls[iu + i][iv + j]);
                     let value = coefficient(point)?;
-                    let residual = if partition {
-                        difference(point, reference)?
+                    let product = *a * *b;
+                    let (residual, basis) = tensor.term(point, [i, j], [*a, *b], product);
+                    let original_residual = if partition && i != 0 && j != 0 {
+                        tensor.origin_difference(point)
+                    } else {
+                        residual
+                    };
+                    let projected = if partition && (i != 0 || j != 0) {
+                        difference(residual)?
                     } else {
                         value
                     };
-                    let basis = *a * *b;
-                    for k in 0..K {
-                        if residual[k] != ZERO {
-                            numerator[k] = numerator[k] + Taylor::interval(residual[k]) * basis;
+                    add_tensor_term(&mut numerator, projected, basis);
+                    if partition {
+                        execution.budget.charge(1, execution.cancel)?;
+                        if i == 0 && j == 0 {
+                            original_numerator = value.map(Taylor::interval);
+                        } else {
+                            let original_projected = if i == 0 || j == 0 {
+                                projected
+                            } else {
+                                difference(original_residual)?
+                            };
+                            add_tensor_term(&mut original_numerator, original_projected, product);
                         }
+                    }
+                    for k in 0..K {
                         numerator_hull[k] =
                             Some(numerator_hull[k].map_or(value[k], |hull| hull.hull(value[k])));
                     }
                     if rational {
                         let weight = I::point(point[N - 1]);
-                        let residual =
-                            weight - I::point(if partition { reference[N - 1] } else { 0.0 });
-                        denominator = denominator + Taylor::interval(residual) * basis;
+                        add_tensor_term(&mut denominator, [residual[N - 1]], basis);
+                        if partition {
+                            execution.budget.charge(1, execution.cancel)?;
+                            if i == 0 && j == 0 {
+                                original_denominator = [Taylor::interval(weight)];
+                            } else {
+                                add_tensor_term(
+                                    &mut original_denominator,
+                                    [original_residual[N - 1]],
+                                    product,
+                                );
+                            }
+                        }
                         denominator_hull =
                             Some(denominator_hull.map_or(weight, |hull| hull.hull(weight)));
                     }
+                }
+            }
+            if partition {
+                execution.budget.charge(10 * K, execution.cancel)?;
+                intersect_tensor_values(&mut numerator, &original_numerator)?;
+                if rational {
+                    execution.budget.charge(10, execution.cancel)?;
+                    intersect_tensor_values(&mut denominator, &original_denominator)?;
                 }
             }
             let nonnegative = knots.0[su] <= u.0[0][0].lower
@@ -1012,13 +1040,13 @@ fn projected_tensor_cell<P, const N: usize, const K: usize>(
                     }
                 }
                 if let Some(hull) = denominator_hull {
-                    denominator.0[0][0] = denominator.0[0][0]
+                    denominator[0].0[0][0] = denominator[0].0[0][0]
                         .intersection(hull)
                         .ok_or(E::ConditioningFailure)?;
                 }
             }
             let value = if rational {
-                let reciprocal = denominator.reciprocal()?;
+                let reciprocal = denominator[0].reciprocal()?;
                 numerator.map(|value| value * reciprocal)
             } else {
                 numerator
@@ -2498,5 +2526,262 @@ mod paired_surface_laws {
                 assert!(matches!(result, Err(E::ResourceLimit)));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tensor_partition_laws {
+    use super::*;
+    use crate::{BsplineSurface, NurbsSurface, Point3, Vector4, validated_surface_jet};
+
+    fn contains(bound: I, value: f64) {
+        assert!(
+            bound.lower <= value && value <= bound.upper,
+            "{bound:?} excludes {value}"
+        );
+    }
+
+    fn scalar(surface: &Surface, domain: [I; 2], direction: [I; 3]) -> Result<Taylor, E> {
+        projected_surface_taylor(
+            surface,
+            [
+                Taylor::variable(domain[0], 0),
+                Taylor::variable(domain[1], 1),
+            ],
+            ScalarProjection {
+                direction,
+                offset: ZERO,
+                center: None,
+            },
+            0,
+            &mut ProjectionExecution {
+                budget: &mut ValidatedGeometryBudget::new(1_000_000),
+                cancel: &AtomicBool::new(false),
+            },
+        )
+    }
+
+    #[test]
+    fn affine_image_additive_tensor_keeps_scalar_and_pair_mixed_derivatives_zero() {
+        let large = 1_073_741_824.0;
+        let q = [0.25, -0.25, 0.25];
+        let knots = KnotVector::bezier_knot(2);
+        let surface = Surface::BsplineSurface(BsplineSurface::new(
+            (knots.clone(), knots),
+            (0..3)
+                .map(|i| {
+                    (0..3)
+                        .map(|j| {
+                            let height = q[i] + 2.0 * q[j];
+                            Point3::new(
+                                large + i as f64 / 2.0 + 2.0 * height,
+                                -large + j as f64 / 2.0 - 4.0 * height,
+                                3.0 + 8.0 * height,
+                            )
+                        })
+                        .collect()
+                })
+                .collect(),
+        ));
+        let domain = [I::new(0.1, 0.9).unwrap(); 2];
+        // An uncertain functional is applied AFTER homogeneous mixed differences.
+        let direction = [I::new(1.0, 2.0).unwrap(), I::point(-1.0), I::point(0.5)];
+        let value = scalar(&surface, domain, direction).unwrap();
+        assert_eq!(value.0[1][1], ZERO);
+        let functions = [
+            SurfaceFunctional {
+                direction,
+                origin: [I::point(large), I::point(-large), I::point(3.0)],
+                offset: ZERO,
+            },
+            SurfaceFunctional {
+                direction: [ZERO, ZERO, I::point(1.0)],
+                origin: [ZERO, ZERO, I::new(2.0, 4.0).unwrap()],
+                offset: ZERO,
+            },
+        ];
+        let pair = projected_surface_functionals(
+            &surface,
+            domain,
+            functions,
+            &mut ProjectionExecution {
+                budget: &mut ValidatedGeometryBudget::new(1_000_000),
+                cancel: &AtomicBool::new(false),
+            },
+        )
+        .unwrap();
+        for n in [1.0, 2.0] {
+            let height_scale = 2.0 * n + 8.0;
+            contains(value.0[2][0], height_scale);
+            contains(value.0[0][2], 2.0 * height_scale);
+            for u in [0.1_f64, 0.5, 0.9] {
+                for v in [0.1_f64, 0.5, 0.9] {
+                    let height = (u - 0.5).powi(2) + 2.0 * (v - 0.5).powi(2);
+                    contains(pair[0].position, n * u - v + height_scale * height);
+                    contains(pair[0].du, n + 2.0 * height_scale * (u - 0.5));
+                    contains(pair[0].dv, -1.0 + 4.0 * height_scale * (v - 0.5));
+                    contains(pair[1].du, 16.0 * (u - 0.5));
+                    contains(pair[1].dv, 32.0 * (v - 0.5));
+                    for origin in [2.0, 4.0] {
+                        contains(pair[1].position, 3.0 + 8.0 * height - origin);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rational_tensor_full_scalar_and_pair_enclose_independent_quotient_derivatives() {
+        let knots = KnotVector::bezier_knot(1);
+        let surface = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+            (knots.clone(), knots),
+            (0..2)
+                .map(|i| {
+                    (0..2)
+                        .map(|j| {
+                            let (u, v) = (i as f64, j as f64);
+                            Vector4::new(
+                                0.0,
+                                0.0,
+                                3.0 + 2.0 * u + 5.0 * v + 7.0 * u * v,
+                                2.0 + u + v,
+                            )
+                        })
+                        .collect()
+                })
+                .collect(),
+        )));
+        let domain = [I::new(0.1, 0.2).unwrap(); 2];
+        let full = validated_surface_jet(
+            &surface,
+            [[0.1, 0.2]; 2],
+            &mut ValidatedGeometryBudget::new(1_000_000),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let value = scalar(&surface, domain, [ZERO, ZERO, I::point(1.0)]).unwrap();
+        let pair = projected_surface_functionals(
+            &surface,
+            domain,
+            [
+                SurfaceFunctional {
+                    direction: [ZERO, ZERO, I::point(1.0)],
+                    origin: [ZERO; 3],
+                    offset: ZERO,
+                },
+                SurfaceFunctional {
+                    direction: [ZERO, ZERO, I::point(2.0)],
+                    origin: [ZERO; 3],
+                    offset: I::point(1.0),
+                },
+            ],
+            &mut ProjectionExecution {
+                budget: &mut ValidatedGeometryBudget::new(1_000_000),
+                cancel: &AtomicBool::new(false),
+            },
+        )
+        .unwrap();
+        for u in [0.1_f64, 0.15, 0.2] {
+            for v in [0.1_f64, 0.15, 0.2] {
+                let n = 3.0 + 2.0 * u + 5.0 * v + 7.0 * u * v;
+                let w = 2.0 + u + v;
+                let nu = 2.0 + 7.0 * v;
+                let nv = 5.0 + 7.0 * u;
+                let du = nu / w - n / w.powi(2);
+                let dv = nv / w - n / w.powi(2);
+                let duu = -2.0 * nu / w.powi(2) + 2.0 * n / w.powi(3);
+                let dvv = -2.0 * nv / w.powi(2) + 2.0 * n / w.powi(3);
+                let duv = 7.0 / w - (nu + nv) / w.powi(2) + 2.0 * n / w.powi(3);
+                for bound in [full.position[2], value.0[0][0], pair[0].position] {
+                    contains(bound, n / w);
+                }
+                for bound in [full.du[2], value.0[1][0], pair[0].du] {
+                    contains(bound, du);
+                }
+                for bound in [full.dv[2], value.0[0][1], pair[0].dv] {
+                    contains(bound, dv);
+                }
+                contains(full.duu[2], duu);
+                contains(full.duv[2], duv);
+                contains(full.dvv[2], dvv);
+                contains(value.0[2][0], duu / 2.0);
+                contains(value.0[1][1], duv);
+                contains(value.0[0][2], dvv / 2.0);
+                contains(pair[1].position, 2.0 * n / w + 1.0);
+                contains(pair[1].du, 2.0 * du);
+                contains(pair[1].dv, 2.0 * dv);
+            }
+        }
+    }
+
+    #[test]
+    fn zero_tensor_functionals_cannot_bypass_an_original_two_axis_pole() {
+        let knots = KnotVector::bezier_knot(1);
+        let surface = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+            (knots.clone(), knots),
+            vec![
+                vec![
+                    Vector4::new(0.0, 0.0, 0.0, 1.0),
+                    Vector4::new(0.0, 0.0, 0.0, -1.0),
+                ],
+                vec![
+                    Vector4::new(0.0, 0.0, 0.0, -1.0),
+                    Vector4::new(0.0, 0.0, 0.0, 1.0),
+                ],
+            ],
+        )));
+        let domain = [I::new(0.25, 0.75).unwrap(); 2];
+        assert!(matches!(
+            scalar(&surface, domain, [ZERO; 3]),
+            Err(E::DenominatorContainsZero)
+        ));
+        assert!(matches!(
+            validated_surface_jet(
+                &surface,
+                [[0.25, 0.75]; 2],
+                &mut ValidatedGeometryBudget::new(1_000_000),
+                &AtomicBool::new(false),
+            ),
+            Err(E::DenominatorContainsZero)
+        ));
+        assert!(matches!(
+            projected_surface_functionals(
+                &surface,
+                domain,
+                [SurfaceFunctional {
+                    direction: [ZERO; 3],
+                    origin: [ZERO; 3],
+                    offset: ZERO
+                }; 2],
+                &mut ProjectionExecution {
+                    budget: &mut ValidatedGeometryBudget::new(1_000_000),
+                    cancel: &AtomicBool::new(false),
+                },
+            ),
+            Err(E::DenominatorContainsZero)
+        ));
+    }
+
+    #[test]
+    fn projected_incomplete_source_partition_retains_native_basis_mass() {
+        let surface = Surface::BsplineSurface(BsplineSurface::new(
+            (
+                KnotVector::from(vec![0.0, 1.0, 2.0, 3.0, 4.0]),
+                KnotVector::bezier_knot(1),
+            ),
+            vec![vec![Point3::new(0.0, 0.0, 7.0); 2]; 2],
+        ));
+        let value = scalar(
+            &surface,
+            [I::new(0.25, 0.75).unwrap(), I::new(0.1, 0.9).unwrap()],
+            [ZERO, ZERO, I::point(1.0)],
+        )
+        .unwrap();
+        for u in [0.25, 0.5, 0.75] {
+            contains(value.0[0][0], 3.5 * u * u);
+            contains(value.0[1][0], 7.0 * u);
+            contains(value.0[2][0], 3.5);
+        }
+        assert!(value.0[0][0].upper < 7.0);
     }
 }

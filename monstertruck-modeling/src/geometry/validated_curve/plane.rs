@@ -15,13 +15,17 @@
 //!
 //! Contraction evaluates the two original source-coefficient functionals, with
 //! shared native tensor/profile bases and unchanged piecewise/pole admission.
+//! Native center residuals additionally intersect an independent time mean-value
+//! enclosure: the anchor uses one original midpoint leader jet, while its time
+//! derivative and all inclusion/derivative premises retain the whole raw-t span.
 //! Only the whole-span inclusion image supplies the mandatory reconstructed
 //! spatial jet and transversality proof. If its midpoint is outside that image,
 //! centered reconstruction additionally evaluates the full original convex-box
 //! spatial gradients; no root-image clipping substitutes for that path proof.
 
 use super::super::validated_interval::{
-    ProjectionExecution, SurfaceFunctional, projected_surface_functionals,
+    ProjectionExecution, SurfaceFunctional, SurfaceFunctionalJet, TENSOR_EVALUATOR_FIXED_BYTES,
+    projected_surface_functionals,
 };
 use super::*;
 
@@ -78,6 +82,20 @@ const ORIGINAL_WORKSPACE_BYTES: usize = 3 * size_of::<System>()
     + 8 * size_of::<[ValidatedInterval; 4]>();
 const _: () = assert!(PLANE_WORKSPACE_BYTES <= ORIGINAL_WORKSPACE_BYTES);
 const _: () = assert!(size_of::<PlaneKrawczykReceipt>() <= size_of::<System>());
+// The midpoint leader uses the existing projection-jet temporary slot. Compute
+// the original defect before the center residual, so its paired source result
+// can reuse the dead enclosure slot rather than grow the proof-frame allowance.
+const _: () = assert!(size_of::<ValidatedCurveJet>() <= size_of::<PlaneJet>());
+const _: () = assert!(size_of::<[SurfaceFunctionalJet; 2]>() <= size_of::<PlaneSystem>());
+
+// Both proof paths call the same fixed source evaluator. Track its concrete
+// tensor state (including original-coefficient partition scratch) on BOTH sides,
+// not as an uncharged saving of the reduced proof. max_retained_bytes admits
+// owned source/proof allocations; it is not an RSS or compiler-stack limit.
+const _: () = assert!(
+    PLANE_WORKSPACE_BYTES + TENSOR_EVALUATOR_FIXED_BYTES
+        <= ORIGINAL_WORKSPACE_BYTES + TENSOR_EVALUATOR_FIXED_BYTES
+);
 
 fn operands(
     curve: &Curve,
@@ -262,6 +280,56 @@ fn system(
     Ok(system)
 }
 
+/// Independent time mean-value enclosure at the unchanged source center.
+/// Only the residual's anchor is queried at one time; its derivative uses the
+/// original whole-span leader jet and original source functional coefficients.
+fn native_center_residual(
+    source: &Surface,
+    leader: &Curve,
+    coordinate: &CoordinateJet,
+    center: [ValidatedInterval; 2],
+    execution: &mut ProjectionExecution<'_>,
+) -> Result<Option<ValidatedInterval>, ValidatedGeometryError> {
+    let PlaneJet::Native(guide) = &coordinate.jet else {
+        return Ok(None);
+    };
+    let middle = coordinate.parameter.midpoint();
+    let anchor = validated_projection_leader_jet(
+        leader,
+        [middle, middle],
+        execution.budget,
+        execution.cancel,
+    )?;
+    execution.budget.charge(3, execution.cancel)?;
+    let speed_squared = guide
+        .first
+        .into_iter()
+        .map(ValidatedInterval::square)
+        .fold(ZERO, |a, b| a + b);
+    let residuals = projected_surface_functionals(
+        source,
+        center,
+        [
+            SurfaceFunctional {
+                direction: anchor.first,
+                origin: anchor.position,
+                offset: ZERO,
+            },
+            SurfaceFunctional {
+                direction: guide.second,
+                origin: guide.position,
+                offset: -speed_squared,
+            },
+        ],
+        execution,
+    )?;
+    execution.budget.charge(1, execution.cancel)?;
+    Ok(Some(
+        residuals[0].position
+            + residuals[1].position * (coordinate.parameter - ValidatedInterval::point(middle)),
+    ))
+}
+
 pub(super) fn certify(
     curve: &Curve,
     projection: Projection,
@@ -284,14 +352,6 @@ pub(super) fn certify(
     let source_domain = [domain[source_index], domain[source_index + 1]];
     let enclosure = system(source, &chart, &coordinate, source_domain, budget, cancel)?;
     let middle = source_domain.map(ValidatedInterval::midpoint);
-    let center = system(
-        source,
-        &chart,
-        &coordinate,
-        middle.map(ValidatedInterval::point),
-        budget,
-        cancel,
-    )?;
     budget.charge(1, cancel)?;
     let inverse = inverse(
         enclosure
@@ -317,6 +377,26 @@ pub(super) fn certify(
         .fold(0.0, f64::max);
     if !rho.is_finite() || rho >= 1.0 {
         return Err(ValidatedGeometryError::ConditioningFailure);
+    }
+    let mut center = system(
+        source,
+        &chart,
+        &coordinate,
+        middle.map(ValidatedInterval::point),
+        budget,
+        cancel,
+    )?;
+    if let Some(time_centered) = native_center_residual(
+        source,
+        leader,
+        &coordinate,
+        middle.map(ValidatedInterval::point),
+        &mut ProjectionExecution { budget, cancel },
+    )? {
+        budget.charge(1, cancel)?;
+        center.value[1] = center.value[1]
+            .intersection(time_centered)
+            .ok_or(ValidatedGeometryError::ConditioningFailure)?;
     }
     let correction = product(inverse, center.value);
     let delta = std::array::from_fn(|i| source_domain[i] - ValidatedInterval::point(middle[i]));
@@ -1156,6 +1236,116 @@ mod regressions {
         assert_eq!(chart.axes[0], [ONE, ZERO, ZERO]);
         assert_eq!(chart.axes[1], [ZERO, ONE, ZERO]);
         assert_eq!(chart.vector_parameters([ONE, ZERO, ZERO]), [ONE, ZERO]);
+    }
+
+    #[test]
+    fn native_center_residual_encloses_an_independent_cubic_law_in_raw_time() {
+        let source = Surface::Plane(Plane::from_origin_vectors(
+            Point3::new(4.0, -3.0, 5.0),
+            Vector3::new(2.0, 1.0, 0.0),
+            Vector3::new(-1.0, 3.0, 1.0),
+        ));
+        let basis = Curve::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(vec![2.0, 2.0, 2.0, 2.0, 4.0, 4.0, 4.0, 4.0]),
+            vec![
+                Point3::new(1.0, 2.0, 3.0),
+                Point3::new(3.0, 2.0, 4.0),
+                Point3::new(5.0, 2.0, 5.0),
+                Point3::new(7.0, 0.0, 6.0),
+            ],
+        ));
+        for reversed in [false, true] {
+            let mut processor =
+                Processor::new(TrimmedCurve::new(Box::new(basis.clone()), (2.0, 4.0)));
+            if reversed {
+                processor.invert();
+            }
+            let leader = Curve::TrimmedCurve(processor);
+            for range in [[2.6, 2.64], [2.25, 3.75]] {
+                let parameter = interval_range(range).unwrap();
+                for [u, v] in [[0.25, -0.5], [1.0, 2.0]] {
+                    let cancel = AtomicBool::new(false);
+                    let mut budget = ValidatedGeometryBudget::new(1_000_000);
+                    let coordinate = CoordinateJet {
+                        parameter,
+                        jet: projection_jet(
+                            &leader,
+                            Projection::Native,
+                            parameter,
+                            &mut budget,
+                            &cancel,
+                        )
+                        .unwrap(),
+                    };
+                    let centered = native_center_residual(
+                        &source,
+                        &leader,
+                        &coordinate,
+                        [u, v].map(ValidatedInterval::point),
+                        &mut ProjectionExecution {
+                            budget: &mut budget,
+                            cancel: &cancel,
+                        },
+                    )
+                    .unwrap()
+                    .unwrap();
+                    let point = [4.0 + 2.0 * u - v, -3.0 + u + 3.0 * v, 5.0 + v];
+                    let direct = coordinate
+                        .jet
+                        .residual(parameter, point.map(ValidatedInterval::point));
+                    let combined = direct.intersection(centered).unwrap();
+                    for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                        let t = range[0] + fraction * (range[1] - range[0]);
+                        let s = if reversed {
+                            (4.0 - t) / 2.0
+                        } else {
+                            (t - 2.0) / 2.0
+                        };
+                        let sign = if reversed { -1.0 } else { 1.0 };
+                        let residual = sign
+                            * (3.0 * (point[0] - (1.0 + 6.0 * s))
+                                - 3.0 * s * s * (point[1] - (2.0 - 2.0 * s.powi(3)))
+                                + 1.5 * (point[2] - (3.0 + 3.0 * s)));
+                        contains(centered, residual);
+                        contains(combined, residual);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_center_residual_still_admits_original_source_poles_for_zero_functionals() {
+        let knots = KnotVector::bezier_knot(1);
+        let source = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+            (knots.clone(), knots),
+            vec![
+                vec![Vector4::new(0.0, 0.0, 0.0, -1.0); 2],
+                vec![Vector4::new(0.0, 0.0, 0.0, 1.0); 2],
+            ],
+        )));
+        let leader = Curve::Line(Line(Point3::origin(), Point3::origin()));
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(1_000_000);
+        let parameter = interval_range([0.0, 1.0]).unwrap();
+        let coordinate = CoordinateJet {
+            parameter,
+            jet: projection_jet(&leader, Projection::Native, parameter, &mut budget, &cancel)
+                .unwrap(),
+        };
+        assert!(matches!(
+            native_center_residual(
+                &source,
+                &leader,
+                &coordinate,
+                [ValidatedInterval::point(0.5); 2],
+                &mut ProjectionExecution {
+                    budget: &mut budget,
+                    cancel: &cancel
+                },
+            ),
+            Err(ValidatedGeometryError::DenominatorContainsZero)
+        ));
     }
 
     #[test]
