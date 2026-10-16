@@ -894,55 +894,95 @@ fn matching_corner_and_center_normals_do_not_flatten_an_original_periodic_tensor
     use crate::prelude::Collision;
     use monstertruck_geometry::prelude::{BsplineSurface, KnotVector, NurbsSurface};
     let circle = [
-        [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 2.0, 2.0],
-        [-2.0, 2.0, 2.0], [-4.0, 0.0, 4.0], [-4.0, -4.0, 4.0],
-        [0.0, -8.0, 8.0], [8.0, -8.0, 8.0], [16.0, 0.0, 16.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [0.0, 2.0, 2.0],
+        [-2.0, 2.0, 2.0],
+        [-4.0, 0.0, 4.0],
+        [-4.0, -4.0, 4.0],
+        [0.0, -8.0, 8.0],
+        [8.0, -8.0, 8.0],
+        [16.0, 0.0, 16.0],
     ];
     let knots = KnotVector::from(vec![
         0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 4.0,
     ]);
     let surface = NurbsSurface::new(BsplineSurface::new(
         (knots.clone(), knots),
-        circle.iter().map(|&[x, y, w]| circle.iter().map(|&[a, b, v]|
-            Vector4::new((6.0 * v + 2.0 * a) * x, (6.0 * v + 2.0 * a) * y,
-                2.0 * b * w, v * w)
-        ).collect()).collect(),
+        circle
+            .iter()
+            .map(|&[x, y, w]| {
+                circle
+                    .iter()
+                    .map(|&[a, b, v]| {
+                        Vector4::new(
+                            (6.0 * v + 2.0 * a) * x,
+                            (6.0 * v + 2.0 * a) * y,
+                            2.0 * b * w,
+                            v * w,
+                        )
+                    })
+                    .collect()
+            })
+            .collect(),
     ));
     let normal = surface.normal(2.0, 2.0);
-    assert!([(0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (4.0, 4.0)]
-        .into_iter().all(|(u, v)| normal.dot(surface.normal(u, v)) > 1.0 - 1.0e-6));
-    let coordinates = (0..4).flat_map(|side| (0..128).map(move |index| {
-        let parameter = 4.0 * index as f64 / 128.0;
-        match side {
-            0 => Point2::new(parameter, 0.0),
-            1 => Point2::new(4.0, parameter),
-            2 => Point2::new(4.0 - parameter, 4.0),
-            _ => Point2::new(0.0, 4.0 - parameter),
-        }
-    })).chain(iter::once(Point2::origin()));
-    let boundary = PolyBoundaryPiece(coordinates.map(|uv|
-        SurfacePoint::from((uv, surface.evaluate(uv.x, uv.y)))
-    ).collect());
+    assert!(
+        [(0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (4.0, 4.0)]
+            .into_iter()
+            .all(|(u, v)| normal.dot(surface.normal(u, v)) > 1.0 - 1.0e-6)
+    );
+    let coordinates = (0..4)
+        .flat_map(|side| {
+            (0..128).map(move |index| {
+                let parameter = 4.0 * index as f64 / 128.0;
+                match side {
+                    0 => Point2::new(parameter, 0.0),
+                    1 => Point2::new(4.0, parameter),
+                    2 => Point2::new(4.0 - parameter, 4.0),
+                    _ => Point2::new(0.0, 4.0 - parameter),
+                }
+            })
+        })
+        .chain(iter::once(Point2::origin()));
+    let boundary = PolyBoundaryPiece(
+        coordinates
+            .map(|uv| SurfacePoint::from((uv, surface.evaluate(uv.x, uv.y))))
+            .collect(),
+    );
     let boundary = PolyBoundary::new(vec![boundary], &surface, 0.005);
     let mesh = trimming_tessellation(
-        &surface, &boundary, 0.005, TessellationPrimitiveOptions::default(), usize::MAX,
+        &surface,
+        &boundary,
+        0.005,
+        TessellationPrimitiveOptions::default(),
+        usize::MAX,
     );
     let retained_mesh_bytes = mesh.positions().capacity() * size_of::<Point3>()
         + mesh.uv_coords().capacity() * size_of::<Vector2>()
         + mesh.normals().capacity() * size_of::<Vector3>()
         + mesh.faces().tri_faces().capacity() * size_of::<[StandardVertex; 3]>();
-    assert!(retained_mesh_bytes < 8 * 1024 * 1024,
+    assert!(
+        retained_mesh_bytes < 8 * 1024 * 1024,
         "retained_mesh_bytes={retained_mesh_bytes}, vertices_len_cap={:?}, triangles_len_cap={:?}",
         (mesh.positions().len(), mesh.positions().capacity()),
-        (mesh.faces().tri_faces().len(), mesh.faces().tri_faces().capacity()));
+        (
+            mesh.faces().tri_faces().len(),
+            mesh.faces().tri_faces().capacity()
+        )
+    );
     assert!(mesh.positions().iter().any(|point| point.z > 1.0));
     assert!(mesh.positions().iter().any(|point| point.z < -1.0));
     let plane = Plane::new(
-        Point3::new(-9.0, -9.0, 0.0), Point3::new(-9.0, 9.0, 0.0),
+        Point3::new(-9.0, -9.0, 0.0),
+        Point3::new(-9.0, 9.0, 0.0),
         Point3::new(9.0, -9.0, 0.0),
     );
     let plane_mesh = untrimmed_tessellation(
-        &plane, ((0.0, 1.0), (0.0, 1.0)), 0.005, TessellationPrimitiveMode::Triangles,
+        &plane,
+        ((0.0, 1.0), (0.0, 1.0)),
+        0.005,
+        TessellationPrimitiveMode::Triangles,
     );
     let segments = mesh.extract_interference(&plane_mesh);
     assert!(!segments.is_empty());
@@ -951,9 +991,84 @@ fn matching_corner_and_center_normals_do_not_flatten_an_original_periodic_tensor
     for (front, back) in segments {
         let front = Vector2::new(front.x, front.y);
         let direction = Vector2::new(back.x, back.y) - front;
-        let parameter = if direction.magnitude2() == 0.0 { 0.0 } else {
+        let parameter = if direction.magnitude2() == 0.0 {
+            0.0
+        } else {
             (-front.dot(direction) / direction.magnitude2()).clamp(0.0, 1.0)
         };
         assert!((front + parameter * direction).magnitude() >= 4.0 - 2.0 * 0.005);
     }
+}
+
+#[test]
+fn declared_shared_vertices_remain_authoritative_mesh_seed_junctions() {
+    let delta = 3.0e-16;
+    let vertices = monstertruck_topology::Vertex::from_points([
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(1.0, 1.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ]);
+    let first = Edge::new(
+        &vertices[0],
+        &vertices[1],
+        Line(
+            vertices[0].point() + Vector3::new(0.0, 0.0, delta),
+            vertices[1].point() + Vector3::new(0.0, 0.0, delta),
+        ),
+    );
+    let reversed = Edge::new(
+        &vertices[2],
+        &vertices[1],
+        Line(
+            vertices[2].point() - Vector3::new(0.0, 0.0, delta),
+            vertices[1].point() - Vector3::new(0.0, 0.0, delta),
+        ),
+    )
+    .inverse();
+    let wire: Wire<_, _> = [
+        first.clone(),
+        reversed,
+        Edge::new(
+            &vertices[2],
+            &vertices[3],
+            Line(vertices[2].point(), vertices[3].point()),
+        ),
+        Edge::new(
+            &vertices[3],
+            &vertices[0],
+            Line(vertices[3].point(), vertices[0].point()),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let face = Face::try_new(vec![wire], Plane::xy()).unwrap();
+    let shell: Shell<_, _, _> = vec![face].into();
+    let meshes = [
+        shell_tessellation(
+            &shell,
+            0.005,
+            by_search_parameter::<Plane>,
+            TessellationPrimitiveOptions::default(),
+        ),
+        shell_tessellation_single_thread(
+            &shell,
+            0.005,
+            by_search_parameter::<Plane>,
+            TessellationPrimitiveOptions::default(),
+        ),
+    ];
+    for mesh in meshes {
+        for edge in mesh.edge_iter() {
+            assert_eq!(edge.curve().front(), edge.absolute_front().point());
+            assert_eq!(edge.curve().back(), edge.absolute_back().point());
+        }
+        mesh[0].with_surface(|polygon| {
+            let polygon = polygon.as_ref().unwrap();
+            assert!(!polygon.faces().is_empty());
+            assert!(polygon.positions().iter().all(|point| point.z == 0.0));
+        });
+    }
+    assert_eq!(first.curve().front().z, delta);
+    assert_eq!(vertices[0].point().z, 0.0);
 }

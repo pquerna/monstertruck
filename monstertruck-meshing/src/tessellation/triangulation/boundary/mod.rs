@@ -65,9 +65,16 @@ fn polyline_on_surface(
     use monstertruck_geometry::prelude::*;
     let line = Line(p.uv, q.uv);
     let pcurve = ParameterCurve::new(line, &surface);
-    let (vec, _) = pcurve.parameter_division(pcurve.range_tuple(), tolerance);
+    let range = pcurve.range_tuple();
+    let (vec, _) = pcurve.parameter_division(range, tolerance);
     vec.into_iter()
         .map(|t| {
+            if t == range.0 {
+                return p;
+            }
+            if t == range.1 {
+                return q;
+            }
             let uv = line.evaluate(t);
             surface_point_with_cache(&surface, uv, point_cache)
         })

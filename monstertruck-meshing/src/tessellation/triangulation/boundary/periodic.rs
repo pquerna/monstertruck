@@ -101,7 +101,6 @@ fn surface_axis_range(
 
 fn normalized_periodic_candidate(
     curve: &[SurfacePoint],
-    surface: &impl PreMeshableSurface,
     axis: usize,
     period: f64,
     range: Option<(f64, f64)>,
@@ -120,7 +119,6 @@ fn normalized_periodic_candidate(
             point[axis] =
                 PolyBoundaryPiece::normalize_axis(point[axis], previous, Some(period), range)?;
             previous = Some(point[axis]);
-            point.point = surface.evaluate(point.x, point.y);
             Some(point)
         })
         .collect::<Option<Vec<_>>>()?;
@@ -158,9 +156,7 @@ pub(super) fn compact_periodic_closed_loop(
         let closed_len = curve.len() - 1;
         let best = (0..closed_len)
             .filter_map(|start| {
-                normalized_periodic_candidate(
-                    curve, surface, axis, period, range, start, closed_len,
-                )
+                normalized_periodic_candidate(curve, axis, period, range, start, closed_len)
             })
             .min_by(|lhs, rhs| lhs.0.total_cmp(&rhs.0));
         if let Some((span, mut candidate)) = best

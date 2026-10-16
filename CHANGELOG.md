@@ -30,6 +30,9 @@ monstertruck 0.4.0.
   CDT output reserves its known vertex and triangle iterator bounds instead of
   doubling retained buffers; geometry, attributes and byte accounting remain
   unchanged.
+  Original boundary world samples and declared shared-vertex seed endpoints
+  survive UV-only periodic normalization and connector construction; carrier
+  re-evaluation no longer overwrites their topology-bound positions.
 - Full and scalar/paired tensor Taylor evaluation separates original row and
   column differences before mixed basis products when both original bases prove
   partition unity. Additive coefficients retain their derivative independence

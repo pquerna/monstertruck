@@ -137,3 +137,58 @@ fn retained_trim_projection_refuses_another_curve_on_the_same_carrier() {
         "carrier membership cannot replace membership on the explicit original trim"
     );
 }
+
+#[test]
+fn periodic_chart_normalization_retains_original_world_boundary_points() {
+    let surface = RevolutionSurface::by_revolution(
+        Line(Point3::new(2.0, 0.0, 0.0), Point3::new(2.0, 0.0, 1.0)),
+        Point3::origin(),
+        Vector3::unit_z(),
+    );
+    let coordinates = [
+        Point2::new(0.2, TAU - 0.1),
+        Point2::new(0.2, 0.1),
+        Point2::new(0.8, 0.1),
+        Point2::new(0.8, TAU - 0.1),
+        Point2::new(0.2, TAU - 0.1),
+    ];
+    let mut curve = coordinates
+        .map(|uv| {
+            SurfacePoint::from((
+                uv,
+                surface.evaluate(uv.x, uv.y) + Vector3::new(1.0e-8, -2.0e-8, 0.0),
+            ))
+        })
+        .to_vec();
+    let original = curve.iter().map(|point| point.point).collect::<Vec<_>>();
+    compact_periodic_closed_loop(&mut curve, &surface);
+    let lower = curve
+        .iter()
+        .map(|point| point.y)
+        .fold(f64::INFINITY, f64::min);
+    let upper = curve
+        .iter()
+        .map(|point| point.y)
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(upper - lower < 1.0);
+    assert!(curve.iter().all(|point| original.contains(&point.point)));
+}
+
+#[test]
+fn carrier_connectors_retain_existing_boundary_endpoint_positions() {
+    let surface = RevolutionSurface::by_revolution(
+        Line(Point3::new(2.0, 0.0, 0.0), Point3::new(2.0, 0.0, 1.0)),
+        Point3::origin(),
+        Vector3::unit_z(),
+    );
+    let ends = [Point2::new(0.2, 0.0), Point2::new(0.8, 0.3)].map(|uv| {
+        SurfacePoint::from((
+            uv,
+            surface.evaluate(uv.x, uv.y) + Vector3::new(1.0e-8, 0.0, 0.0),
+        ))
+    });
+    let mut cache = HashMap::default();
+    let curve = polyline_on_surface(&surface, ends[0], ends[1], 0.005, &mut cache);
+    assert_eq!(curve.first().unwrap().point, ends[0].point);
+    assert_eq!(curve.last().unwrap().point, ends[1].point);
+}

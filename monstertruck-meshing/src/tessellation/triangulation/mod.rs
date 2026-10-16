@@ -42,12 +42,36 @@ fn boundary_tolerance_candidates(tolerance: f64) -> Vec<f64> {
     .collect()
 }
 
+fn bind_declared_polyline_endpoints(
+    mut polyline: PolylineCurve,
+    endpoints: [Point3; 2],
+) -> PolylineCurve {
+    // Identity comes from the declared edge endpoints, not a spatial weld.
+    // Reconcile only evaluator roundoff already within the unchanged kernel
+    // accuracy; never mutate the original curve or its shared vertices.
+    if let Some(first) = polyline.first_mut()
+        && (*first).near(&endpoints[0])
+    {
+        *first = endpoints[0];
+    }
+    if let Some(last) = polyline.last_mut()
+        && (*last).near(&endpoints[1])
+    {
+        *last = endpoints[1];
+    }
+    polyline
+}
+
 fn fallback_polyline_curve<C: PolylineableCurve>(
     edge: &CompressedEdge<C>,
+    endpoints: [Point3; 2],
     orientation: bool,
     tolerance: f64,
 ) -> PolylineCurve {
-    let curve = PolylineCurve::from_curve(&edge.curve, edge.curve.range_tuple(), tolerance);
+    let curve = bind_declared_polyline_endpoints(
+        PolylineCurve::from_curve(&edge.curve, edge.curve.range_tuple(), tolerance),
+        endpoints,
+    );
     if orientation { curve } else { curve.inverse() }
 }
 
@@ -77,6 +101,7 @@ fn densify_curve_parameters(mut parameters: Vec<f64>, min_points: usize) -> Vec<
 
 fn fallback_polyline_curve_with_min_points<C: PolylineableCurve>(
     edge: &CompressedEdge<C>,
+    endpoints: [Point3; 2],
     orientation: bool,
     tolerance: f64,
     min_points: usize,
@@ -91,6 +116,7 @@ fn fallback_polyline_curve_with_min_points<C: PolylineableCurve>(
         .into_iter()
         .map(|parameter| edge.curve.subs(parameter))
         .collect::<PolylineCurve>();
+    let curve = bind_declared_polyline_endpoints(curve, endpoints);
     if orientation { curve } else { curve.inverse() }
 }
 
@@ -397,7 +423,10 @@ where
             let v0 = vmap.get(&edge.absolute_front().id()).unwrap();
             let v1 = vmap.get(&edge.absolute_back().id()).unwrap();
             let curve = edge.curve();
-            let poly = PolylineCurve::from_curve(&curve, curve.range_tuple(), tolerance);
+            let poly = bind_declared_polyline_endpoints(
+                PolylineCurve::from_curve(&curve, curve.range_tuple(), tolerance),
+                [v0.point(), v1.point()],
+            );
             // Spec 012 U4: `Edge::debug_new` is fallible now and this
             // `par_iter().map()` has no channel; `new_unchecked` is what the
             // release arm of `debug_new` already did.
@@ -459,7 +488,10 @@ where
             let vb = edge.absolute_back();
             let v1 = vmap.entry_or_insert(vb).clone();
             let curve = edge.curve();
-            let poly = PolylineCurve::from_curve(&curve, curve.range_tuple(), tolerance);
+            let poly = bind_declared_polyline_endpoints(
+                PolylineCurve::from_curve(&curve, curve.range_tuple(), tolerance),
+                [v0.point(), v1.point()],
+            );
             // Spec 012 U4, as the parallel sibling above.
             Edge::new_unchecked(&v0, &v1, poly)
         },
@@ -505,12 +537,14 @@ where
     S: PreMeshableSurface + 'a,
 {
     let vertices = shell.vertices.clone();
-    let tessellate_edge = |edge: &CompressedEdge<C>| {
-        let curve = &edge.curve;
-        CompressedEdge {
-            vertices: edge.vertices,
-            curve: PolylineCurve::from_curve(curve, curve.range_tuple(), tolerance),
-        }
+    let tessellate_edge = |edge: &CompressedEdge<C>| CompressedEdge {
+        vertices: edge.vertices,
+        curve: fallback_polyline_curve(
+            edge,
+            [vertices[edge.vertices.0], vertices[edge.vertices.1]],
+            true,
+            tolerance,
+        ),
     };
     #[cfg(not(target_arch = "wasm32"))]
     let edges: Vec<_> = shell.edges.par_iter().map(tessellate_edge).collect();
@@ -567,7 +601,12 @@ where
                                 false => edges.get(edge_index)?.curve.inverse(),
                             }
                         } else {
-                            fallback_polyline_curve(edge, edge_orientation, boundary_tolerance)
+                            fallback_polyline_curve(
+                                edge,
+                                [vertices[edge.vertices.0], vertices[edge.vertices.1]],
+                                edge_orientation,
+                                boundary_tolerance,
+                            )
                         };
                         Some((edge_orientation, &edge.curve, boundary, polyline))
                     })
@@ -772,9 +811,22 @@ where
                     tolerance,
                 )
                 .map(|curve| {
-                    fallback_polyline_curve_with_min_points(edge, true, tolerance, curve.len())
+                    fallback_polyline_curve_with_min_points(
+                        edge,
+                        [vertices[edge.vertices.0], vertices[edge.vertices.1]],
+                        true,
+                        tolerance,
+                        curve.len(),
+                    )
                 })
-                .unwrap_or_else(|| fallback_polyline_curve(edge, true, tolerance));
+                .unwrap_or_else(|| {
+                    fallback_polyline_curve(
+                        edge,
+                        [vertices[edge.vertices.0], vertices[edge.vertices.1]],
+                        true,
+                        tolerance,
+                    )
+                });
                 match acc.entry(edge_idx) {
                     Entry::Occupied(mut entry) => {
                         if candidate.len() > entry.get().len() {
@@ -788,17 +840,19 @@ where
                 acc
             },
         );
-    let tessellate_edge = |(edge_idx, edge): (usize, &CompressedEdge<C>)| {
-        let curve = &edge.curve;
-        CompressedEdge {
-            vertices: edge.vertices,
-            curve: exact_edge_polylines
-                .get(&edge_idx)
-                .cloned()
-                .unwrap_or_else(|| {
-                    PolylineCurve::from_curve(curve, curve.range_tuple(), tolerance)
-                }),
-        }
+    let tessellate_edge = |(edge_idx, edge): (usize, &CompressedEdge<C>)| CompressedEdge {
+        vertices: edge.vertices,
+        curve: exact_edge_polylines
+            .get(&edge_idx)
+            .cloned()
+            .unwrap_or_else(|| {
+                fallback_polyline_curve(
+                    edge,
+                    [vertices[edge.vertices.0], vertices[edge.vertices.1]],
+                    true,
+                    tolerance,
+                )
+            }),
     };
     #[cfg(not(target_arch = "wasm32"))]
     let edges: Vec<_> = shell
@@ -888,7 +942,12 @@ where
                                     .get(&edge_index)
                                     .cloned()
                                     .unwrap_or_else(|| {
-                                        fallback_polyline_curve(edge, true, tolerance)
+                                        fallback_polyline_curve(
+                                            edge,
+                                            [vertices[edge.vertices.0], vertices[edge.vertices.1]],
+                                            true,
+                                            tolerance,
+                                        )
                                     });
                                 if !edge_orientation {
                                     polyline.invert();
@@ -934,6 +993,10 @@ where
                                         shell.edges.get(edge_index).map(|edge| {
                                             fallback_polyline_curve(
                                                 edge,
+                                                [
+                                                    vertices[edge.vertices.0],
+                                                    vertices[edge.vertices.1],
+                                                ],
                                                 edge_orientation,
                                                 boundary_tolerance,
                                             )
