@@ -1,7 +1,7 @@
 use super::{
     CoordinatePlane, PreparedValidatedCurve, Projection, ValidatedCurvePiece, carriers, certify,
-    dot3, flatten, implicit_jet, interval_range, projection_jet, projection_residual, subtract3,
-    unflatten, validated_surface_piecewise_jet as validated_surface_jet,
+    dot3, flatten, implicit_jet, interval_range, projection_jet, subtract3, unflatten,
+    validated_surface_piecewise_jet as validated_surface_jet,
 };
 use crate::{
     Conic2D, Curve, Curve2D, ParameterBoxClassification, Plane, PreparedFaceParameterDomain,
@@ -707,7 +707,7 @@ fn candidate_covers(
                     budget,
                     cancel,
                 )?;
-                let derivative = dot3(coordinate.first, position) - coordinate.offset_first;
+                let derivative = coordinate.partial_first(position);
                 let sign = if derivative.lower > 0.0 {
                     Some(true)
                 } else if derivative.upper < 0.0 {
@@ -748,18 +748,8 @@ fn candidate_covers(
                 budget,
                 cancel,
             )?;
-            let low = projection_residual(
-                first.projection,
-                ValidatedInterval::point(first.parameter[0]),
-                low,
-                position,
-            );
-            let high = projection_residual(
-                last.projection,
-                ValidatedInterval::point(last.parameter[1]),
-                high,
-                position,
-            );
+            let low = low.residual(ValidatedInterval::point(first.parameter[0]), position);
+            let high = high.residual(ValidatedInterval::point(last.parameter[1]), position);
             let bracket = if monotonicity == Some(true) {
                 low.upper <= 0.0 && high.lower >= 0.0
             } else {
@@ -1718,9 +1708,7 @@ mod plane_zero_cell_regressions {
             &AtomicBool::new(false),
         )
         .unwrap();
-        let independent = dot3(jet.normal, point) - jet.offset;
-        let correlated = projection_residual(projection, parameter, jet, point);
-        assert!(independent.width() > 1.0e6);
+        let correlated = jet.residual(parameter, point);
         assert!(correlated.contains_zero());
         assert!(correlated.width() < 1.0e-7);
     }

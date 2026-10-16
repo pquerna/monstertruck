@@ -18,6 +18,12 @@
 //! estimate. Consecutive tubes retain a common certified endpoint root.
 //! Other components outside that tube, and trimmed-face membership, are not
 //! asserted absent; callers must retain their independent trim certificates.
+//!
+//! Actual affine plane carriers eliminate their dependent chart coordinates
+//! through a distinct two-variable inclusion receipt. The original guide
+//! equation is unchanged on common roots. Reconstruction proves containment
+//! in the original four-coordinate domain; endpoint, trim and whole-face
+//! coverage authorities continue to consume that same original binding.
 
 use super::validated_interval::{
     ONE, Taylor, ValidatedCurveJet, ValidatedGeometryBudget, ValidatedGeometryError,
@@ -35,6 +41,7 @@ use std::sync::atomic::AtomicBool;
 
 mod coverage;
 mod extrusion;
+mod plane;
 pub use coverage::{
     PreparedFacePlaneRoots, ValidatedPlaneCoverage, ValidatedPlaneCoverageOptions,
     ValidatedPlaneCoverageQuery, ValidatedPlaneTrimBoundaryBinding, ValidatedPlaneTrimEndpoint,
@@ -78,7 +85,9 @@ pub struct ValidatedCurvePiece {
     pub jet: ValidatedCurveJet,
     /// Direct source chart boxes; mapped/explicit views retain no single tube here.
     pub source_parameters: Option<[[ValidatedInterval; 2]; 2]>,
-    /// Outward bound on the preconditioned Jacobian defect infinity norm.
+    /// Outward defect-norm bound for the retained certifying system.
+    /// Affine-plane elimination reports its reduced-system bound, not a full
+    /// four-variable matrix bound; reconstructed source domains remain certified.
     /// Constructive algebraic elimination reports zero, without claiming an
     /// interior four-variable Krawczyk certificate.
     pub contraction_bound: f64,
@@ -257,13 +266,90 @@ enum Projection {
 }
 
 #[derive(Clone, Copy)]
-struct PlaneJet {
-    normal: [ValidatedInterval; 3],
-    first: [ValidatedInterval; 3],
-    second: [ValidatedInterval; 3],
-    offset: ValidatedInterval,
-    offset_first: ValidatedInterval,
-    offset_second: ValidatedInterval,
+enum PlaneJet {
+    Native(ValidatedCurveJet),
+    BetweenPlanes {
+        range: [f64; 2],
+        planes: [CoordinatePlane; 2],
+        normal: [ValidatedInterval; 3],
+        first: [ValidatedInterval; 3],
+        offset_first: ValidatedInterval,
+    },
+}
+
+impl PlaneJet {
+    fn normal(&self) -> [ValidatedInterval; 3] {
+        match self {
+            Self::Native(guide) => guide.first,
+            Self::BetweenPlanes { normal, .. } => *normal,
+        }
+    }
+
+    fn first(&self) -> [ValidatedInterval; 3] {
+        match self {
+            Self::Native(guide) => guide.second,
+            Self::BetweenPlanes { first, .. } => *first,
+        }
+    }
+
+    fn residual(
+        &self,
+        parameter: ValidatedInterval,
+        point: [ValidatedInterval; 3],
+    ) -> ValidatedInterval {
+        match self {
+            Self::Native(guide) => dot3(guide.first, subtract3(point, guide.position)),
+            Self::BetweenPlanes {
+                range,
+                planes: [start, end],
+                first,
+                offset_first,
+                ..
+            } => {
+                let value = |plane: &CoordinatePlane| {
+                    dot3(plane.normal.map(ValidatedInterval::point), point)
+                        - ValidatedInterval::point(plane.offset)
+                };
+                if parameter.lower == parameter.upper {
+                    if parameter.lower == range[0] {
+                        return value(start);
+                    }
+                    if parameter.lower == range[1] {
+                        return value(end);
+                    }
+                }
+                // The SAME raw parameter multiplies normal and offset.
+                // Combine their coefficient before interval multiplication.
+                value(start)
+                    + (parameter - ValidatedInterval::point(range[0]))
+                        * (dot3(*first, point) - *offset_first)
+            }
+        }
+    }
+
+    fn partial_first(&self, point: [ValidatedInterval; 3]) -> ValidatedInterval {
+        match self {
+            Self::Native(guide) => {
+                dot3(guide.second, subtract3(point, guide.position))
+                    - dot3(guide.first, guide.first)
+            }
+            Self::BetweenPlanes {
+                first,
+                offset_first,
+                ..
+            } => dot3(*first, point) - *offset_first,
+        }
+    }
+
+    fn partial_second(&self, point: [ValidatedInterval; 3]) -> ValidatedInterval {
+        match self {
+            Self::Native(guide) => {
+                dot3(guide.third, subtract3(point, guide.position))
+                    - dot3(guide.first, guide.second) * ValidatedInterval::point(3.0)
+            }
+            Self::BetweenPlanes { .. } => ZERO,
+        }
+    }
 }
 
 impl PreparedValidatedCurve<'_> {
@@ -1815,6 +1901,7 @@ enum TubeAuthority {
         defect: [[ValidatedInterval; 4]; 4],
         rho: f64,
     },
+    Plane(plane::PlaneKrawczykReceipt),
     Constructive(ValidatedCurveJet),
 }
 impl Tube {
@@ -1823,12 +1910,14 @@ impl Tube {
             TubeAuthority::Krawczyk { system, .. } => {
                 intersect3(system.surfaces[0].position, system.surfaces[1].position)
             }
+            TubeAuthority::Plane(receipt) => Ok(receipt.jet.position),
             TubeAuthority::Constructive(jet) => Ok(jet.position),
         }
     }
     fn contraction_bound(&self) -> f64 {
         match &self.authority {
             TubeAuthority::Krawczyk { rho, .. } => *rho,
+            TubeAuthority::Plane(receipt) => receipt.rho,
             TubeAuthority::Constructive(_) => 0.0,
         }
     }
@@ -1837,6 +1926,7 @@ impl Tube {
             TubeAuthority::Krawczyk { system, .. } => {
                 subtract3(system.surfaces[0].position, system.surfaces[1].position)
             }
+            TubeAuthority::Plane(receipt) => receipt.residual,
             TubeAuthority::Constructive(_) => [ZERO; 3],
         }
     }
@@ -1884,7 +1974,7 @@ fn system(
     )?;
     let difference = subtract3(surface0.position, surface1.position);
     let point = scale3(add3(surface0.position, surface1.position), 0.5);
-    let plane = projection_residual(projection, parameter, plane_jet, point);
+    let plane = plane_jet.residual(parameter, point);
     let columns = [
         surface0.du,
         surface0.dv,
@@ -1897,7 +1987,7 @@ fn system(
             if row < 3 {
                 columns[column][row]
             } else {
-                dot3(plane_jet.normal, scale3(chart_columns[column], 0.5))
+                dot3(plane_jet.normal(), scale3(chart_columns[column], 0.5))
             }
         })
     });
@@ -1930,6 +2020,25 @@ fn certify(
     if !domain.into_iter().all(ValidatedInterval::is_finite) {
         return Err(ValidatedGeometryError::ConditioningFailure);
     }
+    match plane::certify(curve, projection, parameter, domain, budget, cancel) {
+        Ok(Some(tube)) => return Ok(tube),
+        Ok(None) => {}
+        Err(error) if retryable(error) => {}
+        Err(error) => return Err(error),
+    }
+    certify_four_variables(curve, projection, parameter, domain, budget, cancel)
+}
+
+// Keep alternative workspaces in separate frames rather than retaining the
+// generic proof's large locals while entering the reduced proof.
+fn certify_four_variables(
+    curve: &Curve,
+    projection: Projection,
+    parameter: ValidatedInterval,
+    domain: [ValidatedInterval; 4],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<Tube, ValidatedGeometryError> {
     let enclosure = system(curve, projection, parameter, domain, budget, cancel)?;
     let middle = domain.map(ValidatedInterval::midpoint);
     let center = system(
@@ -2172,12 +2281,13 @@ fn refine_endpoint(
 fn implicit_jet(tube: &Tube) -> Result<ValidatedCurveJet, ValidatedGeometryError> {
     let system = match &tube.authority {
         TubeAuthority::Krawczyk { system, .. } => system,
+        TubeAuthority::Plane(receipt) => return Ok(receipt.jet),
         TubeAuthority::Constructive(jet) => return Ok(*jet),
     };
     let [s0, s1] = system.surfaces;
-    let plane = system.plane;
+    let plane = &system.plane;
     let position = intersect3(s0.position, s1.position)?;
-    let ft = dot3(plane.first, position) - plane.offset_first;
+    let ft = plane.partial_first(position);
     let q1 = solve_interval(tube, [ZERO, ZERO, ZERO, -ft])?;
     let first0 = add3(multiply3(s0.du, q1[0]), multiply3(s0.dv, q1[1]));
     let first1 = add3(multiply3(s1.du, q1[2]), multiply3(s1.dv, q1[3]));
@@ -2185,9 +2295,9 @@ fn implicit_jet(tube: &Tube) -> Result<ValidatedCurveJet, ValidatedGeometryError
     let h0 = second_composition(s0, q1[0], q1[1]);
     let h1 = second_composition(s1, q1[2], q1[3]);
     let hposition = scale3(add3(h0, h1), 0.5);
-    let ftt = dot3(plane.second, position) - plane.offset_second;
-    let mixed = dot3(plane.first, first) * ValidatedInterval::point(2.0);
-    let last = ftt + mixed + dot3(plane.normal, hposition);
+    let ftt = plane.partial_second(position);
+    let mixed = dot3(plane.first(), first) * ValidatedInterval::point(2.0);
+    let last = ftt + mixed + dot3(plane.normal(), hposition);
     let rhs = subtract3(h1, h0);
     let q2 = solve_interval(tube, [rhs[0], rhs[1], rhs[2], -last])?;
     let second0 = add3(add3(multiply3(s0.du, q2[0]), multiply3(s0.dv, q2[1])), h0);
@@ -2282,6 +2392,28 @@ fn solve_interval(
 }
 
 fn numerical_root(
+    curve: &Curve,
+    projection: Projection,
+    parameter: f64,
+    center: [f64; 4],
+    options: &ValidatedCurveOptions,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<[f64; 4], ValidatedGeometryError> {
+    match plane::numerical_root(
+        curve, projection, parameter, center, options, budget, cancel,
+    ) {
+        Ok(Some(center)) => return Ok(center),
+        Ok(None) => {}
+        Err(error) if retryable(error) => {}
+        Err(error) => return Err(error),
+    }
+    numerical_root_four_variables(
+        curve, projection, parameter, center, options, budget, cancel,
+    )
+}
+
+fn numerical_root_four_variables(
     curve: &Curve,
     projection: Projection,
     parameter: f64,
@@ -2933,15 +3065,7 @@ fn projection_jet(
                 budget,
                 cancel,
             )?;
-            Ok(PlaneJet {
-                normal: guide.first,
-                first: guide.second,
-                second: guide.third,
-                offset: dot3(guide.first, guide.position),
-                offset_first: dot3(guide.second, guide.position) + dot3(guide.first, guide.first),
-                offset_second: dot3(guide.third, guide.position)
-                    + dot3(guide.first, guide.second) * ValidatedInterval::point(3.0),
-            })
+            Ok(PlaneJet::Native(guide))
         }
         Projection::SourceProfile => Err(ValidatedGeometryError::InvalidInput),
         Projection::BetweenPlanes {
@@ -2956,52 +3080,17 @@ fn projection_jet(
             });
             let offset_delta =
                 ValidatedInterval::point(last.offset) - ValidatedInterval::point(first.offset);
-            Ok(PlaneJet {
+            Ok(PlaneJet::BetweenPlanes {
+                range,
+                planes: [first, last],
                 normal: std::array::from_fn(|i| {
                     ValidatedInterval::point(first.normal[i]) + ratio * delta[i]
                 }),
                 first: delta.map(|entry| entry * inverse),
-                second: [ZERO; 3],
-                offset: ValidatedInterval::point(first.offset) + ratio * offset_delta,
                 offset_first: offset_delta * inverse,
-                offset_second: ZERO,
             })
         }
     }
-}
-
-fn projection_residual(
-    projection: Projection,
-    parameter: ValidatedInterval,
-    jet: PlaneJet,
-    point: [ValidatedInterval; 3],
-) -> ValidatedInterval {
-    let Projection::BetweenPlanes {
-        parameter: range,
-        planes: [first, last],
-    } = projection
-    else {
-        return dot3(jet.normal, point) - jet.offset;
-    };
-    let value = |plane: CoordinatePlane| {
-        dot3(plane.normal.map(ValidatedInterval::point), point)
-            - ValidatedInterval::point(plane.offset)
-    };
-    if parameter.lower == parameter.upper {
-        if parameter.lower == range[0] {
-            return value(first);
-        }
-        if parameter.lower == range[1] {
-            return value(last);
-        }
-    }
-    // The SAME interpolation parameter multiplies normal and offset. Form
-    // their combined coefficient before multiplying its interval; otherwise
-    // a short path with a changed coordinate normal can incur an irreducible
-    // overestimate proportional to its absolute world position.
-    value(first)
-        + (parameter - ValidatedInterval::point(range[0]))
-            * (dot3(jet.first, point) - jet.offset_first)
 }
 
 fn coordinate_spans(

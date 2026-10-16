@@ -375,6 +375,60 @@ struct TrimRoots {
     retained_bytes: usize,
 }
 
+// The scalar direction contains only exact source-plane coefficients. Any
+// interval uncertainty in an axial normal stays in the final scalar factor.
+struct OriginalPlaneProjection {
+    direction: [f64; 3],
+    offset: ValidatedInterval,
+    factor: ValidatedInterval,
+}
+
+impl OriginalPlaneProjection {
+    fn new(normal: [ValidatedInterval; 3], origin: [ValidatedInterval; 3]) -> Option<Self> {
+        if normal.into_iter().all(|value| value.lower == value.upper) {
+            Some(Self {
+                direction: normal.map(|value| value.lower),
+                offset: dot3(normal, origin),
+                factor: super::super::ONE,
+            })
+        } else {
+            let axis = normal
+                .iter()
+                .position(|&value| value != super::super::ZERO)?;
+            if normal[axis].contains_zero()
+                || (0..3).any(|other| other != axis && normal[other] != super::super::ZERO)
+            {
+                return None;
+            }
+            let mut direction = [0.0; 3];
+            direction[axis] = 1.0;
+            Some(Self {
+                direction,
+                offset: origin[axis],
+                factor: normal[axis],
+            })
+        }
+    }
+
+    fn jet(
+        &self,
+        boundary: &PreparedValidatedCurve<'_>,
+        range: [f64; 2],
+        scale: ValidatedInterval,
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<ValidatedScalarCurveJet, ValidatedGeometryError> {
+        let jet = boundary.projected_jet(range, [0.0; 3], self.direction, budget, cancel)?;
+        // Preserve `n dot (scale * C(t) - origin)` in world units. Neither
+        // `n * scale` nor `origin / scale` becomes a rounded exact coefficient.
+        Ok(ValidatedScalarCurveJet {
+            position: (jet.position * scale - self.offset) * self.factor,
+            first: (jet.first * scale) * self.factor,
+            second: (jet.second * scale) * self.factor,
+        })
+    }
+}
+
 fn isolate_trim_roots(
     context: &FacePlaneContext<'_, '_>,
     index: usize,
@@ -422,27 +476,35 @@ fn isolate_trim_roots(
         .checked_sub(chart_bytes)
         .ok_or(ValidatedGeometryError::ResourceLimit)?;
     let scale = ValidatedInterval::point(binding.boundary_scale);
+    budget.charge(1, cancel)?;
+    let projection = OriginalPlaneProjection::new(context.normal, context.origin);
     let original = isolate_roots(
         binding.boundary_range,
         remaining,
         |range, budget| {
-            let jet = binding
-                .boundary
-                .jet(range, budget, cancel)
-                .map_err(|error| {
-                    coverage_context(
-                        error,
-                        "original trim inventory / original-3D jet enclosure",
-                        None,
-                    )
-                })?;
-            Ok(ValidatedScalarCurveJet {
-                position: dot3(
-                    context.normal,
-                    subtract3(jet.position.map(|x| x * scale), context.origin),
-                ),
-                first: dot3(context.normal, jet.first.map(|x| x * scale)),
-                second: dot3(context.normal, jet.second.map(|x| x * scale)),
+            let result = if let Some(projection) = &projection {
+                projection.jet(binding.boundary, range, scale, budget, cancel)
+            } else {
+                // A general interval normal cannot be rounded into the exact
+                // coefficients accepted by the correlated scalar evaluator.
+                binding
+                    .boundary
+                    .jet(range, budget, cancel)
+                    .map(|jet| ValidatedScalarCurveJet {
+                        position: dot3(
+                            context.normal,
+                            subtract3(jet.position.map(|x| x * scale), context.origin),
+                        ),
+                        first: dot3(context.normal, jet.first.map(|x| x * scale)),
+                        second: dot3(context.normal, jet.second.map(|x| x * scale)),
+                    })
+            };
+            result.map_err(|error| {
+                coverage_context(
+                    error,
+                    "original trim inventory / original-3D jet enclosure",
+                    None,
+                )
             })
         },
         budget,
@@ -1380,7 +1442,201 @@ pub(super) fn retain_receipt(
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::{ONE, ZERO, cross3};
     use super::*;
+    use crate::{
+        BsplineCurve, Invertible, KnotVector, Line, Point3, ValidatedCurveOptions,
+        prepared_validated_curve,
+    };
+
+    fn encloses(value: ValidatedInterval, expected: f64) {
+        assert!(
+            value.lower <= expected && expected <= value.upper,
+            "{value:?} does not enclose {expected:?}"
+        );
+    }
+
+    #[test]
+    fn original_scalar_world_jets_preserve_units_translation_and_inverse_gauges() {
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(1_000_000);
+        let curve = Curve::Line(Line(
+            Point3::new(8.0, 8.0, 0.25),
+            Point3::new(12.0, 12.0, 2.25),
+        ));
+        let normal_axial = cross3(
+            [2.0, 0.0, 0.0].map(ValidatedInterval::point),
+            [0.0, 3.0, 0.0].map(ValidatedInterval::point),
+        );
+        let origin = [5.0, 5.0, 0.125].map(ValidatedInterval::point);
+        for inverted in [false, true] {
+            let curve = if inverted {
+                curve.inverse()
+            } else {
+                curve.clone()
+            };
+            let prepared = prepared_validated_curve(
+                &curve,
+                [0.125, 0.875],
+                &ValidatedCurveOptions::default(),
+                &mut budget,
+                &cancel,
+            )
+            .unwrap();
+            for (normal, normal_z) in [
+                ([0.0, 0.0, 1.0].map(ValidatedInterval::point), 1.0),
+                ([2.0, -2.0, 2.0].map(ValidatedInterval::point), 2.0),
+                (normal_axial, 6.0),
+            ] {
+                let projection = OriginalPlaneProjection::new(normal, origin).unwrap();
+                for scale in [1.0, 0.125, 0.1] {
+                    let jet = projection
+                        .jet(
+                            &prepared,
+                            [0.25, 0.75],
+                            ValidatedInterval::point(scale),
+                            &mut budget,
+                            &cancel,
+                        )
+                        .unwrap();
+                    for parameter in [0.25, 0.5, 0.75] {
+                        let z = if inverted {
+                            2.25 - 2.0 * parameter
+                        } else {
+                            0.25 + 2.0 * parameter
+                        };
+                        encloses(jet.position, normal_z * (scale * z - 0.125));
+                    }
+                    let slope = if inverted { -2.0 } else { 2.0 };
+                    encloses(jet.first, normal_z * scale * slope);
+                    encloses(jet.second, 0.0);
+                    if normal[0] != ZERO {
+                        let spatial = prepared.jet([0.25, 0.75], &mut budget, &cancel).unwrap();
+                        let independent = dot3(
+                            normal,
+                            subtract3(
+                                spatial
+                                    .position
+                                    .map(|value| value * ValidatedInterval::point(scale)),
+                                origin,
+                            ),
+                        );
+                        assert!(jet.position.width() < independent.width());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn original_scalar_isolation_keeps_plural_roots_and_both_crossing_directions() {
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(1_000_000);
+        // The exact height is `(t - 1/4) * (t - 5/8)`, while the correlated
+        // first two coordinates cancel only before interval basis evaluation.
+        let curve = Curve::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+            vec![
+                Point3::new(8.0, 8.0, 0.15625),
+                Point3::new(10.0, 10.0, -0.28125),
+                Point3::new(12.0, 12.0, 0.28125),
+            ],
+        ));
+        for inverted in [false, true] {
+            let curve = if inverted {
+                curve.inverse()
+            } else {
+                curve.clone()
+            };
+            let prepared = prepared_validated_curve(
+                &curve,
+                [0.125, 0.875],
+                &ValidatedCurveOptions::default(),
+                &mut budget,
+                &cancel,
+            )
+            .unwrap();
+            for reversed_normal in [false, true] {
+                let direction = if reversed_normal {
+                    [-1.0, 1.0, -1.0]
+                } else {
+                    [1.0, -1.0, 1.0]
+                };
+                let projection = OriginalPlaneProjection::new(
+                    direction.map(ValidatedInterval::point),
+                    [5.0, 5.0, 0.0].map(ValidatedInterval::point),
+                )
+                .unwrap();
+                let roots = isolate_roots(
+                    [0.125, 0.875],
+                    1024 * 1024,
+                    |range, budget| {
+                        projection.jet(
+                            &prepared,
+                            range,
+                            ValidatedInterval::point(0.125),
+                            budget,
+                            &cancel,
+                        )
+                    },
+                    &mut budget,
+                    &cancel,
+                )
+                .unwrap();
+                let expected = if inverted {
+                    [0.375, 0.75]
+                } else {
+                    [0.25, 0.625]
+                };
+                assert_eq!(roots.len(), 2);
+                for (root, parameter) in roots.iter().zip(expected) {
+                    assert!(root.parameter[0] <= parameter && parameter <= root.parameter[1]);
+                }
+                assert_eq!(sign(roots[0].derivative), Some(reversed_normal));
+                assert_eq!(sign(roots[1].derivative), Some(!reversed_normal));
+            }
+        }
+    }
+
+    #[test]
+    fn original_scalar_failures_preserve_charged_work_and_fatal_errors() {
+        let cancel = AtomicBool::new(false);
+        let mut preparation = ValidatedGeometryBudget::new(100_000);
+        let curve = Curve::Line(Line(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0)));
+        let prepared = prepared_validated_curve(
+            &curve,
+            [0.0, 1.0],
+            &ValidatedCurveOptions::default(),
+            &mut preparation,
+            &cancel,
+        )
+        .unwrap();
+        let projection = OriginalPlaneProjection::new([ZERO, ZERO, ONE], [ZERO; 3]).unwrap();
+        let mut exhausted = ValidatedGeometryBudget::new(1);
+        assert!(matches!(
+            projection.jet(&prepared, [0.0, 1.0], ONE, &mut exhausted, &cancel),
+            Err(ValidatedGeometryError::ResourceLimit)
+        ));
+        assert_eq!(exhausted.consumed(), 1);
+        let mut invalid = ValidatedGeometryBudget::new(100);
+        assert!(matches!(
+            projection.jet(&prepared, [-1.0, 0.0], ONE, &mut invalid, &cancel),
+            Err(ValidatedGeometryError::ParameterOutOfRange)
+        ));
+        assert!(invalid.consumed() > 0);
+        let mut cancelled = ValidatedGeometryBudget::new(100);
+        assert!(matches!(
+            projection.jet(
+                &prepared,
+                [0.0, 1.0],
+                ONE,
+                &mut cancelled,
+                &AtomicBool::new(true),
+            ),
+            Err(ValidatedGeometryError::Cancelled)
+        ));
+        assert_eq!(cancelled.consumed(), 0);
+    }
 
     #[test]
     fn expanded_root_witness_cannot_use_unexpanded_monotonicity() {

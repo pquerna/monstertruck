@@ -16,6 +16,19 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Original trim-plane root inventories evaluate correlated scalar native jets,
+  preserving world units, interval plane coefficients, original parameter
+  gauges and complete plural roots without constructing unused spatial jets.
+- Native curve and tensor Taylor evaluation removes an original control origin
+  through proved partition unity before interval basis summation. Original
+  coefficients, rational denominator gates and knot/continuity policies remain
+  authoritative; translated sources retain useful derivative enclosures.
+- Validated continuation eliminates actual affine-plane coordinates through a
+  strict two-variable inclusion and containment-only original-chart
+  reconstruction. Native leader residuals and both time partials share the
+  original leader displacement, including generic continuation and coverage.
+  Full spans, endpoint seals, original domains, cumulative work, cancellation
+  and fixed-stack limits remain checked; no geometry or guide gauge is replaced.
 - Certified planar analytic pcurves emit exact affine native `Point2` operators
   rather than projectively equivalent homogeneous matrices. Native `Matrix3`
   point action intentionally does not divide by the homogeneous coordinate;

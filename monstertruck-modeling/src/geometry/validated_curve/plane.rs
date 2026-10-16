@@ -1,0 +1,1260 @@
+//! Elimination of an actual affine carrier, without changing the guide gauge.
+//!
+//! A strict two-variable inclusion proves the original common roots: the
+//! nonsingular affine chart reconstructs their other two coordinates inside
+//! the original four-variable domain. No intersection with that domain may
+//! replace containment. All spatial jets use the same closed parameter span.
+//!
+//! Certification consumes continuation's original-bound local tube. An
+//! arbitrary broader chart box need not have a contractive interval Jacobian;
+//! public preparation still owns its unchanged numerical proposals, charged
+//! retries, subdivision, endpoint seals and full requested parameter coverage.
+//! Native coordinate jets retain the complete unchanged leader and evaluate
+//! its equation and partial time derivatives on the correlated displacement
+//! from that leader. Independent world-origin offsets are never constructed.
+
+use super::*;
+
+pub(super) struct PlaneKrawczykReceipt {
+    pub(super) jet: ValidatedCurveJet,
+    pub(super) residual: [ValidatedInterval; 3],
+    pub(super) rho: f64,
+}
+
+#[derive(Clone, Copy)]
+struct Chart {
+    origin: [ValidatedInterval; 3],
+    axes: [[ValidatedInterval; 3]; 2],
+    normal: [ValidatedInterval; 3],
+    rows: [usize; 2],
+    inverse: [[ValidatedInterval; 2]; 2],
+}
+
+#[derive(Clone, Copy)]
+struct PlaneSystem {
+    source: ValidatedSurfaceJet,
+    value: [ValidatedInterval; 2],
+    jacobian: [[ValidatedInterval; 2]; 2],
+}
+
+struct CoordinateJet {
+    parameter: ValidatedInterval,
+    jet: PlaneJet,
+}
+
+// Bound the new nested proof data, not just the enum payload. Include the
+// dispatcher's tube return slot and 512 bytes for its arguments/scalar locals.
+// Its alternative generic locals live in a separate function. Three reduced
+// source systems, chart, projection, reconstruction and both derivative solves
+// still fit below the old four-variable workspace. The shared source evaluator
+// is entered only once at a time, with the same bounded scratch for both paths.
+const PLANE_WORKSPACE_BYTES: usize = 3 * size_of::<PlaneSystem>()
+    + size_of::<Chart>()
+    + size_of::<CoordinateJet>()
+    + size_of::<PlaneJet>()
+    + size_of::<PlaneKrawczykReceipt>()
+    + 20 * size_of::<[ValidatedInterval; 2]>()
+    + 12 * size_of::<[ValidatedInterval; 3]>()
+    + 3 * size_of::<[[ValidatedInterval; 2]; 2]>()
+    + 2 * size_of::<[[f64; 2]; 2]>()
+    + 4 * size_of::<[ValidatedInterval; 4]>()
+    + size_of::<Tube>()
+    + 512;
+const ORIGINAL_WORKSPACE_BYTES: usize = 3 * size_of::<System>()
+    + size_of::<Tube>()
+    + size_of::<[[f64; 4]; 4]>()
+    + 2 * size_of::<[[ValidatedInterval; 4]; 4]>()
+    + 8 * size_of::<[ValidatedInterval; 4]>();
+const _: () = assert!(PLANE_WORKSPACE_BYTES <= ORIGINAL_WORKSPACE_BYTES);
+const _: () = assert!(size_of::<PlaneKrawczykReceipt>() <= size_of::<System>());
+
+fn operands(
+    curve: &Curve,
+) -> Result<Option<(&Surface, &Plane, &Curve, usize)>, ValidatedGeometryError> {
+    let (first, second, guide) = carriers(curve)?;
+    Ok(match (first, second) {
+        (_, Surface::Plane(plane)) => Some((first, plane, guide, 0)),
+        (Surface::Plane(plane), _) => Some((second, plane, guide, 2)),
+        _ => None,
+    })
+}
+
+impl Chart {
+    fn new(
+        plane: &Plane,
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, ValidatedGeometryError> {
+        budget.charge(1, cancel)?;
+        let (a, b) = coverage::plane_axes(plane);
+        let normal = cross3(a, b);
+        let mut best = None;
+        for rows in [[0, 1], [0, 2], [1, 2]] {
+            budget.charge(1, cancel)?;
+            let [i, j] = rows;
+            let determinant = a[i] * b[j] - a[j] * b[i];
+            if determinant.is_finite() && !determinant.contains_zero() {
+                let separation = determinant.lower.abs().min(determinant.upper.abs());
+                if best.is_none_or(|(_, _, previous)| separation > previous) {
+                    best = Some((rows, determinant, separation));
+                }
+            }
+        }
+        let (rows, determinant, _) = best.ok_or(ValidatedGeometryError::Singular)?;
+        let [i, j] = rows;
+        let reciprocal = determinant.reciprocal()?;
+        let chart = Self {
+            origin: std::array::from_fn(|i| ValidatedInterval::point(plane.origin()[i])),
+            axes: [a, b],
+            normal,
+            rows,
+            inverse: [
+                [b[j] * reciprocal, -b[i] * reciprocal],
+                [-a[j] * reciprocal, a[i] * reciprocal],
+            ],
+        };
+        if !chart
+            .origin
+            .into_iter()
+            .chain(a)
+            .chain(b)
+            .chain(normal)
+            .all(ValidatedInterval::is_finite)
+        {
+            return Err(ValidatedGeometryError::ConditioningFailure);
+        }
+        Ok(chart)
+    }
+
+    fn vector_parameters(&self, vector: [ValidatedInterval; 3]) -> [ValidatedInterval; 2] {
+        interval_product(self.inverse, self.rows.map(|i| vector[i]))
+    }
+
+    fn parameters(&self, point: [ValidatedInterval; 3]) -> [ValidatedInterval; 2] {
+        self.vector_parameters(subtract3(point, self.origin))
+    }
+
+    fn mean_value_parameters(
+        &self,
+        center_position: [ValidatedInterval; 3],
+        source: &ValidatedSurfaceJet,
+        delta: [ValidatedInterval; 2],
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[ValidatedInterval; 2], ValidatedGeometryError> {
+        budget.charge(1, cancel)?;
+        let center = self.parameters(center_position);
+        budget.charge(2, cancel)?;
+        let du = self.vector_parameters(source.du);
+        let dv = self.vector_parameters(source.dv);
+        let mut parameters = [ZERO; 2];
+        for i in 0..2 {
+            budget.charge(1, cancel)?;
+            parameters[i] = center[i] + du[i] * delta[0] + dv[i] * delta[1];
+        }
+        Ok(parameters)
+    }
+
+    fn vector(&self, uv: [ValidatedInterval; 2]) -> [ValidatedInterval; 3] {
+        add3(
+            multiply3(self.axes[0], uv[0]),
+            multiply3(self.axes[1], uv[1]),
+        )
+    }
+
+    fn position(&self, uv: [ValidatedInterval; 2]) -> [ValidatedInterval; 3] {
+        add3(
+            add3(self.origin, multiply3(self.axes[0], uv[0])),
+            multiply3(self.axes[1], uv[1]),
+        )
+    }
+}
+
+fn system(
+    source: &Surface,
+    chart: &Chart,
+    coordinate: &CoordinateJet,
+    domain: [ValidatedInterval; 2],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<PlaneSystem, ValidatedGeometryError> {
+    budget.charge(1, cancel)?;
+    let source = validated_surface_piecewise_jet(
+        source,
+        domain.map(|bound| [bound.lower, bound.upper]),
+        budget,
+        cancel,
+    )?;
+    let system = PlaneSystem {
+        source,
+        value: [
+            dot3(chart.normal, subtract3(source.position, chart.origin)),
+            coordinate
+                .jet
+                .residual(coordinate.parameter, source.position),
+        ],
+        jacobian: [chart.normal, coordinate.jet.normal()]
+            .map(|normal| [dot3(normal, source.du), dot3(normal, source.dv)]),
+    };
+    if !system
+        .value
+        .into_iter()
+        .chain(system.jacobian.into_iter().flatten())
+        .all(ValidatedInterval::is_finite)
+    {
+        return Err(ValidatedGeometryError::ConditioningFailure);
+    }
+    Ok(system)
+}
+
+pub(super) fn certify(
+    curve: &Curve,
+    projection: Projection,
+    parameter: ValidatedInterval,
+    domain: [ValidatedInterval; 4],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<Tube>, ValidatedGeometryError> {
+    let Some((source, plane, leader, source_index)) = operands(curve)? else {
+        return Ok(None);
+    };
+    budget.charge(1, cancel)?;
+    let chart = Chart::new(plane, budget, cancel)?;
+    // The original full-span projection jet is shared, never resampled or
+    // evaluated on a smaller interval for the derivative certificate.
+    let coordinate = CoordinateJet {
+        parameter,
+        jet: projection_jet(leader, projection, parameter, budget, cancel)?,
+    };
+    let source_domain = [domain[source_index], domain[source_index + 1]];
+    let enclosure = system(source, &chart, &coordinate, source_domain, budget, cancel)?;
+    let middle = source_domain.map(ValidatedInterval::midpoint);
+    let center = system(
+        source,
+        &chart,
+        &coordinate,
+        middle.map(ValidatedInterval::point),
+        budget,
+        cancel,
+    )?;
+    budget.charge(1, cancel)?;
+    let inverse = inverse(
+        enclosure
+            .jacobian
+            .map(|row| row.map(ValidatedInterval::midpoint)),
+    )?;
+    let defect = std::array::from_fn(|i| {
+        std::array::from_fn(|j| {
+            ValidatedInterval::point(if i == j { 1.0 } else { 0.0 })
+                - (0..2)
+                    .map(|k| ValidatedInterval::point(inverse[i][k]) * enclosure.jacobian[k][j])
+                    .fold(ZERO, |a, b| a + b)
+        })
+    });
+    let rho = defect
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|entry| ValidatedInterval::point(entry.magnitude()))
+                .fold(ZERO, |a, b| a + b)
+                .upper
+        })
+        .fold(0.0, f64::max);
+    if !rho.is_finite() || rho >= 1.0 {
+        return Err(ValidatedGeometryError::ConditioningFailure);
+    }
+    let correction = product(inverse, center.value);
+    let delta = std::array::from_fn(|i| source_domain[i] - ValidatedInterval::point(middle[i]));
+    let error = interval_product(defect, delta);
+    let base: [ValidatedInterval; 2] =
+        std::array::from_fn(|i| ValidatedInterval::point(middle[i]) - correction[i]);
+    let mut image = std::array::from_fn(|i| base[i] + error[i]);
+    if !(0..2).all(|i| source_domain[i].strictly_contains(image[i])) {
+        return Err(ValidatedGeometryError::Unresolved);
+    }
+    let tangent = cross3(
+        cross3(enclosure.source.du, enclosure.source.dv),
+        chart.normal,
+    );
+    let transverse = tangent
+        .map(ValidatedInterval::square)
+        .into_iter()
+        .fold(ZERO, |a, b| a + b);
+    if transverse.lower <= 0.0 {
+        return Err(ValidatedGeometryError::NonTransverse);
+    }
+    // Original-domain strict inclusion has already proved every parameter's
+    // unique root. Each such root also satisfies this centered mean-value
+    // equation with the SAME original Jacobian enclosure. Reapplying it to
+    // the root image contracts only the enclosure, never source ownership or
+    // the parameter span. The original convex box covers all center-to-root
+    // segments even when a contracted image no longer contains the center.
+    for _ in 0..3 {
+        budget.charge(1, cancel)?;
+        let previous = image;
+        let delta = std::array::from_fn(|i| image[i] - ValidatedInterval::point(middle[i]));
+        let remainder = interval_product(defect, delta);
+        for i in 0..2 {
+            image[i] = image[i]
+                .intersection(base[i] + remainder[i])
+                .ok_or(ValidatedGeometryError::ConditioningFailure)?;
+        }
+        if image == previous {
+            break;
+        }
+    }
+    let rooted = system(source, &chart, &coordinate, image, budget, cancel)?;
+    budget.charge(1, cancel)?;
+    let plane_index = 2 - source_index;
+    let direct_uv = chart.parameters(rooted.source.position);
+    // Differentiate the exact affine chart functional BEFORE multiplying
+    // source-coordinate displacements. Use rooted gradients only when BOTH
+    // center coordinates lie in that image, proving every segment to a root
+    // stays inside it. Otherwise the convex original source box supplies the
+    // complete gradient hull, including when the center is outside the image.
+    // All exact chart coefficient uncertainty remains outward.
+    budget.charge(1, cancel)?;
+    let center_in_image =
+        (0..2).all(|i| image[i].lower <= middle[i] && middle[i] <= image[i].upper);
+    let gradients = if center_in_image {
+        &rooted.source
+    } else {
+        &enclosure.source
+    };
+    let image_delta = std::array::from_fn(|i| image[i] - ValidatedInterval::point(middle[i]));
+    let mean_uv = chart.mean_value_parameters(
+        center.source.position,
+        gradients,
+        image_delta,
+        budget,
+        cancel,
+    )?;
+    let mut uv = direct_uv;
+    for i in 0..2 {
+        budget.charge(1, cancel)?;
+        uv[i] = direct_uv[i]
+            .intersection(mean_uv[i])
+            .ok_or(ValidatedGeometryError::ConditioningFailure)?;
+    }
+    // The reconstructed entire image must fit the original admitted chart.
+    // Clipping it could silently discard roots certified by the reduced system.
+    if !(0..2).all(|i| {
+        uv[i].is_finite()
+            && domain[plane_index + i].lower <= uv[i].lower
+            && uv[i].upper <= domain[plane_index + i].upper
+    }) {
+        return Err(ValidatedGeometryError::Unresolved);
+    }
+    let plane_position = chart.position(uv);
+    let position = intersect3(rooted.source.position, plane_position)?;
+    let residual = if source_index == 0 {
+        subtract3(rooted.source.position, plane_position)
+    } else {
+        subtract3(plane_position, rooted.source.position)
+    };
+    budget.charge(1, cancel)?;
+    let guide = &coordinate.jet;
+    let ft = guide.partial_first(position);
+    let first_uv = solve(inverse, defect, rho, [ZERO, -ft], budget, cancel)?;
+    let source_first = add3(
+        multiply3(rooted.source.du, first_uv[0]),
+        multiply3(rooted.source.dv, first_uv[1]),
+    );
+    let first = intersect3(
+        source_first,
+        chart.vector(chart.vector_parameters(source_first)),
+    )?;
+    let h = second_composition(rooted.source, first_uv[0], first_uv[1]);
+    budget.charge(1, cancel)?;
+    let last = dot3(guide.normal(), h)
+        + dot3(guide.first(), first) * ValidatedInterval::point(2.0)
+        + guide.partial_second(position);
+    let second_uv = solve(
+        inverse,
+        defect,
+        rho,
+        [-dot3(chart.normal, h), -last],
+        budget,
+        cancel,
+    )?;
+    let source_second = add3(
+        add3(
+            multiply3(rooted.source.du, second_uv[0]),
+            multiply3(rooted.source.dv, second_uv[1]),
+        ),
+        h,
+    );
+    let second = intersect3(
+        source_second,
+        chart.vector(chart.vector_parameters(source_second)),
+    )?;
+    if !position
+        .into_iter()
+        .chain(first)
+        .chain(second)
+        .chain(residual)
+        .all(ValidatedInterval::is_finite)
+    {
+        return Err(ValidatedGeometryError::ConditioningFailure);
+    }
+    let jet = ValidatedCurveJet {
+        position,
+        first,
+        second,
+        third: [ValidatedInterval {
+            lower: f64::NEG_INFINITY,
+            upper: f64::INFINITY,
+        }; 3],
+    };
+    let mut rooted_domain = domain;
+    rooted_domain[source_index..source_index + 2].copy_from_slice(&image);
+    rooted_domain[plane_index..plane_index + 2].copy_from_slice(&uv);
+    Ok(Some(Tube {
+        authority: TubeAuthority::Plane(PlaneKrawczykReceipt { jet, residual, rho }),
+        domain,
+        rooted_domain,
+    }))
+}
+
+fn inverse(matrix: [[f64; 2]; 2]) -> Result<[[f64; 2]; 2], ValidatedGeometryError> {
+    let [[a, b], [c, d]] = matrix;
+    let determinant = a * d - b * c;
+    if !determinant.is_finite() || determinant == 0.0 {
+        return Err(ValidatedGeometryError::Singular);
+    }
+    let inverse = [
+        [d / determinant, -b / determinant],
+        [-c / determinant, a / determinant],
+    ];
+    if inverse.into_iter().flatten().all(f64::is_finite) {
+        Ok(inverse)
+    } else {
+        Err(ValidatedGeometryError::ConditioningFailure)
+    }
+}
+
+fn product(matrix: [[f64; 2]; 2], vector: [ValidatedInterval; 2]) -> [ValidatedInterval; 2] {
+    interval_product(matrix.map(|row| row.map(ValidatedInterval::point)), vector)
+}
+
+fn interval_product(
+    matrix: [[ValidatedInterval; 2]; 2],
+    vector: [ValidatedInterval; 2],
+) -> [ValidatedInterval; 2] {
+    matrix.map(|row| row[0] * vector[0] + row[1] * vector[1])
+}
+
+fn solve(
+    inverse: [[f64; 2]; 2],
+    defect: [[ValidatedInterval; 2]; 2],
+    rho: f64,
+    rhs: [ValidatedInterval; 2],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<[ValidatedInterval; 2], ValidatedGeometryError> {
+    budget.charge(1, cancel)?;
+    let base = product(inverse, rhs);
+    let maximum = base
+        .into_iter()
+        .map(ValidatedInterval::magnitude)
+        .fold(0.0, f64::max);
+    let radius = (ValidatedInterval::point(rho)
+        * ValidatedInterval::point(maximum)
+        * (ONE - ValidatedInterval::point(rho)).reciprocal()?)
+    .upper;
+    let error = ValidatedInterval {
+        lower: -radius,
+        upper: radius,
+    };
+    let mut result = base.map(|value| value + error);
+    for _ in 0..3 {
+        budget.charge(1, cancel)?;
+        let residual = interval_product(defect, result);
+        result = std::array::from_fn(|i| {
+            result[i]
+                .intersection(base[i] + residual[i])
+                .unwrap_or(result[i])
+        });
+    }
+    if result.into_iter().all(ValidatedInterval::is_finite) {
+        Ok(result)
+    } else {
+        Err(ValidatedGeometryError::ConditioningFailure)
+    }
+}
+
+pub(super) fn numerical_root(
+    curve: &Curve,
+    projection: Projection,
+    parameter: f64,
+    mut center: [f64; 4],
+    options: &ValidatedCurveOptions,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<[f64; 4]>, ValidatedGeometryError> {
+    let Some((source, plane, leader, source_index)) = operands(curve)? else {
+        return Ok(None);
+    };
+    let chart = Chart::new(plane, budget, cancel)?;
+    let parameter = ValidatedInterval::point(parameter);
+    let coordinate = CoordinateJet {
+        parameter,
+        jet: projection_jet(leader, projection, parameter, budget, cancel)?,
+    };
+    for _ in 0..options.max_iterations {
+        budget.charge(1, cancel)?;
+        let value = system(
+            source,
+            &chart,
+            &coordinate,
+            [center[source_index], center[source_index + 1]].map(ValidatedInterval::point),
+            budget,
+            cancel,
+        )?;
+        let inverse = inverse(
+            value
+                .jacobian
+                .map(|row| row.map(ValidatedInterval::midpoint)),
+        )?;
+        let delta = product(inverse, value.value).map(ValidatedInterval::midpoint);
+        for i in 0..2 {
+            center[source_index + i] -= delta[i];
+        }
+        if !center.into_iter().all(f64::is_finite) {
+            return Err(ValidatedGeometryError::ConditioningFailure);
+        }
+        if delta.into_iter().map(f64::abs).fold(0.0, f64::max) < 1.0e-12 {
+            break;
+        }
+    }
+    budget.charge(1, cancel)?;
+    let point = validated_surface_piecewise_jet(
+        source,
+        [center[source_index], center[source_index + 1]].map(|value| [value, value]),
+        budget,
+        cancel,
+    )?
+    .position;
+    let uv = chart.parameters(point).map(ValidatedInterval::midpoint);
+    let plane_index = 2 - source_index;
+    center[plane_index..plane_index + 2].copy_from_slice(&uv);
+    if center.into_iter().all(f64::is_finite) {
+        Ok(Some(center))
+    } else {
+        Err(ValidatedGeometryError::ConditioningFailure)
+    }
+}
+
+#[cfg(test)]
+mod regressions {
+    use super::*;
+    use crate::{BsplineCurve, BsplineSurface, Invertible, Line, NurbsSurface, Vector3, Vector4};
+    use monstertruck_core::EuclideanSpace;
+
+    fn parabola(
+        posed: bool,
+        reversed: bool,
+        swapped: bool,
+    ) -> (Curve, [ValidatedInterval; 4], [f64; 3]) {
+        let (origin, scale) = if posed {
+            ([7.0, 11.0, 13.0], [-2.0, 3.0, 4.0])
+        } else {
+            ([0.0; 3], [1.0; 3])
+        };
+        let point = |u: f64, y: f64, v: f64| {
+            Point3::new(
+                origin[0] + scale[0] * u,
+                origin[1] + scale[1] * y,
+                origin[2] + scale[2] * v,
+            )
+        };
+        // The independent polynomial is S(u,v)=(u,u^2,v-1/2), followed
+        // by the displayed diagonal affine pose, including its reflection.
+        let source = Surface::BsplineSurface(BsplineSurface::new(
+            (KnotVector::bezier_knot(2), KnotVector::bezier_knot(1)),
+            [(0.0, 0.0), (0.5, 0.0), (1.0, 1.0)]
+                .into_iter()
+                .map(|(u, y)| vec![point(u, y, -0.5), point(u, y, 0.5)])
+                .collect(),
+        ));
+        let plane = Surface::Plane(Plane::from_origin_vectors(
+            Point3::from(origin),
+            Vector3::new(scale[0], 0.0, 0.0),
+            Vector3::new(0.5 * scale[0], scale[1], 0.0),
+        ));
+        let guide = Curve::BsplineCurve(BsplineCurve::new(
+            KnotVector::bezier_knot(2),
+            vec![
+                point(0.0, 0.0, 0.0),
+                point(0.5, 0.0, 0.0),
+                point(1.0, 1.0, 0.0),
+            ],
+        ));
+        let guide = if reversed {
+            let mut wrapper = Processor::new(TrimmedCurve::new(Box::new(guide), (0.0, 1.0)));
+            wrapper.invert();
+            Curve::TrimmedCurve(wrapper)
+        } else {
+            guide
+        };
+        let source_domain = [
+            interval_range([0.1, 0.6]).unwrap(),
+            interval_range([0.3, 0.7]).unwrap(),
+        ];
+        let plane_domain = [
+            interval_range([-0.1, 0.8]).unwrap(),
+            interval_range([-0.1, 0.6]).unwrap(),
+        ];
+        let (first, second, domain) = if swapped {
+            (
+                plane,
+                source,
+                [
+                    plane_domain[0],
+                    plane_domain[1],
+                    source_domain[0],
+                    source_domain[1],
+                ],
+            )
+        } else {
+            (
+                source,
+                plane,
+                [
+                    source_domain[0],
+                    source_domain[1],
+                    plane_domain[0],
+                    plane_domain[1],
+                ],
+            )
+        };
+        (
+            Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+                Box::new(first),
+                Box::new(second),
+                Box::new(guide),
+                None,
+                None,
+            )),
+            domain,
+            scale,
+        )
+    }
+
+    fn contains(bound: ValidatedInterval, value: f64) {
+        assert!(
+            bound.lower <= value && value <= bound.upper,
+            "{bound:?} excludes {value}"
+        );
+    }
+
+    fn prepare_native<'a>(
+        curve: &'a Curve,
+        range: [f64; 2],
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> PreparedValidatedCurve<'a> {
+        prepared_validated_curve(
+            curve,
+            range,
+            &ValidatedCurveOptions::default(),
+            budget,
+            cancel,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn full_span_native_quadratic_jets_preserve_reflection_reversal_and_carrier_order() {
+        let cancel = AtomicBool::new(false);
+        for posed in [false, true] {
+            for reversed in [false, true] {
+                for swapped in [false, true] {
+                    let (curve, _, scale) = parabola(posed, reversed, swapped);
+                    let parameter = if reversed {
+                        [87.0 / 128.0, 88.0 / 128.0]
+                    } else {
+                        [40.0 / 128.0, 41.0 / 128.0]
+                    };
+                    let mut work = ValidatedGeometryBudget::new(2_000_000);
+                    let prepared = prepared_validated_curve(
+                        &curve, parameter, &ValidatedCurveOptions::default(), &mut work, &cancel,
+                    ).unwrap_or_else(|error| panic!(
+                        "Original native preparation refused: posed={posed}, reversed={reversed}, swapped={swapped}, range={parameter:?}, consumed={}, remaining={}, error={error:?}",
+                        work.consumed(), work.remaining(),
+                    ));
+                    let full_jet = prepared.jet(parameter, &mut work, &cancel).unwrap();
+                    let origin = if posed { [7.0, 11.0, 13.0] } else { [0.0; 3] };
+                    let sign = if reversed { -1.0 } else { 1.0 };
+                    let mut covered = parameter[0];
+                    for piece in prepared.pieces() {
+                        assert_eq!(piece.parameter[0], covered);
+                        covered = piece.parameter[1];
+                        // These are continuation's actual original-bound tubes,
+                        // not arbitrary broad boxes around sampled roots.
+                        let domain = flatten(piece.source_parameters.unwrap());
+                        let tube = certify(
+                            &curve,
+                            piece.projection,
+                            interval_range(piece.parameter).unwrap(),
+                            domain,
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap()
+                        .unwrap();
+                        assert!(matches!(tube.authority, TubeAuthority::Plane(_)));
+                        assert_eq!(tube.domain, domain);
+                        assert!(tube.contraction_bound() < 1.0);
+                        assert!(
+                            tube.surface_residual()
+                                .into_iter()
+                                .all(ValidatedInterval::contains_zero)
+                        );
+                        let jet = implicit_jet(&tube).unwrap();
+                        // Monotone endpoint extrema describe each WHOLE piece.
+                        for t in piece.parameter {
+                            let u = if reversed { 1.0 - t } else { t };
+                            for (axis, expected) in [
+                                origin[0] + scale[0] * u,
+                                origin[1] + scale[1] * u * u,
+                                origin[2],
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            {
+                                contains(jet.position[axis], expected);
+                                contains(full_jet.position[axis], expected);
+                            }
+                            for (axis, expected) in
+                                [sign * scale[0], sign * 2.0 * scale[1] * u, 0.0]
+                                    .into_iter()
+                                    .enumerate()
+                            {
+                                contains(jet.first[axis], expected);
+                                contains(full_jet.first[axis], expected);
+                            }
+                            for (axis, expected) in
+                                [0.0, 2.0 * scale[1], 0.0].into_iter().enumerate()
+                            {
+                                contains(jet.second[axis], expected);
+                                contains(full_jet.second[axis], expected);
+                            }
+                            let index = if swapped { 2 } else { 0 };
+                            contains(tube.rooted_domain[index], u);
+                            contains(tube.rooted_domain[index + 1], 0.5);
+                            contains(tube.rooted_domain[2 - index], u - 0.5 * u * u);
+                            contains(tube.rooted_domain[3 - index], u * u);
+                        }
+                    }
+                    assert_eq!(covered, parameter[1]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changing_coordinate_planes_use_the_original_raw_gauge_and_analytic_second_jet() {
+        let (curve, _, _) = parabola(false, false, false);
+        let span: [f64; 2] = [0.3, 0.32];
+        let (source, Surface::Plane(plane), guide) = carriers(&curve).unwrap() else {
+            panic!("Actual plane carrier")
+        };
+        let root = 2.0 * span[0] / (1.0 + (1.0 + 4.0 * span[0] * span[0]).sqrt());
+        let cancel = AtomicBool::new(false);
+        let mut work = ValidatedGeometryBudget::new(2_000_000);
+        let prepared = prepared_face_plane_curve(
+            guide,
+            ValidatedFacePlaneSource {
+                surface: source,
+                anchor: Some(ValidatedFacePlaneSourceAnchor::Front([root, 0.5])),
+                endpoint_coordinate_planes: span.map(|t| {
+                    Some(CoordinatePlane {
+                        normal: [1.0, t, 0.0],
+                        offset: t,
+                    })
+                }),
+            },
+            plane,
+            span,
+            &ValidatedCurveOptions::default(),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let jet = prepared.jet(span, &mut work, &cancel).unwrap();
+        for piece in prepared.pieces() {
+            let tube = certify(
+                prepared.native_curve().unwrap(),
+                piece.projection,
+                interval_range(piece.parameter).unwrap(),
+                flatten(piece.source_parameters.unwrap()),
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(matches!(tube.authority, TubeAuthority::Plane(_)));
+        }
+        // Solve u+t*u^2=t independently, not by calling the old system or
+        // reading any leader point. Differentiate this scalar identity twice.
+        for t in [span[0], 0.31, span[1]] {
+            let u = 2.0 * t / (1.0 + (1.0 + 4.0 * t * t).sqrt());
+            let first = (1.0 - u * u) / (1.0 + 2.0 * t * u);
+            let second = (-4.0 * u * first - 2.0 * t * first * first) / (1.0 + 2.0 * t * u);
+            for (axis, expected) in [u, u * u, 0.0].into_iter().enumerate() {
+                contains(jet.position[axis], expected);
+            }
+            for (axis, expected) in [first, 2.0 * u * first, 0.0].into_iter().enumerate() {
+                contains(jet.first[axis], expected);
+            }
+            for (axis, expected) in [second, 2.0 * first * first + 2.0 * u * second, 0.0]
+                .into_iter()
+                .enumerate()
+            {
+                contains(jet.second[axis], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn reconstructed_plane_domain_is_containment_not_root_clipping() {
+        let (curve, _, _) = parabola(false, false, false);
+        let cancel = AtomicBool::new(false);
+        let mut work = ValidatedGeometryBudget::new(2_000_000);
+        let prepared = prepare_native(&curve, [0.3, 0.32], &mut work, &cancel);
+        let piece = &prepared.pieces()[0];
+        let mut domain = flatten(piece.source_parameters.unwrap());
+        let span = interval_range(piece.parameter).unwrap();
+        domain[2] = interval_range([2.0, 3.0]).unwrap();
+        for _ in 0..2 {
+            let before = work.consumed();
+            assert!(matches!(
+                certify(&curve, piece.projection, span, domain, &mut work, &cancel),
+                Err(ValidatedGeometryError::Unresolved)
+            ));
+            assert!(work.consumed() > before);
+        }
+        assert!(
+            super::super::certify(&curve, piece.projection, span, domain, &mut work, &cancel)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn degenerate_parallel_and_rational_pole_carriers_never_gain_authority() {
+        let cancel = AtomicBool::new(false);
+        let guide = || {
+            Box::new(Curve::Line(Line(
+                Point3::origin(),
+                Point3::new(1.0, 0.0, 0.0),
+            )))
+        };
+        let domain = [interval_range([0.4, 0.6]).unwrap(); 4];
+        for plane in [
+            Plane::xy(),
+            Plane::new(
+                Point3::origin(),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(2.0, 0.0, 0.0),
+            ),
+        ] {
+            let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+                Box::new(Surface::Plane(Plane::xy())),
+                Box::new(Surface::Plane(plane)),
+                guide(),
+                None,
+                None,
+            ));
+            assert!(matches!(
+                certify(
+                    &curve,
+                    Projection::Native,
+                    ZERO,
+                    domain,
+                    &mut ValidatedGeometryBudget::new(1_000_000),
+                    &cancel
+                ),
+                Err(ValidatedGeometryError::Singular | ValidatedGeometryError::NonTransverse)
+            ));
+        }
+        let pole = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+            (KnotVector::bezier_knot(1), KnotVector::bezier_knot(1)),
+            vec![
+                vec![
+                    Vector4::new(0.0, 0.0, 0.0, -1.0),
+                    Vector4::new(0.0, 1.0, 1.0, -1.0),
+                ],
+                vec![
+                    Vector4::new(1.0, 0.0, 0.0, 1.0),
+                    Vector4::new(1.0, 1.0, 1.0, 1.0),
+                ],
+            ],
+        )));
+        let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+            Box::new(pole),
+            Box::new(Surface::Plane(Plane::xy())),
+            guide(),
+            None,
+            None,
+        ));
+        assert!(matches!(
+            certify(
+                &curve,
+                Projection::Native,
+                ZERO,
+                domain,
+                &mut ValidatedGeometryBudget::new(1_000_000),
+                &cancel
+            ),
+            Err(ValidatedGeometryError::DenominatorContainsZero)
+        ));
+    }
+
+    #[test]
+    fn new_work_is_cumulative_and_cancellation_never_falls_through_to_generic() {
+        let (curve, _, _) = parabola(false, false, false);
+        let cancel = AtomicBool::new(false);
+        let mut setup = ValidatedGeometryBudget::new(2_000_000);
+        let prepared = prepare_native(&curve, [0.3, 0.32], &mut setup, &cancel);
+        let piece = &prepared.pieces()[0];
+        let domain = flatten(piece.source_parameters.unwrap());
+        let span = interval_range(piece.parameter).unwrap();
+        let mut complete = ValidatedGeometryBudget::new(1_000_000);
+        certify(
+            &curve,
+            Projection::Native,
+            span,
+            domain,
+            &mut complete,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        // Every prefix is a real bounded attempt, including reconstruction and
+        // both derivative solves; no exhausted attempt can return a receipt.
+        for limit in 0..complete.consumed() {
+            let mut work = ValidatedGeometryBudget::new(limit);
+            assert!(matches!(
+                super::super::certify(&curve, Projection::Native, span, domain, &mut work, &cancel),
+                Err(ValidatedGeometryError::ResourceLimit)
+            ));
+            assert_eq!(work.consumed(), limit);
+        }
+        assert!(matches!(
+            super::super::certify(
+                &curve,
+                Projection::Native,
+                span,
+                domain,
+                &mut complete,
+                &AtomicBool::new(true)
+            ),
+            Err(ValidatedGeometryError::Cancelled)
+        ));
+        assert_eq!(
+            PLANE_WORKSPACE_BYTES.min(ORIGINAL_WORKSPACE_BYTES),
+            PLANE_WORKSPACE_BYTES
+        );
+    }
+
+    #[test]
+    fn consumer_binding_keeps_native_endpoint_and_retained_storage_contracts() {
+        let (curve, _, _) = parabola(false, true, false);
+        let cancel = AtomicBool::new(false);
+        let options = ValidatedCurveOptions::default();
+        let mut work = ValidatedGeometryBudget::new(2_000_000);
+        let range = [0.65, 0.7];
+        let prepared =
+            prepared_validated_curve(&curve, range, &options, &mut work, &cancel).unwrap();
+        assert_eq!(prepared.range(), range);
+        assert!(std::ptr::eq(prepared.native_curve().unwrap(), &curve));
+        assert!(prepared.retained_bytes() <= options.max_retained_bytes);
+        let mut covered = range[0];
+        for piece in prepared.pieces() {
+            assert_eq!(piece.parameter[0], covered);
+            covered = piece.parameter[1];
+            assert!(piece.source_parameters.is_some());
+            assert!(
+                piece
+                    .surface_residual
+                    .into_iter()
+                    .all(ValidatedInterval::contains_zero)
+            );
+        }
+        assert_eq!(covered, range[1]);
+        for t in range {
+            let point = prepared.evaluate(t, &mut work, &cancel).unwrap();
+            let u = 1.0 - t;
+            for (axis, expected) in [u, u * u, 0.0].into_iter().enumerate() {
+                contains(point.error[axis], expected);
+                assert!(point.error[axis].width() <= options.endpoint_tolerance);
+            }
+        }
+        let (source, Surface::Plane(plane), guide) = carriers(&curve).unwrap() else {
+            panic!("Actual plane carrier")
+        };
+        let generated = prepared_face_plane_curve(
+            guide,
+            ValidatedFacePlaneSource {
+                surface: source,
+                anchor: Some(ValidatedFacePlaneSourceAnchor::Front([0.35, 0.5])),
+                endpoint_coordinate_planes: [None; 2],
+            },
+            plane,
+            range,
+            &options,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let (retained_source, retained_plane, _) =
+            carriers(generated.native_curve().unwrap()).unwrap();
+        assert!(
+            validated_same_surface_coefficients(source, retained_source, &mut work, &cancel)
+                .unwrap()
+        );
+        assert!(matches!(retained_plane, Surface::Plane(retained) if retained == plane));
+        assert_eq!(generated.range(), range);
+        for t in range {
+            let point = generated.evaluate(t, &mut work, &cancel).unwrap();
+            let u = 1.0 - t;
+            contains(point.error[0], u);
+            contains(point.error[1], u * u);
+            contains(point.error[2], 0.0);
+        }
+        let too_small = ValidatedCurveOptions {
+            max_retained_bytes: size_of::<PreparedValidatedCurve<'_>>() - 1,
+            ..options
+        };
+        assert!(matches!(
+            prepared_validated_curve(&curve, range, &too_small, &mut work, &cancel),
+            Err(ValidatedGeometryError::ResourceLimit)
+        ));
+    }
+
+    #[test]
+    fn only_actual_affine_plane_coefficients_select_elimination() {
+        let (original, _, _) = parabola(false, false, false);
+        let (source, _, leader) = carriers(&original).unwrap();
+        let second = Surface::BsplineSurface(BsplineSurface::new(
+            (KnotVector::bezier_knot(1), KnotVector::bezier_knot(1)),
+            vec![
+                vec![Point3::origin(), Point3::new(0.5, 1.0, 0.0)],
+                vec![Point3::new(1.0, 0.0, 0.0), Point3::new(1.5, 1.0, 0.0)],
+            ],
+        ));
+        let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+            Box::new(source.clone()),
+            Box::new(second),
+            Box::new(leader.clone()),
+            None,
+            None,
+        ));
+        let cancel = AtomicBool::new(false);
+        let mut work = ValidatedGeometryBudget::new(2_000_000);
+        let range = [0.3, 0.32];
+        let prepared = prepare_native(&curve, range, &mut work, &cancel);
+        let jet = prepared.jet(range, &mut work, &cancel).unwrap();
+        let mut covered = range[0];
+        for piece in prepared.pieces() {
+            assert_eq!(piece.parameter[0], covered);
+            covered = piece.parameter[1];
+            let domain = flatten(piece.source_parameters.unwrap());
+            let span = interval_range(piece.parameter).unwrap();
+            assert!(
+                certify(&curve, piece.projection, span, domain, &mut work, &cancel)
+                    .unwrap()
+                    .is_none()
+            );
+            let tube =
+                super::super::certify(&curve, piece.projection, span, domain, &mut work, &cancel)
+                    .unwrap();
+            assert!(matches!(tube.authority, TubeAuthority::Krawczyk { .. }));
+        }
+        assert_eq!(covered, range[1]);
+        for t in range {
+            contains(jet.position[0], t);
+            contains(jet.position[1], t * t);
+        }
+        // Stored vectors, not their rounded translated defining points, are
+        // the actual coefficients of a vector-defined native plane.
+        let plane = Plane::from_origin_vectors(
+            Point3::new(1.0e16, 1.0e16, 1.0e16),
+            Vector3::unit_x(),
+            Vector3::unit_y(),
+        );
+        let chart = Chart::new(&plane, &mut work, &cancel).unwrap();
+        assert_eq!(chart.axes[0], [ONE, ZERO, ZERO]);
+        assert_eq!(chart.axes[1], [ZERO, ONE, ZERO]);
+        assert_eq!(chart.vector_parameters([ONE, ZERO, ZERO]), [ONE, ZERO]);
+    }
+
+    #[test]
+    fn native_cubic_guide_retains_nonzero_second_projection_normal() {
+        let source = Surface::BsplineSurface(BsplineSurface::new(
+            (KnotVector::bezier_knot(3), KnotVector::bezier_knot(1)),
+            [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 1.0)]
+                .into_iter()
+                .map(|(x, y)| vec![Point3::new(x, y, -0.5), Point3::new(x, y, 0.5)])
+                .collect(),
+        ));
+        let guide = Curve::BsplineCurve(BsplineCurve::new(
+            KnotVector::bezier_knot(3),
+            vec![
+                Point3::origin(),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(2.0, 0.0, 0.0),
+                Point3::new(3.0, 1.0, 0.0),
+            ],
+        ));
+        let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+            Box::new(source),
+            Box::new(Surface::Plane(Plane::xy())),
+            Box::new(guide),
+            None,
+            None,
+        ));
+        let span = [0.3, 0.32];
+        let cancel = AtomicBool::new(false);
+        let mut work = ValidatedGeometryBudget::new(2_000_000);
+        let prepared = prepare_native(&curve, span, &mut work, &cancel);
+        let jet = prepared.jet(span, &mut work, &cancel).unwrap();
+        for piece in prepared.pieces() {
+            let tube = certify(
+                &curve,
+                piece.projection,
+                interval_range(piece.parameter).unwrap(),
+                flatten(piece.source_parameters.unwrap()),
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(matches!(tube.authority, TubeAuthority::Plane(_)));
+        }
+        // Exact binary64 Bezier coefficients give x=3t and y=t^3;
+        // the projection normal's second derivative is (0,6,0).
+        for t in span {
+            contains(jet.position[0], 3.0 * t);
+            contains(jet.position[1], t * t * t);
+            contains(jet.first[0], 3.0);
+            contains(jet.first[1], 3.0 * t * t);
+            contains(jet.second[0], 0.0);
+            contains(jet.second[1], 6.0 * t);
+        }
+    }
+
+    #[test]
+    fn original_gradient_hull_covers_a_reduced_image_that_excludes_the_center() {
+        let cancel = AtomicBool::new(false);
+        let mut work = ValidatedGeometryBudget::new(1_000);
+        let plane = Plane::from_origin_vectors(
+            Point3::origin(),
+            Vector3::unit_x(),
+            Vector3::new(0.5, 1.0, 0.0),
+        );
+        let chart = Chart::new(&plane, &mut work, &cancel).unwrap();
+        let span = interval_range([-1.0, 1.0]).unwrap();
+        // The nonlinear image excludes its center at u=v=0. Only gradients
+        // on the ORIGINAL box [-1,1]^2 cover every connecting segment:
+        // S=(u^2+v/2,v,0), hence the actual plane coordinates are (u^2,v).
+        // Gradients restricted to u in [1/2,1] would instead lose u=1/2's
+        // actual coordinate 1/4 when integrated from the outside center.
+        let curved = ValidatedSurfaceJet {
+            position: [interval_range([-0.5, 1.5]).unwrap(), span, ZERO],
+            du: [interval_range([-2.0, 2.0]).unwrap(), ZERO, ZERO],
+            dv: [ValidatedInterval::point(0.5), ONE, ZERO],
+            duu: [ValidatedInterval::point(2.0), ZERO, ZERO],
+            duv: [ZERO; 3],
+            dvv: [ZERO; 3],
+        };
+        let image_delta = [interval_range([0.5, 1.0]).unwrap(), span];
+        let mean = chart
+            .mean_value_parameters([ZERO; 3], &curved, image_delta, &mut work, &cancel)
+            .unwrap();
+        contains(mean[0], 0.25);
+        contains(mean[0], 1.0);
+        contains(mean[1], -1.0);
+        contains(mean[1], 1.0);
+    }
+
+    #[test]
+    fn generated_native_parabola_keeps_translated_full_span_affordable_and_sealed() {
+        let (original, _, _) = parabola(true, false, false);
+        let (source, _, guide) = carriers(&original).unwrap();
+        let plane = Plane::from_origin_vectors(
+            Point3::new(7.0, 11.0, 13.0),
+            Vector3::new(-2.0, 0.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+        );
+        let range = [0.3, 0.32];
+        let cancel = AtomicBool::new(false);
+        let options = ValidatedCurveOptions::default();
+        let mut work = ValidatedGeometryBudget::new(2_000_000);
+        let prepared = prepared_face_plane_curve(
+            guide,
+            ValidatedFacePlaneSource {
+                surface: source,
+                anchor: Some(ValidatedFacePlaneSourceAnchor::Front([range[0], 0.5])),
+                endpoint_coordinate_planes: [None; 2],
+            },
+            &plane,
+            range,
+            &options,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(prepared.range(), range);
+        let (retained_source, retained_plane, _) =
+            carriers(prepared.native_curve().unwrap()).unwrap();
+        assert!(
+            validated_same_surface_coefficients(source, retained_source, &mut work, &cancel)
+                .unwrap()
+        );
+        assert!(matches!(retained_plane, Surface::Plane(retained) if retained == &plane));
+        let jet = prepared.jet(range, &mut work, &cancel).unwrap();
+        let mut covered = range[0];
+        for piece in prepared.pieces() {
+            assert_eq!(piece.parameter[0], covered);
+            covered = piece.parameter[1];
+            assert_eq!(piece.projection, Projection::Native);
+            let uv = piece.source_parameters.unwrap();
+            // The actual original source/plane roots and both parameter
+            // inventories cover every closed piece, without world snapping.
+            for t in piece.parameter {
+                contains(uv[0][0], t);
+                contains(uv[0][1], 0.5);
+                contains(uv[1][0], t);
+                contains(uv[1][1], t * t);
+            }
+        }
+        assert_eq!(covered, range[1]);
+        // These exact monotone polynomials give the whole requested span's
+        // extrema, independent of the implementation's continuation partition.
+        for t in range {
+            for (axis, value) in [7.0 - 2.0 * t, 11.0 + 3.0 * t * t, 13.0]
+                .into_iter()
+                .enumerate()
+            {
+                contains(jet.position[axis], value);
+            }
+            for (axis, value) in [-2.0, 6.0 * t, 0.0].into_iter().enumerate() {
+                contains(jet.first[axis], value);
+            }
+            for (axis, value) in [0.0, 6.0, 0.0].into_iter().enumerate() {
+                contains(jet.second[axis], value);
+            }
+            let endpoint = prepared.evaluate(t, &mut work, &cancel).unwrap();
+            for (axis, value) in [7.0 - 2.0 * t, 11.0 + 3.0 * t * t, 13.0]
+                .into_iter()
+                .enumerate()
+            {
+                contains(endpoint.error[axis], value);
+                assert!(endpoint.error[axis].width() <= options.endpoint_tolerance);
+            }
+        }
+        assert!(work.remaining() > 0);
+    }
+}

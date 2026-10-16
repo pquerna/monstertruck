@@ -965,17 +965,15 @@ fn curve_sum<const N: usize>(
             continue;
         };
         let (start, length, values) = basis(knots, count, degree, span, parameter, budget, cancel)?;
+        let partition_unity = span >= degree && span < count;
         let mut value = [Taylor::ZERO; N];
         let mut evidence = ControlEvidence::new(weight_axis);
         for (index, basis_value) in values.iter().take(length).enumerate() {
             budget.charge(1, cancel)?;
             let p = control(start + index);
-            evidence.include(p)?;
-            for axis in 0..N {
-                value[axis] = value[axis] + Taylor::constant(p[axis]) * *basis_value;
-            }
+            evidence.include(p, *basis_value, partition_unity, &mut value)?;
         }
-        let value = evidence.finish(value, span >= degree && span < count, true)?;
+        let value = evidence.finish(value, partition_unity, true)?;
         result = Some(match result {
             None => value,
             Some(previous) => previous.hull(value),
@@ -1076,28 +1074,22 @@ fn surface_sum<P, const N: usize>(
                 continue;
             };
             let (iv, lv, bv) = basis(&knots.1, nv, pv, sv, v, budget, cancel)?;
+            let partition_unity = su >= pu && su < nu && sv >= pv && sv < nv;
             let mut value = [Taylor::ZERO; N];
             let mut evidence = ControlEvidence::new(weight_axis);
             for i in 0..lu {
                 for j in 0..lv {
                     budget.charge(1, cancel)?;
                     let p = control(&controls[iu + i][iv + j]);
-                    evidence.include(p)?;
                     let basis = bu[i] * bv[j];
-                    for axis in 0..N {
-                        value[axis] = value[axis] + Taylor::constant(p[axis]) * basis;
-                    }
+                    evidence.include(p, basis, partition_unity, &mut value)?;
                 }
             }
             let nonnegative = knots.0[su] <= u.0[0][0].lower
                 && u.0[0][0].upper <= knots.0[su + 1]
                 && knots.1[sv] <= v.0[0][0].lower
                 && v.0[0][0].upper <= knots.1[sv + 1];
-            let value = evidence.finish(
-                value,
-                su >= pu && su < nu && sv >= pv && sv < nv,
-                nonnegative,
-            )?;
+            let value = evidence.finish(value, partition_unity, nonnegative)?;
             result = Some(match result {
                 None => value,
                 Some(previous) => previous.hull(value),
@@ -1527,6 +1519,7 @@ struct ControlEvidence<const N: usize> {
     possible: [bool; N],
     weight: Option<usize>,
     euclidean_hulls: [Option<ValidatedInterval>; N],
+    origin: Option<[f64; N]>,
 }
 impl<const N: usize> ControlEvidence<N> {
     fn new(weight: Option<usize>) -> Self {
@@ -1536,11 +1529,27 @@ impl<const N: usize> ControlEvidence<N> {
             possible: [true; N],
             weight,
             euclidean_hulls: [None; N],
+            origin: None,
         }
     }
-    fn include(&mut self, point: [f64; N]) -> Result<(), ValidatedGeometryError> {
+    fn include(
+        &mut self,
+        point: [f64; N],
+        basis: Taylor,
+        partition_unity: bool,
+        values: &mut [Taylor; N],
+    ) -> Result<(), ValidatedGeometryError> {
         if !point.into_iter().all(f64::is_finite) {
             return Err(ValidatedGeometryError::InvalidInput);
+        }
+        // Partition unity removes the constant origin before basis evaluation.
+        // The original coefficients still own every hull and denominator proof.
+        let first = self.origin.is_none();
+        let origin = self
+            .origin
+            .get_or_insert(if partition_unity { point } else { [0.0; N] });
+        if first {
+            *values = origin.map(Taylor::constant);
         }
         for i in 0..N {
             let value = ValidatedInterval::point(point[i]);
@@ -1565,6 +1574,12 @@ impl<const N: usize> ControlEvidence<N> {
                     }
                 }
             }
+            let coefficient = if point[i] == origin[i] {
+                ValidatedInterval::point(0.0)
+            } else {
+                ValidatedInterval::point(point[i]) - ValidatedInterval::point(origin[i])
+            };
+            values[i] = values[i] + Taylor::interval(coefficient) * basis;
         }
         Ok(())
     }
