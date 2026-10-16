@@ -64,6 +64,12 @@ pub enum AnalyticSurfaceKind {
 pub trait TryIntoAnalyticSurfaceKind {
     /// Returns the recognized analytic kind.
     fn try_into_analytic_surface_kind(&self) -> Option<AnalyticSurfaceKind>;
+
+    /// Borrows an original literal affine plane, not a recognized approximation.
+    ///
+    /// Converted, fitted and processed surfaces refuse unless their original
+    /// plane representation is directly retained without rounded construction.
+    fn original_plane(&self) -> Option<&Plane> { None }
 }
 
 impl TryIntoAnalyticSurfaceKind for Plane {
@@ -71,6 +77,8 @@ impl TryIntoAnalyticSurfaceKind for Plane {
     fn try_into_analytic_surface_kind(&self) -> Option<AnalyticSurfaceKind> {
         Some(AnalyticSurfaceKind::Plane(*self))
     }
+
+    fn original_plane(&self) -> Option<&Plane> { Some(self) }
 }
 
 fn homogeneous_delta_vector(start: Vector4, end: Vector4) -> Option<Vector3> {

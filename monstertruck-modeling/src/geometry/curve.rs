@@ -453,6 +453,15 @@ impl TryIntoHomogeneousBsplineCurve for Curve {
         }
     }
 
+    fn original_curve_coefficients(&self) -> Option<OriginalCurveCoefficients<'_>> {
+        match self {
+            Self::Line(curve) => curve.original_curve_coefficients(),
+            Self::BsplineCurve(curve) => curve.original_curve_coefficients(),
+            Self::NurbsCurve(curve) => curve.original_curve_coefficients(),
+            Self::ParameterCurve(_) | Self::IntersectionCurve(_) | Self::TrimmedCurve(_) => None,
+        }
+    }
+
     fn try_into_homogeneous_bspline_curve_over(
         &self,
         range: (f64, f64),

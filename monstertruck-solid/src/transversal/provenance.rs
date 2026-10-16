@@ -222,9 +222,15 @@ fn and_prepared_with_provenance_impl<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
 
 #[cfg(test)]
 mod native_lineage_regressions {
+    #[cfg(feature = "marching-ssi")]
+    use super::super::edge_lineage::BooleanCoedgeOrigin;
     use super::super::prepared::{BooleanWorkLimits, prepare_boolean_source_counted};
     use super::*;
     use monstertruck_geometry::prelude::{BoundingBox, EuclideanSpace};
+    #[cfg(feature = "marching-ssi")]
+    use monstertruck_geometry::prelude::{
+        InnerSpace, Matrix4, ParametricCurve, ParametricSurface3D, Vector3, Vector4,
+    };
     use monstertruck_modeling as modeling;
 
     fn limits() -> BooleanWorkLimits {
@@ -378,6 +384,163 @@ mod native_lineage_regressions {
                     .iter()
                     .flat_map(|shell| shell.iter())
                     .any(|original| original.id() == face.source.face_id)
+            );
+        }
+    }
+
+    #[cfg(feature = "marching-ssi")]
+    #[test]
+    fn prepared_original_line_overlap_keeps_source_and_generated_face_use_genealogy() {
+        let original = cube(Point3::origin(), Point3::new(1.0, 1.0, 1.0));
+        for scale in [None, Some(2.0), Some(-2.0)] {
+            let source = if let Some(scale) = scale {
+                original.mapped(
+                    |point| *point,
+                    |curve| {
+                        let modeling::Curve::Line(line) = curve else {
+                            unreachable!("literal cuboid source edges")
+                        };
+                        modeling::Curve::NurbsCurve(modeling::NurbsCurve::new(
+                            modeling::BsplineCurve::new(
+                                modeling::KnotVector::from(vec![-3.0, -3.0, 5.0, 5.0]),
+                                vec![
+                                    line.0.to_homogeneous() * scale,
+                                    line.1.to_homogeneous() * scale,
+                                ],
+                            ),
+                        ))
+                    },
+                    Clone::clone,
+                )
+            } else {
+                original.clone()
+            };
+            if let Some(scale) = scale {
+                assert!(
+                    source.boundaries()[0]
+                        .edge_iter()
+                        .all(|edge| edge.with_curve(|curve| {
+                            let modeling::Curve::NurbsCurve(curve) = curve else {
+                                return false;
+                            };
+                            curve
+                                .non_rationalized()
+                                .control_points()
+                                .iter()
+                                .all(|control| control.w == scale)
+                        }))
+                );
+            }
+            let snapshot = serde_json::to_vec(&source.boundaries()[0].compress()).unwrap();
+            let original_edges: Vec<_> = source.boundaries()[0]
+                .edge_iter()
+                .map(|edge| edge.id())
+                .collect();
+            let other = cube(Point3::new(-2.0, -1.0, 0.0), Point3::new(2.0, 2.0, 3.0));
+            let other = modeling::builder::transformed(
+                &other,
+                Matrix4::from_cols(
+                    Vector4::new(1.0, 0.0, -1.0, 0.0),
+                    Vector4::new(0.0, 1.0, 0.0, 0.0),
+                    Vector4::new(0.0, 0.0, 1.0, 0.0),
+                    Vector4::new(1.0, 0.0, 0.0, 1.0),
+                ),
+            );
+            let cancel = AtomicBool::new(false);
+            let budget = BooleanWorkBudget::new(10_000_000);
+            let prepared =
+                prepare_boolean_source_counted(&source, 1.0e-4, limits(), &cancel, &budget)
+                    .expect("unchanged original source");
+            let result = and_prepared_with_provenance_counted(&prepared, &other, &cancel, &budget)
+                .expect("qualified original edges retain both original and generated face uses");
+            assert_eq!(result.solid.boundaries().len(), 1);
+            let shell = &result.solid.boundaries()[0];
+            shell
+                .check_solid_boundary()
+                .expect("closed oriented triangular prism");
+            assert_eq!(shell.len(), 5);
+            assert!(result.solid.is_geometric_consistent());
+            assert!(shell.iter().all(|face| {
+                face.absolute_boundaries()
+                    .iter()
+                    .all(|wire| wire.is_closed() && wire.is_simple())
+            }));
+            for vertex in shell.vertex_iter() {
+                let point = vertex.point();
+                assert!((0..3).all(|axis| point[axis] >= -1.0e-6 && point[axis] <= 1.0 + 1.0e-6));
+                assert!(point.x + point.z >= 1.0 - 1.0e-6);
+            }
+            let caps: Vec<_> = result
+                .face_origins
+                .iter()
+                .filter(|origin| origin.source.operand == BooleanOperand::Other)
+                .collect();
+            assert_eq!(caps.len(), 1);
+            let cap = shell
+                .iter()
+                .find(|face| face.id() == caps[0].output_face)
+                .unwrap();
+            assert!(
+                cap.oriented_surface()
+                    .normal(0.0, 0.0)
+                    .dot(Vector3::new(1.0, 0.0, 1.0))
+                    < -1.4
+            );
+            let mut reused = 0;
+            for generated in &result.coedge_origins {
+                if !matches!(&generated.source, BooleanCoedgeOrigin::GeneratedIntersection { face }
+                if face.operand == BooleanOperand::Other)
+                {
+                    continue;
+                }
+                let original = result.coedge_origins.iter().find(|original| {
+                    original.output_edge == generated.output_edge
+                        && matches!(&original.source, BooleanCoedgeOrigin::Original { face, .. }
+                        if face.operand == BooleanOperand::Source)
+                });
+                let Some(original) = original else { continue };
+                assert_ne!(original.orientation, generated.orientation);
+                let BooleanCoedgeOrigin::Original {
+                    face,
+                    wire_index,
+                    coedge_index,
+                    edge_id,
+                    derivation,
+                    ..
+                } = &original.source
+                else {
+                    unreachable!()
+                };
+                let source_edge = &source.boundaries()[face.shell_index][face.face_index]
+                    .absolute_boundaries()[*wire_index][*coedge_index];
+                assert_eq!(source_edge.id(), *edge_id);
+                let output = shell
+                    .iter()
+                    .find(|face| face.id() == original.output_face)
+                    .unwrap();
+                let output_edge =
+                    &output.absolute_boundaries()[original.wire_index][original.coedge_index];
+                let domain = match &result.edge_derivations[*derivation] {
+                    BooleanEdgeDerivation::Source { domain, .. } => *domain,
+                    BooleanEdgeDerivation::Cut { child_domain, .. } => *child_domain,
+                };
+                assert_eq!(
+                    output_edge.with_curve(ParametricCurve::parameter_range),
+                    domain
+                );
+                reused += 1;
+            }
+            assert_eq!(reused, 2);
+            assert_eq!(
+                serde_json::to_vec(&source.boundaries()[0].compress()).unwrap(),
+                snapshot
+            );
+            assert_eq!(
+                source.boundaries()[0]
+                    .edge_iter()
+                    .map(|edge| edge.id())
+                    .collect::<Vec<_>>(),
+                original_edges
             );
         }
     }

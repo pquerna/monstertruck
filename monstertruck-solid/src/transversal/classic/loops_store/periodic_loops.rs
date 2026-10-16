@@ -1,5 +1,5 @@
-//! Attach closed intersections to their actual paired chart-boundary uses.
-//! A closed curve in space need not be a contractible loop in a periodic chart.
+//! Attach intersections to their actual paired chart-boundary uses.
+//! Open and spatially closed paths can both cross a periodic chart seam.
 //! Native and polygon stores replay the same occurrence-level partition.
 
 use super::*;
@@ -140,7 +140,8 @@ where
 pub(super) fn endpoint_corners<C, S>(
     loops: &Loops<Point3, C>,
     surface: &S,
-    edge: &Edge<Point3, C>,
+    vertices: [&Vertex<Point3>; 2],
+    departing: [Vector3; 2],
 ) -> std::result::Result<[Option<(usize, usize)>; 2], &'static str>
 where
     C: ParametricCurve3D + BoundedCurve,
@@ -162,8 +163,8 @@ where
         }
     };
     Ok([
-        select(edge.back(), -tangent(edge, false))?,
-        select(edge.front(), tangent(edge, true))?,
+        select(vertices[0], departing[0])?,
+        select(vertices[1], departing[1])?,
     ])
 }
 
@@ -273,36 +274,214 @@ fn cut_polygon(head: &mut PolylineCurve, parameter: f64) -> PolylineCurve {
     PolylineCurve(tail)
 }
 
-struct LoopPoint {
+struct LoopPoint<C> {
     polygon_parameter: f64,
     native_parameter: f64,
     polygon: Vertex<Point3>,
     native: Vertex<Point3>,
     on_boundary: [bool; 2],
+    // Only the immediately departing part carries this whole-original receipt.
+    qualified_departure: bool,
+    // Each parameter belongs to that exact immutable edge's native curve.
+    // All contacts are collected before any of these edges are subdivided.
+    roots: [Option<(EdgeId<C>, f64)>; 2],
     direction: Option<Vector3>,
 }
 
-type ClosedIntersection<S> = (PolylineCurve, IntersectionCurve<PolylineCurve, S, S>);
+fn contact_index<C>(
+    contacts: &[LoopPoint<C>],
+    side: usize,
+    root: (EdgeId<C>, f64),
+    native_parameter: f64,
+    shared_vertex: Option<&Vertex<Point3>>,
+    point: Point3,
+    polygon_point: Point3,
+) -> std::result::Result<Option<usize>, &'static str> {
+    let existing = contacts.iter().position(|previous| {
+        previous.roots[side] == Some(root)
+            || (previous.native_parameter == native_parameter
+                && previous.native.point() == point
+                && previous.polygon.point() == polygon_point)
+            || shared_vertex == Some(&previous.native)
+    });
+    if let Some(index) = existing {
+        let previous = &contacts[index];
+        if !previous.native.point().near(&point)
+            || !previous.polygon.point().near(&polygon_point)
+            || previous.roots[side].is_some_and(|previous| previous != root)
+        {
+            return Err("intersection_chart_ambiguous_contact");
+        }
+    } else if contacts
+        .iter()
+        .any(|previous| previous.native.point().near(&point))
+    {
+        // Spatial nearness does not identify a root on an original seam.
+        return Err("intersection_chart_ambiguous_contact");
+    }
+    Ok(existing)
+}
 
-pub(super) fn add_closed_intersection<C, S>(
-    (mut polyline, mut curve): ClosedIntersection<S>,
-    native: [&mut LoopsStore<Point3, C>; 2],
-    polygon: [&mut LoopsStore<Point3, PolylineCurve>; 2],
-    sides: [(usize, &S, ShapesOpStatus); 2],
+#[derive(Debug)]
+pub(super) enum AttachmentFailure {
+    Geometry(&'static str),
+    Work(ShapeOpsError),
+}
+
+impl From<&'static str> for AttachmentFailure {
+    fn from(detail: &'static str) -> Self { Self::Geometry(detail) }
+}
+
+impl From<ShapeOpsError> for AttachmentFailure {
+    fn from(error: ShapeOpsError) -> Self { Self::Work(error) }
+}
+
+type NativeIntersection<S> = (PolylineCurve, IntersectionCurve<PolylineCurve, S, S>);
+
+fn same_path<C>(
+    wire: &Wire<Point3, C>,
+    path: &Wire<Point3, C>,
+    start: usize,
+    reverse: bool,
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<bool, AttachmentFailure> {
+    for offset in 0..path.len() {
+        if let Some(work) = work {
+            work.check()?;
+        }
+        let actual = &wire[(start + offset) % wire.len()];
+        let expected = &path[if reverse {
+            path.len() - 1 - offset
+        } else {
+            offset
+        }];
+        let (front, back, orientation) = if reverse {
+            (expected.back(), expected.front(), !expected.orientation())
+        } else {
+            (expected.front(), expected.back(), expected.orientation())
+        };
+        if actual.id() != expected.id()
+            || actual.orientation() != orientation
+            || actual.front() != front
+            || actual.back() != back
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// A proved original overlap can already be an owned material boundary, or an
+/// installed forward/inverse slit awaiting closure. Neither is a new corner.
+/// Only actual directed native occurrences and their polygon replay bind here.
+fn bind_existing_path<C>(
+    native: &mut Loops<Point3, C>,
+    polygon: &mut Loops<Point3, PolylineCurve>,
+    path: &Wire<Point3, C>,
+    polygon_path: &Wire<Point3, PolylineCurve>,
+    status: ShapesOpStatus,
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<bool, AttachmentFailure> {
+    if native.len() != polygon.len() || path.is_empty() || path.len() != polygon_path.len() {
+        return Err("intersection_original_overlap_polygon_occurrence".into());
+    }
+    let mut total = [0; 2];
+    for (wire, polygon_wire) in native.iter_mut().zip(polygon.iter_mut()) {
+        if wire.len() != polygon_wire.len() || wire.status != polygon_wire.status {
+            return Err("intersection_original_overlap_polygon_occurrence".into());
+        }
+        if path.len() > wire.len() {
+            continue;
+        }
+        let mut count = [0; 2];
+        for start in 0..wire.len() {
+            for (direction, reverse) in [false, true].into_iter().enumerate() {
+                let matches = same_path(wire, path, start, reverse, work)?;
+                if matches != same_path(polygon_wire, polygon_path, start, reverse, work)? {
+                    return Err("intersection_original_overlap_polygon_occurrence".into());
+                }
+                if matches {
+                    count[direction] += 1;
+                    total[direction] += 1;
+                    if total[direction] > 1 {
+                        return Err("intersection_original_overlap_ambiguous_occurrence".into());
+                    }
+                }
+            }
+        }
+        let expected = match count {
+            [1, 0] => status,
+            [0, 1] => status.not(),
+            // A slit has both uses, not one whole-region material decision.
+            [0, 0] | [1, 1] => continue,
+            _ => return Err("intersection_original_overlap_ambiguous_occurrence".into()),
+        };
+        if wire.status != ShapesOpStatus::Unknown && wire.status != expected {
+            return Err("intersection_original_overlap_material_conflict".into());
+        }
+        wire.status = expected;
+        polygon_wire.status = expected;
+    }
+    Ok(total != [0; 2])
+}
+
+fn record_inserted_overlaps<C>(
+    path: &Wire<Point3, C>,
+    points: &[LoopPoint<C>],
+    start: usize,
+    (input, face_index): (usize, usize),
+    record: &mut Option<&mut RewriteObserver<'_, Point3, C>>,
+) -> std::result::Result<(), AttachmentFailure> {
+    let Some(record) = record.as_mut() else {
+        return Ok(());
+    };
+    for (offset, edge) in path.iter().enumerate() {
+        if points[(start + offset) % points.len()].qualified_departure
+            && !(**record)(
+                edge.id(),
+                edge,
+                EdgeRewrite::GeneratedUse { input, face_index },
+            )
+        {
+            return Err("edge_lineage_work".into());
+        }
+    }
+    Ok(())
+}
+
+pub(super) struct IntersectionStores<'a, C, S> {
+    pub(super) native: [&'a mut LoopsStore<Point3, C>; 2],
+    pub(super) polygon: [&'a mut LoopsStore<Point3, PolylineCurve>; 2],
+    pub(super) sides: [(usize, &'a S, ShapesOpStatus); 2],
+}
+
+pub(super) fn add_intersection<C, S>(
+    (mut polyline, mut curve): NativeIntersection<S>,
+    endpoints: Option<[(Vertex<Point3>, Vertex<Point3>); 2]>,
+    stores: IntersectionStores<'_, C, S>,
     orientation: ShapesOpStatus,
     tolerance: f64,
+    work: Option<&BooleanWork<'_>>,
     record: &mut Option<&mut RewriteObserver<'_, Point3, C>>,
-) -> std::result::Result<(), &'static str>
+) -> std::result::Result<(), AttachmentFailure>
 where
     C: SearchNearestParameter<CurveParameter, Point = Point3>
         + SearchParameter<CurveParameter, Point = Point3>
         + Cut<Point = Point3, Vector = Vector3>
-        + From<IntersectionCurve<PolylineCurve, S, S>>,
+        + From<IntersectionCurve<PolylineCurve, S, S>>
+        + TryIntoHomogeneousBsplineCurve,
     S: ParametricSurface3D
         + Clone
         + SearchParameter<SurfaceParameter, Point = Point3>
-        + SearchNearestParameter<SurfaceParameter, Point = Point3>,
+        + SearchNearestParameter<SurfaceParameter, Point = Point3>
+        + TryIntoAnalyticSurfaceKind
+        + TryIntoHomogeneousBsplineSurface,
 {
+    let IntersectionStores {
+        native,
+        polygon,
+        sides,
+    } = stores;
     let [(face0, surface0, status0), (face1, surface1, status1)] = sides;
     let faces = [face0, face1];
     let surfaces = [surface0, surface1];
@@ -311,7 +490,34 @@ where
         paired_chart_edges(&native[0][faces[0]]),
         paired_chart_edges(&native[1][faces[1]]),
     ];
-    let mut contacts: Vec<LoopPoint> = Vec::new();
+    let closed = endpoints.is_none();
+    let mut contacts: Vec<LoopPoint<C>> = endpoints
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(index, (polygon_vertex, native_vertex))| LoopPoint {
+            polygon_parameter: if index == 0 {
+                0.0
+            } else {
+                polyline.range_tuple().1
+            },
+            native_parameter: if index == 0 {
+                0.0
+            } else {
+                curve.range_tuple().1
+            },
+            on_boundary: std::array::from_fn(|side| {
+                native[side][faces[side]]
+                    .iter()
+                    .any(|wire| wire.iter().any(|edge| edge.front() == &native_vertex))
+            }),
+            polygon: polygon_vertex,
+            native: native_vertex,
+            roots: [None; 2],
+            direction: None,
+            qualified_departure: false,
+        })
+        .collect();
     for side in 0..2 {
         for &(wire, edge) in &chart_edges[side] {
             polygon[side][faces[side]][wire][edge].with_curve(|boundary| {
@@ -319,15 +525,18 @@ where
                     for seam in boundary.windows(2) {
                         // Both meshes approximate native geometry at tolerance.
                         // This broad phase is not a native residual allowance.
-                        let Some((fraction, seed)) = segment_contact(
+                        let Some((fraction, _)) = segment_contact(
                             [segment[0], segment[1]],
                             [seam[0], seam[1]],
                             2.0 * tolerance,
                         ) else {
                             continue;
                         };
-                        let (point, _, _) =
-                            native[side][faces[side]][wire][edge].with_curve(|boundary| {
+                        // Repeated proposals from one original seam segment
+                        // solve from the same seed, not from leader proximity.
+                        let seed = seam[0].midpoint(seam[1]);
+                        let (point, boundary_parameter, _) = native[side][faces[side]][wire][edge]
+                            .with_curve(|boundary| {
                                 curve_surface_projection(
                                     boundary,
                                     None,
@@ -346,28 +555,47 @@ where
                         let mut native_parameter = curve
                             .search_parameter(point, Some(polygon_parameter), 100)
                             .ok_or("intersection_chart_native_contact")?;
-                        if point.near(&curve.front()) {
+                        let boundary = &native[side][faces[side]][wire][edge];
+                        let (boundary_start, boundary_end) =
+                            boundary.with_curve(BoundedCurve::range_tuple);
+                        let shared_vertex = if boundary_parameter == boundary_start {
+                            Some(boundary.absolute_front())
+                        } else if boundary_parameter == boundary_end {
+                            Some(boundary.absolute_back())
+                        } else {
+                            None
+                        };
+                        if point == curve.front() {
                             native_parameter = 0.0;
                             polygon_parameter = 0.0;
                         }
-                        if let Some(previous) = contacts
-                            .iter_mut()
-                            .find(|previous| previous.native.point().near(&point))
-                        {
-                            if !previous.polygon.point().near(&polygon_point) {
-                                return Err("intersection_chart_polygon_contact_mismatch");
-                            }
+                        let root = (boundary.id(), boundary_parameter);
+                        if let Some(index) = contact_index(
+                            &contacts,
+                            side,
+                            root,
+                            native_parameter,
+                            shared_vertex,
+                            point,
+                            polygon_point,
+                        )? {
+                            let previous = &mut contacts[index];
+                            previous.roots[side] = Some(root);
                             previous.on_boundary[side] = true;
                         } else {
                             let mut on_boundary = [false; 2];
                             on_boundary[side] = true;
+                            let mut roots = [None; 2];
+                            roots[side] = Some(root);
                             contacts.push(LoopPoint {
                                 polygon_parameter,
                                 native_parameter,
                                 polygon: Vertex::new(polygon_point),
                                 native: Vertex::new(point),
                                 on_boundary,
+                                roots,
                                 direction: None,
+                                qualified_departure: false,
                             });
                         }
                     }
@@ -398,7 +626,9 @@ where
                 polygon: Vertex::new(polyline.front()),
                 native: Vertex::new(curve.front()),
                 on_boundary: [false; 2],
+                roots: [None; 2],
                 direction: None,
+                qualified_departure: false,
             },
         );
     }
@@ -411,20 +641,26 @@ where
             polygon: Vertex::new(polyline.evaluate(parameter)),
             native: Vertex::new(curve.evaluate(parameter)),
             on_boundary: [false; 2],
+            roots: [None; 2],
             direction: None,
+            qualified_departure: false,
         });
     }
     if points.windows(2).any(|pair| {
         pair[0].polygon_parameter >= pair[1].polygon_parameter
             || pair[0].native_parameter >= pair[1].native_parameter
     }) {
-        return Err("intersection_chart_contact_order");
+        return Err("intersection_chart_contact_order".into());
     }
     let mut polygon_maps = [HashMap::default(), HashMap::default()];
     let mut native_maps = [HashMap::default(), HashMap::default()];
     for point in &mut points {
         for side in 0..2 {
-            if !point.on_boundary[side] {
+            if !point.on_boundary[side]
+                || native[side][faces[side]]
+                    .iter()
+                    .any(|wire| wire.iter().any(|edge| edge.front() == &point.native))
+            {
                 continue;
             }
             let BoundaryAttachment {
@@ -469,14 +705,16 @@ where
                     .search_parameter(point.native.point(), None, 100)
                     .ok_or("intersection_chart_contact_carrier")?;
                 if !surface.evaluate(u, v).near(&point.native.point()) {
-                    return Err("intersection_chart_contact_carrier");
+                    return Err("intersection_chart_contact_carrier".into());
                 }
             }
         }
         if point.native_parameter == 0.0 {
             let last = curve.leader().len() - 1;
             curve.leader_mut()[0] = point.native.point();
-            curve.leader_mut()[last] = point.native.point();
+            if closed {
+                curve.leader_mut()[last] = point.native.point();
+            }
         }
     }
     // Fractional cuts rescale the head's last segment. Replay raw parameters
@@ -484,7 +722,8 @@ where
     let mut polygon_parts = Vec::with_capacity(points.len());
     let mut native_parts = Vec::with_capacity(points.len());
     let mut previous_polygon_cut = polyline.range_tuple().1;
-    for point in points.iter().skip(1).rev() {
+    let cut_end = points.len() - usize::from(!closed);
+    for point in points.iter().take(cut_end).skip(1).rev() {
         let parameter = polygon_head_parameter(point.polygon_parameter, previous_polygon_cut);
         polygon_parts.push(cut_polygon(&mut polyline, parameter));
         previous_polygon_cut = point.polygon_parameter;
@@ -506,25 +745,50 @@ where
         if !native_curve.front().near(&points[index].native.point())
             || !native_curve.back().near(&points[next].native.point())
         {
-            return Err("intersection_chart_native_endpoint");
+            return Err("intersection_chart_native_endpoint".into());
         }
         polygon_curve.snap_endpoints(points[index].polygon.point(), points[next].polygon.point());
-        polygon_wire.push_back(Edge::new(
-            &points[index].polygon,
-            &points[next].polygon,
-            polygon_curve,
-        ));
-        native_wire.push_back(Edge::new(
-            &points[index].native,
-            &points[next].native,
-            native_curve.into(),
-        ));
+        let overlap = native_overlap::original_overlap(
+            &native_curve,
+            [
+                (&native[0][faces[0]], &polygon[0][faces[0]]),
+                (&native[1][faces[1]], &polygon[1][faces[1]]),
+            ],
+            [&points[index].native, &points[next].native],
+            [&points[index].polygon, &points[next].polygon],
+            work,
+        )?;
+        let (native_edge, polygon_edge) = match overlap {
+            Some((native_edge, polygon_edge, present)) => {
+                points[index].qualified_departure = true;
+                for (side, present) in present.into_iter().enumerate() {
+                    if present {
+                        points[index].on_boundary[side] = true;
+                        points[next].on_boundary[side] = true;
+                    }
+                }
+                (native_edge, polygon_edge)
+            }
+            None => (
+                Edge::new(
+                    &points[index].native,
+                    &points[next].native,
+                    native_curve.into(),
+                ),
+                Edge::new(&points[index].polygon, &points[next].polygon, polygon_curve),
+            ),
+        };
+        native_wire.push_back(native_edge);
+        polygon_wire.push_back(polygon_edge);
     }
     for side in 0..2 {
         let contacts: Vec<_> = points
             .iter()
             .enumerate()
-            .filter_map(|(index, point)| point.on_boundary[side].then_some(index))
+            .filter_map(|(index, point)| {
+                (point.on_boundary[side] || (!closed && (index == 0 || index + 1 == points.len())))
+                    .then_some(index)
+            })
             .collect();
         if contacts.is_empty() {
             polygon[side][faces[side]]
@@ -533,7 +797,8 @@ where
                 .add_independent_loop(BoundaryWire::new(native_wire.clone(), statuses[side]));
             continue;
         }
-        for (index, &start) in contacts.iter().enumerate() {
+        let spans = contacts.len() - usize::from(!closed);
+        for (index, &start) in contacts.iter().take(spans).enumerate() {
             let end = contacts[(index + 1) % contacts.len()];
             let length = if start == end {
                 points.len()
@@ -554,36 +819,88 @@ where
                 .take(length)
                 .cloned()
                 .collect();
-            let start_corner = chart_corner(
-                &native[side][faces[side]],
-                surfaces[side],
-                native_path.front_vertex().unwrap(),
-                points[start]
-                    .direction
-                    .ok_or("intersection_chart_orientation")?,
-            )?;
-            let end_corner = chart_corner(
-                &native[side][faces[side]],
-                surfaces[side],
-                native_path.back_vertex().unwrap(),
+            if (0..length).all(|offset| points[(start + offset) % points.len()].qualified_departure)
+                && bind_existing_path(
+                    &mut native[side][faces[side]],
+                    &mut polygon[side][faces[side]],
+                    &native_path,
+                    &polygon_path,
+                    statuses[side],
+                    work,
+                )?
+            {
+                continue;
+            }
+            let departing = [
                 -points[end]
                     .direction
                     .ok_or("intersection_chart_orientation")?,
-            )?;
-            splice_wire(
-                &mut native[side][faces[side]],
-                native_path,
-                statuses[side],
-                start_corner,
-                end_corner,
-            )?;
-            splice_wire(
-                &mut polygon[side][faces[side]],
-                polygon_path,
-                statuses[side],
-                start_corner,
-                end_corner,
-            )?;
+                points[start]
+                    .direction
+                    .ok_or("intersection_chart_orientation")?,
+            ];
+            let vertices = [
+                native_path
+                    .back_vertex()
+                    .ok_or("intersection_chart_empty_path")?,
+                native_path
+                    .front_vertex()
+                    .ok_or("intersection_chart_empty_path")?,
+            ];
+            if closed {
+                let end_corner = chart_corner(
+                    &native[side][faces[side]],
+                    surfaces[side],
+                    vertices[0],
+                    departing[0],
+                )?;
+                let start_corner = chart_corner(
+                    &native[side][faces[side]],
+                    surfaces[side],
+                    vertices[1],
+                    departing[1],
+                )?;
+                record_inserted_overlaps(
+                    &native_path,
+                    &points,
+                    start,
+                    (side, faces[side]),
+                    record,
+                )?;
+                splice_wire(
+                    &mut native[side][faces[side]],
+                    native_path,
+                    statuses[side],
+                    start_corner,
+                    end_corner,
+                )?;
+                splice_wire(
+                    &mut polygon[side][faces[side]],
+                    polygon_path,
+                    statuses[side],
+                    start_corner,
+                    end_corner,
+                )?;
+            } else {
+                let corners = endpoint_corners(
+                    &native[side][faces[side]],
+                    surfaces[side],
+                    vertices,
+                    departing,
+                )?;
+                if corners[0].is_some() && corners[0] == corners[1] {
+                    return Err("intersection_chart_nonseparating_attachment".into());
+                }
+                record_inserted_overlaps(
+                    &native_path,
+                    &points,
+                    start,
+                    (side, faces[side]),
+                    record,
+                )?;
+                native[side][faces[side]].add_path(native_path, statuses[side], corners);
+                polygon[side][faces[side]].add_path(polygon_path, statuses[side], corners);
+            }
         }
     }
     Ok(())
@@ -593,6 +910,180 @@ where
 mod tests {
     use super::*;
     use monstertruck_modeling as modeling;
+
+    fn overlap_square() -> (modeling::Wire, Wire<Point3, PolylineCurve>) {
+        let points = [
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+        let native = Vertex::from_points(points);
+        let polygon = Vertex::from_points(points);
+        (
+            (0..4)
+                .map(|index| modeling::builder::line(&native[index], &native[(index + 1) % 4]))
+                .collect(),
+            (0..4)
+                .map(|index| {
+                    Edge::new(
+                        &polygon[index],
+                        &polygon[(index + 1) % 4],
+                        PolylineCurve(vec![points[index], points[(index + 1) % 4]]),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn qualified_boundary_uses_bind_direction_and_material_without_a_new_corner() {
+        let (wire, polygon_wire) = overlap_square();
+        let path = std::iter::once(wire[0].clone()).collect();
+        let polygon_path = std::iter::once(polygon_wire[0].clone()).collect();
+        let mut native =
+            std::iter::once(BoundaryWire::new(wire, ShapesOpStatus::Unknown)).collect();
+        let mut polygon =
+            std::iter::once(BoundaryWire::new(polygon_wire, ShapesOpStatus::Unknown)).collect();
+        assert!(
+            bind_existing_path(
+                &mut native,
+                &mut polygon,
+                &path,
+                &polygon_path,
+                ShapesOpStatus::And,
+                None
+            )
+            .unwrap()
+        );
+        assert_eq!(native[0].status, ShapesOpStatus::And);
+        assert_eq!(polygon[0].status, ShapesOpStatus::And);
+        assert!(
+            bind_existing_path(
+                &mut native,
+                &mut polygon,
+                &path.inverse(),
+                &polygon_path.inverse(),
+                ShapesOpStatus::Or,
+                None
+            )
+            .unwrap()
+        );
+        assert!(matches!(
+            bind_existing_path(
+                &mut native,
+                &mut polygon,
+                &path,
+                &polygon_path,
+                ShapesOpStatus::Or,
+                None
+            ),
+            Err(AttachmentFailure::Geometry(
+                "intersection_original_overlap_material_conflict"
+            ))
+        ));
+        assert_eq!(native[0].len(), 4);
+        assert!(native[0].is_closed() && native[0].is_simple());
+    }
+
+    #[test]
+    fn qualified_pending_slit_keeps_both_directed_uses_and_unknown_region() {
+        let (wire, polygon_wire) = overlap_square();
+        let path = std::iter::once(wire[0].clone()).collect();
+        let polygon_path = std::iter::once(polygon_wire[0].clone()).collect();
+        let mut native = std::iter::once(BoundaryWire::new(
+            [wire[0].inverse(), wire[0].clone()].into_iter().collect(),
+            ShapesOpStatus::Unknown,
+        ))
+        .collect();
+        let mut polygon = std::iter::once(BoundaryWire::new(
+            [polygon_wire[0].inverse(), polygon_wire[0].clone()]
+                .into_iter()
+                .collect(),
+            ShapesOpStatus::Unknown,
+        ))
+        .collect();
+        assert!(
+            bind_existing_path(
+                &mut native,
+                &mut polygon,
+                &path,
+                &polygon_path,
+                ShapesOpStatus::And,
+                None
+            )
+            .unwrap()
+        );
+        assert_eq!(native[0].status, ShapesOpStatus::Unknown);
+        assert_eq!(polygon[0].status, ShapesOpStatus::Unknown);
+        assert_eq!(native[0].len(), 2);
+        assert_eq!(native[0][0].id(), native[0][1].id());
+        assert_ne!(native[0][0].orientation(), native[0][1].orientation());
+        assert!(native[0].is_closed());
+    }
+
+    #[test]
+    fn qualified_boundary_binding_refuses_ambiguous_or_unreplayed_occurrences() {
+        let (wire, polygon_wire) = overlap_square();
+        let path = std::iter::once(wire[0].clone()).collect();
+        let polygon_path = std::iter::once(polygon_wire[0].clone()).collect();
+        let mut native = (0..2)
+            .map(|_| BoundaryWire::new(wire.clone(), ShapesOpStatus::Unknown))
+            .collect();
+        let mut polygon = (0..2)
+            .map(|_| BoundaryWire::new(polygon_wire.clone(), ShapesOpStatus::Unknown))
+            .collect();
+        assert!(matches!(
+            bind_existing_path(
+                &mut native,
+                &mut polygon,
+                &path,
+                &polygon_path,
+                ShapesOpStatus::And,
+                None
+            ),
+            Err(AttachmentFailure::Geometry(
+                "intersection_original_overlap_ambiguous_occurrence"
+            ))
+        ));
+        let mut native =
+            std::iter::once(BoundaryWire::new(wire, ShapesOpStatus::Unknown)).collect();
+        let mut polygon =
+            std::iter::once(BoundaryWire::new(polygon_wire, ShapesOpStatus::Unknown)).collect();
+        let unrelated: modeling::Wire =
+            std::iter::once(modeling::builder::line(path[0].front(), path[0].back())).collect();
+        assert!(matches!(
+            bind_existing_path(
+                &mut native,
+                &mut polygon,
+                &unrelated,
+                &polygon_path,
+                ShapesOpStatus::And,
+                None
+            ),
+            Err(AttachmentFailure::Geometry(
+                "intersection_original_overlap_polygon_occurrence"
+            ))
+        ));
+        let unrelated_polygon = std::iter::once(Edge::new(
+            polygon_path[0].front(),
+            polygon_path[0].back(),
+            polygon_path[0].curve(),
+        ))
+        .collect();
+        assert!(
+            !bind_existing_path(
+                &mut native,
+                &mut polygon,
+                &unrelated,
+                &unrelated_polygon,
+                ShapesOpStatus::And,
+                None
+            )
+            .unwrap()
+        );
+        assert_eq!(native[0].status, ShapesOpStatus::Unknown);
+    }
 
     #[test]
     fn finite_contacts_find_crossings_between_leader_samples() {
@@ -606,6 +1097,50 @@ mod tests {
         let skew = [Point3::new(0.0, -1.0, 1.0), Point3::new(0.0, 1.0, 1.0)];
         assert!(segment_contact(first, skew, 0.01).is_none());
         assert!(segment_contact([first[0]; 2], second, 0.0).is_none());
+    }
+
+    #[test]
+    fn near_contacts_require_the_same_native_seam_root_not_a_spatial_weld() {
+        let vertices = Vertex::from_points([Point3::origin(), Point3::new(1.0, 0.0, 0.0)]);
+        let seam: modeling::Edge = modeling::builder::line(&vertices[0], &vertices[1]);
+        let point = Point3::new(0.5, 0.0, 0.0);
+        let contacts = [LoopPoint {
+            polygon_parameter: 1.0,
+            native_parameter: 2.0,
+            polygon: Vertex::new(point),
+            native: Vertex::new(point),
+            on_boundary: [true, false],
+            roots: [Some((seam.id(), 0.5)), None],
+            direction: None,
+            qualified_departure: false,
+        }];
+        assert_eq!(
+            contact_index(&contacts, 0, (seam.id(), 0.5), 2.0, None, point, point),
+            Ok(Some(0))
+        );
+        let nearby = point + Vector3::new(1.0e-8, 0.0, 0.0);
+        assert!(nearby.near(&point));
+        assert_eq!(
+            contact_index(
+                &contacts,
+                0,
+                (seam.id(), 0.5 + 1.0e-8),
+                2.0 + 1.0e-8,
+                None,
+                nearby,
+                nearby,
+            ),
+            Err("intersection_chart_ambiguous_contact")
+        );
+        assert_eq!(
+            contact_index(&contacts, 1, (seam.id(), 0.5), 2.0, None, nearby, nearby),
+            Err("intersection_chart_ambiguous_contact")
+        );
+        let unrelated: modeling::Edge = modeling::builder::line(&vertices[0], &vertices[1]);
+        assert_eq!(
+            contact_index(&contacts, 0, (unrelated.id(), 0.5), 2.0, None, point, point),
+            Err("intersection_chart_ambiguous_contact")
+        );
     }
 
     #[test]
@@ -646,11 +1181,23 @@ mod tests {
             let start = chart_corner(&loops, &surface, &midpoint, Vector3::unit_y()).unwrap();
             let end = chart_corner(&loops, &surface, &midpoint, -Vector3::unit_y()).unwrap();
             assert_eq!(
-                endpoint_corners(&loops, &surface, &arc).unwrap(),
+                endpoint_corners(
+                    &loops,
+                    &surface,
+                    [arc.back(), arc.front()],
+                    [-tangent(&arc, false), tangent(&arc, true)],
+                )
+                .unwrap(),
                 [None, Some(start)]
             );
             assert_eq!(
-                endpoint_corners(&loops, &surface, &arc.inverse()).unwrap(),
+                endpoint_corners(
+                    &loops,
+                    &surface,
+                    [arc.front(), arc.back()],
+                    [tangent(&arc, true), -tangent(&arc, false)],
+                )
+                .unwrap(),
                 [Some(start), None]
             );
             assert_ne!(start, end);
@@ -665,6 +1212,11 @@ mod tests {
         );
         let false_identity = Vertex::new(midpoint.point());
         assert!(chart_corner(&loops, &surface, &false_identity, Vector3::unit_y()).is_err());
+        let ambiguous: Loops<_, _> = loops.iter().chain(loops.iter()).cloned().collect();
+        assert_eq!(
+            chart_corner(&ambiguous, &surface, &midpoint, Vector3::unit_y()),
+            Err("intersection_chart_ambiguous_corner")
+        );
     }
 
     #[test]

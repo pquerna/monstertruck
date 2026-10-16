@@ -44,6 +44,7 @@ pub trait ShapeOpsCurve<S: ShapeOpsSurface>:
     ParametricCurve3D
     + ParameterDivision1D<Point = Point3>
     + ParameterBoundary2D<S>
+    + TryIntoHomogeneousBsplineCurve
     + Cut
     + Clone
     + TryFrom<ParameterCurve<Line<Point2>, S>>
@@ -73,6 +74,7 @@ pub trait ShapeOpsCurve<S: ShapeOpsSurface>:
 impl<C, S: ShapeOpsSurface> ShapeOpsCurve<S> for C where C: ParametricCurve3D
         + ParameterDivision1D<Point = Point3>
         + ParameterBoundary2D<S>
+        + TryIntoHomogeneousBsplineCurve
         + Cut
         + Clone
         + TryFrom<ParameterCurve<Line<Point2>, S>>

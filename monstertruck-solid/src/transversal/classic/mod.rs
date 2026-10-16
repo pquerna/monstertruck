@@ -22,7 +22,9 @@ mod faces_classification;
 mod intersection_curve;
 mod loops_store;
 
-use super::edge_lineage::{BooleanCoedgeOrigin, BooleanCoedgeProvenance, EdgeTrace, PairEdgeTrace};
+use super::edge_lineage::{
+    BooleanCoedgeOrigin, BooleanCoedgeProvenance, EdgeRewrite, EdgeTrace, PairEdgeTrace,
+};
 use super::integrate::{
     InvalidOutputEdgeIncidenceData, InvalidOutputShellConditionData, ShapeOpsCurve, ShapeOpsError,
     ShapeOpsSurface,
@@ -215,8 +217,20 @@ fn process_shell_pair_with_origins<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
         }
     }
     let loop_result = if let (Some(trace), Some(work)) = (edge_trace.as_deref_mut(), work) {
-        let mut record = |old, new: &Edge<Point3, AltCurve<C, S>>, cut| {
-            pair_edges.rewrite(trace, old, new, cut, work)
+        let origins = input_origins.ok_or(ShapeOpsError::MissingFaceLineage)?;
+        let mut record = |old, new: &Edge<Point3, AltCurve<C, S>>, event| match event {
+            EdgeRewrite::GeneratedUse { input, face_index } => {
+                let Some(origin) = origins
+                    .get(input)
+                    .and_then(|faces| faces.get(face_index))
+                    .copied()
+                else {
+                    pair_edges.error = Some(ShapeOpsError::MissingFaceLineage);
+                    return false;
+                };
+                pair_edges.generated_use(trace, old, origin, work)
+            }
+            _ => pair_edges.rewrite(trace, old, new, event, work),
         };
         loops_store::create_loops_stores(
             &altshell0,
@@ -253,7 +267,6 @@ fn process_shell_pair_with_origins<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     let mut cls0 = divide_face::divide_faces_recording(
         &altshell0,
         &loops_store0,
-        tol,
         0,
         &mut curve_divisions,
         work,
@@ -272,7 +285,6 @@ fn process_shell_pair_with_origins<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     let mut cls1 = divide_face::divide_faces_recording(
         &altshell1,
         &loops_store1,
-        tol,
         1,
         &mut curve_divisions,
         work,
@@ -672,7 +684,7 @@ pub(crate) fn and_prepared_with_provenance<C: ShapeOpsCurve<S>, S: ShapeOpsSurfa
             for (coedge_index, edge) in wire.iter().enumerate() {
                 work.check()?;
                 let source = if let Some(derivation) = edge_trace.index(edge.id()) {
-                    let root = edge_trace.root(derivation, work)?;
+                    let (root, generated_use) = edge_trace.root_use(derivation, origin, work)?;
                     let mut occurrence = None;
                     let mut ambiguous = false;
                     for (source_wire, wire) in
@@ -702,6 +714,8 @@ pub(crate) fn and_prepared_with_provenance<C: ShapeOpsCurve<S>, S: ShapeOpsSurfa
                             orientation: edge.orientation() == origin.orientation,
                             derivation,
                         }
+                    } else if generated_use {
+                        BooleanCoedgeOrigin::GeneratedIntersection { face: origin }
                     } else {
                         return Err(ShapeOpsError::MissingFaceLineage);
                     }

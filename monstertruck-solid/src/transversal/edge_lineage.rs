@@ -1,6 +1,6 @@
 use super::integrate::ShapeOpsError;
 use super::prepared::BooleanWork;
-use super::provenance::BooleanFaceOrigin;
+use super::provenance::{BooleanFaceOrigin, BooleanOperand};
 use monstertruck_geometry::prelude::*;
 use monstertruck_topology::{Edge, EdgeId, FaceId, Shell, Solid};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -109,8 +109,22 @@ impl<C, S> BooleanCoedgeProvenance<C, S> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum EdgeRewrite {
+    Vertex,
+    Cut {
+        parent_domain: ParameterRange,
+        parameter: f64,
+        side: BooleanCutSide,
+    },
+    GeneratedUse {
+        input: usize,
+        face_index: usize,
+    },
+}
+
 pub(crate) type RewriteObserver<'a, P, C> =
-    dyn FnMut(EdgeId<C>, &Edge<P, C>, Option<(ParameterRange, f64, BooleanCutSide)>) -> bool + 'a;
+    dyn FnMut(EdgeId<C>, &Edge<P, C>, EdgeRewrite) -> bool + 'a;
 
 fn map_bytes<K, V>(map: &FxHashMap<K, V>, adding: bool) -> usize {
     let buckets = map
@@ -129,9 +143,29 @@ fn map_bytes<K, V>(map: &FxHashMap<K, V>, adding: bool) -> usize {
         .saturating_add(32)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct GeneratedUseKey {
+    derivation: usize,
+    operand: BooleanOperand,
+    shell_index: usize,
+    face_index: usize,
+}
+
+impl GeneratedUseKey {
+    fn new<S>(derivation: usize, origin: BooleanFaceOrigin<S>) -> Self {
+        Self {
+            derivation,
+            operand: origin.operand,
+            shell_index: origin.shell_index,
+            face_index: origin.face_index,
+        }
+    }
+}
+
 pub(crate) struct EdgeTrace<C> {
     pub(crate) nodes: Vec<BooleanEdgeDerivation<C>>,
     native: FxHashMap<EdgeId<C>, usize>,
+    generated: FxHashMap<GeneratedUseKey, ()>,
 }
 
 impl<C> EdgeTrace<C> {
@@ -139,6 +173,7 @@ impl<C> EdgeTrace<C> {
         Self {
             nodes: Vec::new(),
             native: FxHashMap::default(),
+            generated: FxHashMap::default(),
         }
     }
 
@@ -258,15 +293,40 @@ impl<C> EdgeTrace<C> {
         work.check()
     }
 
-    pub(crate) fn root(
+    fn generated_use<S>(
+        &mut self,
+        derivation: usize,
+        origin: BooleanFaceOrigin<S>,
+        work: &BooleanWork<'_>,
+    ) -> Result<(), ShapeOpsError> {
+        work.check()?;
+        let key = GeneratedUseKey::new(derivation, origin);
+        if !self.generated.contains_key(&key) {
+            work.limit(
+                "generated_edge_lineage_bytes",
+                map_bytes(&self.generated, true),
+                work.limits.max_intermediate_prepared_bytes,
+            )?;
+            self.generated.insert(key, ());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn root_use<S>(
         &self,
         mut index: usize,
+        origin: BooleanFaceOrigin<S>,
         work: &BooleanWork<'_>,
-    ) -> Result<EdgeId<C>, ShapeOpsError> {
+    ) -> Result<(EdgeId<C>, bool), ShapeOpsError> {
+        let mut generated = false;
         loop {
             work.check()?;
+            generated |= !self.generated.is_empty()
+                && self
+                    .generated
+                    .contains_key(&GeneratedUseKey::new(index, origin));
             match &self.nodes[index] {
-                BooleanEdgeDerivation::Source { edge_id, .. } => return Ok(*edge_id),
+                BooleanEdgeDerivation::Source { edge_id, .. } => return Ok((*edge_id, generated)),
                 BooleanEdgeDerivation::Cut { parent, .. } => index = *parent,
             }
         }
@@ -300,39 +360,78 @@ impl<D> PairEdgeTrace<D> {
         Ok(())
     }
     pub(crate) fn index(&self, id: EdgeId<D>) -> Option<usize> { self.mapped.get(&id).copied() }
+    pub(crate) fn generated_use<C, S>(
+        &mut self,
+        trace: &mut EdgeTrace<C>,
+        edge: EdgeId<D>,
+        origin: BooleanFaceOrigin<S>,
+        work: &BooleanWork<'_>,
+    ) -> bool {
+        let result = self
+            .index(edge)
+            .ok_or(ShapeOpsError::MissingFaceLineage)
+            .and_then(|derivation| trace.generated_use(derivation, origin, work));
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                self.error = Some(error);
+                false
+            }
+        }
+    }
+
     pub(crate) fn rewrite<C>(
         &mut self,
         trace: &mut EdgeTrace<C>,
         old: EdgeId<D>,
         new: &Edge<Point3, D>,
-        cut: Option<(ParameterRange, f64, BooleanCutSide)>,
+        event: EdgeRewrite,
         work: &BooleanWork<'_>,
     ) -> bool
     where
         D: BoundedCurve,
     {
-        let Some(parent) = self.index(old) else {
-            return true;
-        };
         let result = (|| {
             work.check()?;
-            let index = if let Some((parent_domain, parameter, side)) = cut {
-                trace.node(
-                    BooleanEdgeDerivation::Cut {
-                        parent,
-                        parent_domain,
-                        parameter,
-                        side,
-                        child_domain: new.with_curve(ParametricCurve::parameter_range),
-                    },
-                    work,
-                )?
-            } else {
-                parent
+            let Some(parent) = self.index(old) else {
+                return if matches!(event, EdgeRewrite::GeneratedUse { .. }) {
+                    Err(ShapeOpsError::MissingFaceLineage)
+                } else {
+                    Ok(())
+                };
             };
-            self.bind(new.id(), index, work)?;
-            if cut.is_none_or(|(_, _, side)| side == BooleanCutSide::After) {
-                self.mapped.remove(&old);
+            match event {
+                EdgeRewrite::GeneratedUse { .. } => return Err(ShapeOpsError::MissingFaceLineage),
+                EdgeRewrite::Vertex | EdgeRewrite::Cut { .. } => {
+                    let index = match event {
+                        EdgeRewrite::Cut {
+                            parent_domain,
+                            parameter,
+                            side,
+                        } => trace.node(
+                            BooleanEdgeDerivation::Cut {
+                                parent,
+                                parent_domain,
+                                parameter,
+                                side,
+                                child_domain: new.with_curve(ParametricCurve::parameter_range),
+                            },
+                            work,
+                        )?,
+                        _ => parent,
+                    };
+                    self.bind(new.id(), index, work)?;
+                    if matches!(
+                        event,
+                        EdgeRewrite::Vertex
+                            | EdgeRewrite::Cut {
+                                side: BooleanCutSide::After,
+                                ..
+                            }
+                    ) {
+                        self.mapped.remove(&old);
+                    }
+                }
             }
             Ok(())
         })();
@@ -343,5 +442,126 @@ impl<D> PairEdgeTrace<D> {
                 false
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod generated_use_tests {
+    use super::*;
+    use crate::transversal::prepared::BooleanWorkLimits;
+    use monstertruck_modeling as modeling;
+    use monstertruck_topology::Vertex;
+    use std::sync::atomic::AtomicBool;
+
+    fn limits() -> BooleanWorkLimits {
+        BooleanWorkLimits {
+            max_faces: 128,
+            max_edges: 2048,
+            max_mesh_vertices: 100_000,
+            max_mesh_triangles: 100_000,
+            max_triangle_pairs: 1_000_000,
+            max_interference_segments: 100_000,
+            max_output_faces: 128,
+            max_output_edges: 2048,
+            max_prepared_bytes: 16_777_216,
+            max_source_prepared_bytes: 8_388_608,
+            max_other_prepared_bytes: 8_388_608,
+            max_intermediate_prepared_bytes: 16_777_216,
+        }
+    }
+
+    #[test]
+    fn generated_receipts_are_face_scoped_inherit_actual_cuts_and_bound_growth() {
+        let source: modeling::Solid = modeling::primitive::cuboid(BoundingBox::from_iter([
+            Point3::origin(),
+            Point3::new(1.0, 1.0, 1.0),
+        ]));
+        let face = &source.boundaries()[0][0];
+        let edge = face.absolute_boundaries()[0][0].absolute_clone();
+        let cancel = AtomicBool::new(false);
+        let work = BooleanWork::new(limits(), &cancel);
+        let mut trace = EdgeTrace::new();
+        trace.admit(&source, &work).unwrap();
+        let parent = trace.index(edge.id()).unwrap();
+        let source_origin = BooleanFaceOrigin {
+            operand: BooleanOperand::Source,
+            face_id: face.id(),
+            shell_index: 0,
+            face_index: 0,
+            orientation: face.orientation(),
+        };
+        let generated_origin = BooleanFaceOrigin {
+            operand: BooleanOperand::Other,
+            ..source_origin
+        };
+        let second_face = &source.boundaries()[0][1];
+        let other_face = BooleanFaceOrigin {
+            face_id: second_face.id(),
+            face_index: 1,
+            orientation: second_face.orientation(),
+            ..generated_origin
+        };
+        let mut pair = PairEdgeTrace::new();
+        pair.bind(edge.id(), parent, &work).unwrap();
+        assert!(pair.generated_use(&mut trace, edge.id(), generated_origin, &work));
+        let domain = edge.with_curve(ParametricCurve::parameter_range);
+        let (start, end) = edge.with_curve(BoundedCurve::range_tuple);
+        let parameter = (start + end) / 2.0;
+        let midpoint = Vertex::new(edge.with_curve(|curve| curve.evaluate(parameter)));
+        let (before, after) = edge.cut_with_parameter(&midpoint, parameter).unwrap();
+        for (child, side) in [
+            (&before, BooleanCutSide::Before),
+            (&after, BooleanCutSide::After),
+        ] {
+            assert!(pair.rewrite(
+                &mut trace,
+                edge.id(),
+                child,
+                EdgeRewrite::Cut {
+                    parent_domain: domain,
+                    parameter,
+                    side
+                },
+                &work,
+            ));
+            let derivation = pair.index(child.id()).unwrap();
+            assert_eq!(
+                trace.root_use(derivation, generated_origin, &work).unwrap(),
+                (edge.id(), true)
+            );
+            assert_eq!(
+                trace.root_use(derivation, source_origin, &work).unwrap(),
+                (edge.id(), false)
+            );
+            assert_eq!(
+                trace.root_use(derivation, other_face, &work).unwrap(),
+                (edge.id(), false)
+            );
+            let other_shell = BooleanFaceOrigin {
+                shell_index: 1,
+                ..generated_origin
+            };
+            assert_eq!(
+                trace.root_use(derivation, other_shell, &work).unwrap(),
+                (edge.id(), false)
+            );
+        }
+        assert_eq!(
+            trace.generated.len(),
+            1,
+            "cuts inherit without cloning receipts"
+        );
+        let mut tiny_limits = limits();
+        tiny_limits.max_intermediate_prepared_bytes = 0;
+        let tiny = BooleanWork::new(tiny_limits, &cancel);
+        assert!(!pair.generated_use(&mut trace, after.id(), other_face, &tiny));
+        assert!(matches!(
+            pair.error,
+            Some(ShapeOpsError::WorkLimitExceeded {
+                resource: "generated_edge_lineage_bytes",
+                ..
+            })
+        ));
+        assert_eq!(trace.generated.len(), 1);
     }
 }

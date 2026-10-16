@@ -16,6 +16,54 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Full and scalar/paired tensor Taylor evaluation separates original row and
+  column differences before mixed basis products when both original bases prove
+  partition unity. Additive coefficients retain their derivative independence
+  without fitted or rounded replacement controls. The independent one-origin
+  enclosure is intersected on each identical complete source cell, retaining its
+  conditioning for mixed nets. Original hulls, homogeneous weights, pole gates,
+  knots, continuity and extrapolation remain authoritative; both accumulators
+  and the fixed first-row buffer are included in shared evaluator layout records.
+- Native plane inclusion intersects its center residual with an independent
+  whole-time mean-value proof, sharing paired original source functionals and
+  the raw leader gauge. Original whole-span Jacobians and time derivatives,
+  strict inclusion, source poles and full plane-chart containment stay mandatory.
+- Open Boolean intersection paths, like closed loops, subdivide actual periodic
+  seam contacts before material-corner attachment. Native and polygon paths share
+  directed occurrence rewrites; both original seam uses retain the native cut
+  derivation and parameter gauge. Contact merging requires the same immutable
+  seam/root incidence or shared vertex, not spatial proximity. Tangent and
+  ambiguous contacts still refuse; face topology validation is unchanged.
+- Boolean face division retains every finite, nonzero-area native loop and each
+  owned negative hole regardless of UV gauge. A world-distance tolerance no
+  longer deletes a small parameter-space material patch or nearly cancels a
+  genuine annulus. Nonfinite or unresolved zero signed areas explicitly refuse;
+  inverse-twin identity, original carriers, native topology validation and
+  source/cut genealogy remain unchanged.
+- Face division omits an exact native backtracking null walk only after its
+  entire closed edge sequence freely reduces to empty through opposite uses of
+  the same active curve and reversed shared endpoint identities. Bounded scratch
+  is reused across face loops; unrelated coincident curves and non-null periodic
+  commutators remain explicit refusals rather than area-based cancellation.
+- Native straight plane intersections can reuse a uniquely owned original edge
+  after a complete literal Line or clamped degree-one polynomial/rational source
+  proof. Borrowed original coefficient/plane views never invoke rounded conversion.
+  Whole affine carriers include literal planes, original affine two-by-two tensors
+  and literal extrusions of original straight profiles by their stored vectors.
+  Literal line/extrusion axes keep their original affine continuation rather
+  than mistaking display ranges for trims; bounded spline support still binds.
+  Native domains, complete support, checked exact arithmetic, nonzero same-sign
+  weights, shared endpoint binding, transverse planes and strict branch order
+  remain mandatory. Global negative homogeneous gauges preserve the same proof
+  without changing any original stored coefficient. Original curves, polygon
+  occurrences and cut genealogy are retained; ambiguous or unproved overlaps
+  are not silently canceled. Already-owned qualified boundaries and pending
+  forward/inverse slits bind their actual directed native/polygon occurrences
+  and material status rather than being reinserted as interior corners.
+  Only new clipping-face uses receive bounded, explicitly scoped construction
+  receipts on their actual derivations; real cut descendants inherit them.
+  Exact original uses retain their original report, and unmarked missing or
+  ambiguous lineage still refuses instead of fabricating source correspondence.
 - Affine-plane continuation contracts paired original source functionals before
   unused spatial coordinates, sharing tensor/revolution profile bases and native
   homogeneous denominators. Full whole-span rooted spatial reconstruction and

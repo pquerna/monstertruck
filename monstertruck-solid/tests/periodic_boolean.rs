@@ -2,19 +2,25 @@
 
 use monstertruck_meshing::prelude::*;
 use monstertruck_modeling::*;
+use monstertruck_solid::{
+    BooleanCoedgeOrigin, BooleanEdgeDerivation, BooleanOperand, BooleanPreparationOptions,
+    BooleanWorkBudget, BooleanWorkLimits, and_prepared_with_provenance,
+    prepare_boolean_source_counted_with_options,
+};
+use std::sync::atomic::AtomicBool;
 
 const HEIGHT: f64 = 3.0;
 const BOOLEAN_TOLERANCE: f64 = 1.0e-3;
 const MESH_TOLERANCE: f64 = 2.0e-3;
 
-fn cylinder_shell(radius: f64) -> (Shell, Wire, Wire) {
+fn cylinder_shell(radius: f64, height: f64, profile_step: f64) -> (Shell, Wire, Wire) {
     let bottom: Wire = primitive::circle(
         Point3::new(radius, 0.0, 0.0),
         Point3::origin(),
         Vector3::unit_z(),
         2,
     );
-    let top = builder::translated(&bottom, Vector3::new(0.0, 0.0, HEIGHT));
+    let top = builder::translated(&bottom, Vector3::new(0.0, 0.0, height));
     let seam = builder::line(bottom.front_vertex().unwrap(), top.front_vertex().unwrap());
     let mut side = top.inverse();
     side.push_back(seam.inverse());
@@ -22,8 +28,8 @@ fn cylinder_shell(radius: f64) -> (Shell, Wire, Wire) {
     side.push_back(seam);
     let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
         Curve::Line(Line(
-            Point3::new(radius, 0.0, HEIGHT),
-            Point3::new(radius, 0.0, 0.0),
+            Point3::new(radius, 0.0, height),
+            Point3::new(radius, 0.0, height - profile_step),
         )),
         Point3::origin(),
         Vector3::unit_z(),
@@ -39,7 +45,7 @@ fn cylinder_shell(radius: f64) -> (Shell, Wire, Wire) {
 }
 
 fn through_hole(radius: f64) -> Solid {
-    let (hole, top_circle, bottom_circle) = cylinder_shell(radius);
+    let (hole, top_circle, bottom_circle) = cylinder_shell(radius, HEIGHT, HEIGHT);
     let mut shell = primitive::cuboid(BoundingBox::from_iter([
         Point3::new(-2.0, -2.0, 0.0),
         Point3::new(2.0, 2.0, HEIGHT),
@@ -255,7 +261,7 @@ fn assert_upper_material(source: &Solid, radius: f64, hole: bool, oblique: bool)
 
 #[test]
 fn periodic_cylinder_and_preserves_closed_material_horizontal_and_oblique() {
-    let (shell, _, _) = cylinder_shell(2.0);
+    let (shell, _, _) = cylinder_shell(2.0, HEIGHT, HEIGHT);
     let source = Solid::try_new(vec![shell]).unwrap();
     for oblique in [false, true] {
         assert_upper_material(&source, 2.0, false, oblique);
@@ -277,7 +283,7 @@ fn placed_low_layer_periodic_and_retains_transverse_caps_and_inward_hole_wall() 
         let source = if hole {
             through_hole(radius)
         } else {
-            let (shell, _, _) = cylinder_shell(radius);
+            let (shell, _, _) = cylinder_shell(radius, HEIGHT, HEIGHT);
             Solid::try_new(vec![shell]).unwrap()
         };
         let translation = if hole {
@@ -361,5 +367,234 @@ fn placed_low_layer_periodic_and_retains_transverse_caps_and_inward_hole_wall() 
             });
             assert_eq!(source_snapshot(&source), before);
         }
+    }
+}
+
+#[test]
+fn near_terminal_open_cut_attaches_both_rotated_periodic_seam_uses_with_original_genealogy() {
+    let angle = 1.0_f64.to_radians();
+    let (sine, cosine) = angle.sin_cos();
+    let normal = Vector3::new(sine, 0.0, cosine);
+    let height = 8.0 * cosine + 5.0 * sine - 0.00099;
+    let clip = primitive::cuboid(BoundingBox::from_iter([
+        Point3::new(-6.0, -6.0, 0.0),
+        Point3::new(6.0, 6.0, 2.0),
+    ]));
+    let clip = builder::transformed(
+        &clip,
+        Matrix4::from_cols(
+            Vector4::new(cosine, 0.0, -sine, 0.0),
+            Vector4::new(0.0, 1.0, 0.0, 0.0),
+            normal.extend(0.0),
+            (normal * height).extend(1.0),
+        ),
+    );
+    let limits = BooleanWorkLimits {
+        max_faces: 128,
+        max_edges: 2048,
+        max_mesh_vertices: 100_000,
+        max_mesh_triangles: 100_000,
+        max_triangle_pairs: 1_000_000,
+        max_interference_segments: 100_000,
+        max_output_faces: 128,
+        max_output_edges: 2048,
+        max_prepared_bytes: 16_777_216,
+        max_source_prepared_bytes: 8_388_608,
+        max_other_prepared_bytes: 8_388_608,
+        max_intermediate_prepared_bytes: 16_777_216,
+    };
+    for (phase, profile_step) in [0.0, 0.07]
+        .into_iter()
+        .flat_map(|phase| [1.0, 8.0, 64.0].map(move |step| (phase, step)))
+    {
+        // Only the native axial gauge and periodic chart phase change.
+        // Original bounded material and the physical cutting plane do not.
+        let (shell, _, _) = cylinder_shell(5.0, 8.0, profile_step);
+        let source = Solid::try_new(vec![shell]).expect("independent periodic cylinder");
+        let source = builder::transformed(&source, Matrix4::from_angle_z(Rad(phase)));
+        let before = source_snapshot(&source);
+        let original_side = &source.boundaries()[0][0];
+        let seam = original_side.absolute_boundaries()[0][2].id();
+        let cancel = AtomicBool::new(false);
+        let budget = BooleanWorkBudget::new(10_000_000);
+        let prepared = prepare_boolean_source_counted_with_options(
+            &source,
+            BooleanPreparationOptions {
+                geometric_tolerance: 1.0e-5,
+                seed_tolerance: 0.005,
+            },
+            limits,
+            &cancel,
+            &budget,
+        )
+        .expect("unchanged original geometry with independent seed policy");
+        let result = and_prepared_with_provenance(&prepared, &clip, &cancel)
+            .expect("open near-terminal cut crosses the actual periodic seam");
+        assert_eq!(result.solid.boundaries().len(), 1);
+        let shell = &result.solid.boundaries()[0];
+        shell
+            .check_solid_boundary()
+            .expect("closed oriented native material");
+        assert!(
+            result.solid.is_geometric_consistent(),
+            "{}",
+            consistency_witness(&result.solid)
+        );
+        for face in shell {
+            for wire in face.absolute_boundaries() {
+                assert!(wire.is_closed());
+                assert!(
+                    wire.is_simple(),
+                    "the selected seam pieces have distinct material corners"
+                );
+            }
+            let carrier = face.surface();
+            for edge in face.edge_iter() {
+                edge.with_curve(|curve| {
+                    let (start, end) = curve.range_tuple();
+                    for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                        let point = curve.evaluate(start + fraction * (end - start));
+                        assert!(normal.dot(point.to_vec()) >= height - 1.0e-5);
+                        assert!(point.z <= 8.0 + 1.0e-6);
+                        assert!(point.x.hypot(point.y) <= 5.0 + 1.0e-6);
+                        let (u, v) = carrier.search_parameter(point, None, 100).unwrap();
+                        assert!(point.near(&carrier.evaluate(u, v)));
+                    }
+                });
+            }
+        }
+        let caps: Vec<_> = shell
+            .iter()
+            .filter(|face| {
+                face.edge_iter()
+                    .all(|edge| (normal.dot(edge.front().point().to_vec()) - height).abs() < 1.0e-6)
+            })
+            .collect();
+        assert_eq!(caps.len(), 1);
+        assert!(caps[0].oriented_surface().normal(0.0, 0.0).dot(normal) < -0.999);
+        for origin in &result.face_origins {
+            let operand = if origin.source.operand == BooleanOperand::Source {
+                &source
+            } else {
+                &clip
+            };
+            let original =
+                &operand.boundaries()[origin.source.shell_index][origin.source.face_index];
+            let output = shell
+                .iter()
+                .find(|face| face.id() == origin.output_face)
+                .unwrap();
+            assert_eq!(origin.source.face_id, original.id());
+            assert_eq!(output.orientation(), original.orientation());
+            assert_eq!(
+                serde_json::to_value(output.surface()).unwrap(),
+                serde_json::to_value(original.surface()).unwrap(),
+            );
+        }
+        assert_eq!(
+            result
+                .face_origins
+                .iter()
+                .filter(|origin| {
+                    origin.source.operand == BooleanOperand::Source
+                        && origin.source.face_id == original_side.id()
+                })
+                .count(),
+            2,
+            "both original material sides of the seam survive every native axial gauge",
+        );
+        let mut seam_uses = [0; 2];
+        let mut shared_seam = None;
+        for coedge in &result.coedge_origins {
+            let BooleanCoedgeOrigin::Original {
+                face,
+                wire_index,
+                coedge_index,
+                edge_id,
+                orientation,
+                derivation,
+            } = &coedge.source
+            else {
+                assert!(!matches!(
+                    coedge.source,
+                    BooleanCoedgeOrigin::AmbiguousOriginalUse { .. }
+                ));
+                continue;
+            };
+            let operand = if face.operand == BooleanOperand::Source {
+                &source
+            } else {
+                &clip
+            };
+            let original = &operand.boundaries()[face.shell_index][face.face_index];
+            assert_eq!(face.face_id, original.id());
+            let original_edge = &original.absolute_boundaries()[*wire_index][*coedge_index];
+            assert_eq!(*edge_id, original_edge.id());
+            assert_eq!(*orientation, original_edge.orientation());
+            assert_eq!(coedge.orientation, *orientation);
+            let output = shell
+                .iter()
+                .find(|face| face.id() == coedge.output_face)
+                .unwrap();
+            let output_edge = &output.absolute_boundaries()[coedge.wire_index][coedge.coedge_index];
+            assert_eq!(output_edge.id(), coedge.output_edge);
+            let output_domain = output_edge.with_curve(ParametricCurve::parameter_range);
+            let recorded_domain = match &result.edge_derivations[*derivation] {
+                BooleanEdgeDerivation::Source { domain, .. } => *domain,
+                BooleanEdgeDerivation::Cut { child_domain, .. } => *child_domain,
+            };
+            assert_eq!(output_domain, recorded_domain);
+            let mut node = *derivation;
+            let mut cut = false;
+            loop {
+                match &result.edge_derivations[node] {
+                    BooleanEdgeDerivation::Source {
+                        edge_id: root,
+                        domain,
+                    } => {
+                        assert_eq!(root, edge_id);
+                        assert_eq!(
+                            *domain,
+                            original_edge.with_curve(ParametricCurve::parameter_range)
+                        );
+                        break;
+                    }
+                    BooleanEdgeDerivation::Cut {
+                        parent,
+                        parent_domain,
+                        parameter,
+                        ..
+                    } => {
+                        assert!(*parent < node);
+                        assert!(parameter.is_finite());
+                        let recorded_parent = match &result.edge_derivations[*parent] {
+                            BooleanEdgeDerivation::Source { domain, .. } => *domain,
+                            BooleanEdgeDerivation::Cut { child_domain, .. } => *child_domain,
+                        };
+                        assert_eq!(*parent_domain, recorded_parent);
+                        cut = true;
+                        node = *parent;
+                    }
+                }
+            }
+            if face.operand == BooleanOperand::Source && *edge_id == seam {
+                assert_eq!(face.face_id, original_side.id());
+                assert!(
+                    cut,
+                    "both directed original seam uses descend from the native cut"
+                );
+                seam_uses[usize::from(*orientation)] += 1;
+                let selected = (coedge.output_edge, *derivation);
+                if let Some(previous) = shared_seam {
+                    assert_eq!(
+                        selected, previous,
+                        "opposite seam uses share one actual cut gauge"
+                    );
+                }
+                shared_seam = Some(selected);
+            }
+        }
+        assert_eq!(seam_uses, [1, 1]);
+        assert_eq!(source_snapshot(&source), before);
     }
 }

@@ -21,7 +21,7 @@ empty selection cancels shared opposite pairs; callers explicitly select any
 shared chart connectors to retain. Do not infer original chart intent from edge
 order or retain hidden history. Face cutting returns only two regular separating
 boundaries; nonseparating or pinched cuts without that pair refuse mutation.
-Closed boolean intersections that cross paired chart coedges must attach to
+Open and closed boolean intersections that cross paired chart coedges must attach to
 their distinct material corners, with shared native/polygon subdivision and
 the same ordered incidence rewrite. A spatially closed winding loop is not a
 zero-area loop in its open covering chart. Material ray counts respect face
@@ -47,6 +47,33 @@ their directed finite raw-parameter restriction. Vertex residual admission is
 not permission to replace the source carrier with an endpoint chord. Preserve
 the raw gauge through native conversion and reject incompatible carriers or
 edge sense explicitly.
+Straight native overlap may reuse an already-owned original edge only through
+its literal original coefficient view and whole original affine carrier operands.
+Borrowed views are source data, not geometry certificates: converted, wrapped
+and processed nets cannot impersonate original coefficients. Supported carriers
+are literal planes, clamped affine two-by-two polynomial/rational tensors, and
+literal extrusions of a proved straight original profile by the actual stored
+vector. Bind native domains and complete support without normalizing the profile
+gauge or extrusion vector. Constant rational denominators may have either global
+sign; line spans require nonzero same-sign weights, not positive stored weights.
+The literal Line and extrusion-vector axes retain their original affine
+continuations; the displayed unit rectangle is not a material trim. Bounded
+spline-profile/tensor support and all owned native-face trim gates still apply.
+Prove the complete active line or clamped two-control degree-one span, exact
+coefficient endpoint binding, transverse original plane identities and a unique
+strictly ordered branch. Preserve the original edge, native gauge, polygon use
+and observer genealogy; multiple original candidates refuse rather than weld.
+An already-owned qualified boundary/slit binds only by actual directed edge and
+shared vertex identities with identical polygon replay and consistent material
+status. It must not be reinserted through an interior-corner test. New/unqualified
+paths retain the existing corner rules. UV area and point proximity never prove
+empty material or coincident source identity.
+Only an actually newly inserted qualified overlap emits a generated-face-use
+receipt, not the already-owned original boundary. Bind it to the actual current
+derivation and original operand/shell/face slot, inheriting only through real
+native cut ancestors. Exact original occurrence binding wins; a generated report
+requires its explicit matching receipt. Unmarked missing and ambiguous original
+genealogy must still refuse.
 
 This fork uses the public project-specific rules below. The private `.blueprints`
 agent-guidance submodule is not required to clone or build the public source.

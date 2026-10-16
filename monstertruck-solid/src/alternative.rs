@@ -1,8 +1,9 @@
 use monstertruck_geometry::prelude::{
     AnalyticSurfaceKind, BsplineCurve, BsplineSurface, HomogeneousSurfaceConversion,
-    ParametricSurface3D, Point2, SearchNearestParameter, SearchParameter,
-    SupportsExactPatchDomains, SurfaceParameterRectangle, TryIntoAnalyticSurfaceKind,
-    TryIntoBsplineSurface, TryIntoHomogeneousBsplineCurve, TryIntoHomogeneousBsplineSurface,
+    OriginalCurveCoefficients, OriginalSurfaceCoefficients, ParametricSurface3D, Plane, Point2,
+    SearchNearestParameter, SearchParameter, SupportsExactPatchDomains, SurfaceParameterRectangle,
+    TryIntoAnalyticSurfaceKind, TryIntoBsplineSurface, TryIntoHomogeneousBsplineCurve,
+    TryIntoHomogeneousBsplineSurface,
 };
 use monstertruck_meshing::prelude::*;
 
@@ -193,6 +194,13 @@ where
         }
     }
 
+    fn original_surface_coefficients(&self) -> Option<OriginalSurfaceCoefficients<'_>> {
+        match self {
+            Self::FirstType(entity) => entity.original_surface_coefficients(),
+            Self::SecondType(entity) => entity.original_surface_coefficients(),
+        }
+    }
+
     fn try_into_homogeneous_bspline_surface_over(
         &self,
         parameter_range: Option<SurfaceParameterRectangle>,
@@ -232,6 +240,13 @@ where
             Self::SecondType(entity) => entity.try_into_analytic_surface_kind(),
         }
     }
+
+    fn original_plane(&self) -> Option<&Plane> {
+        match self {
+            Self::FirstType(entity) => entity.original_plane(),
+            Self::SecondType(entity) => entity.original_plane(),
+        }
+    }
 }
 
 impl<T, U> TryIntoHomogeneousBsplineCurve for Alternative<T, U>
@@ -243,6 +258,13 @@ where
         match self {
             Self::FirstType(entity) => entity.try_into_homogeneous_bspline_curve(),
             Self::SecondType(entity) => entity.try_into_homogeneous_bspline_curve(),
+        }
+    }
+
+    fn original_curve_coefficients(&self) -> Option<OriginalCurveCoefficients<'_>> {
+        match self {
+            Self::FirstType(entity) => entity.original_curve_coefficients(),
+            Self::SecondType(entity) => entity.original_curve_coefficients(),
         }
     }
 }

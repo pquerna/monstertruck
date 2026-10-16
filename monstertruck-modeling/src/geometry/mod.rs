@@ -2,9 +2,10 @@ use super::*;
 use derive_more::From;
 use monstertruck_core::{ContentHasher, DeterministicContentHash};
 use monstertruck_geometry::prelude::{
-    AnalyticSurfaceKind, BoundaryCurve2D, HomogeneousSurfaceConversion, SupportsExactPatchDomains,
-    SurfaceParameterRectangle, TryIntoAnalyticSurfaceKind, TryIntoBsplineSurface,
-    TryIntoHomogeneousBsplineCurve, TryIntoHomogeneousBsplineSurface,
+    AnalyticSurfaceKind, BoundaryCurve2D, HomogeneousSurfaceConversion, OriginalCurveCoefficients,
+    OriginalSurfaceCoefficients, SupportsExactPatchDomains, SurfaceParameterRectangle,
+    TryIntoAnalyticSurfaceKind, TryIntoBsplineSurface, TryIntoHomogeneousBsplineCurve,
+    TryIntoHomogeneousBsplineSurface,
 };
 #[doc(hidden)]
 pub use monstertruck_geometry::prelude::{algo, inv_or_zero};

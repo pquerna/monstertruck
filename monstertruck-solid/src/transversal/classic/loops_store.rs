@@ -9,7 +9,7 @@
 
 #![allow(clippy::many_single_char_names)]
 
-use super::super::edge_lineage::{BooleanCutSide, RewriteObserver};
+use super::super::edge_lineage::{BooleanCutSide, EdgeRewrite, RewriteObserver};
 use super::intersection_curve;
 use super::{ClassicResult, ShapeOpsError};
 use crate::transversal::prepared::BooleanWork;
@@ -21,6 +21,7 @@ use rustc_hash::FxHashMap as HashMap;
 
 mod native_component;
 mod native_interval;
+mod native_overlap;
 mod periodic_loops;
 mod seed_bounds;
 
@@ -198,7 +199,7 @@ impl<P: Copy, C: Clone> Loops<P, C> {
                 }
                 .clone();
                 if let Some(record) = record.as_mut()
-                    && !(**record)(edge.id(), &new_edge, None)
+                    && !(**record)(edge.id(), &new_edge, EdgeRewrite::Vertex)
                 {
                     return Err("edge_lineage_work");
                 }
@@ -238,22 +239,25 @@ impl<P: Copy, C: Clone> Loops<P, C> {
         self.push(r#loop);
     }
 
-    fn add_edge(
+    fn add_path(
         &mut self,
-        edge0: Edge<P, C>,
+        mut path: Wire<P, C>,
         status: ShapesOpStatus,
         [a, b]: [Option<(usize, usize)>; 2],
     ) {
+        let path_len = path.len();
         if let Some((wire_index0, edge_index0)) = a {
             self[wire_index0].rotate_left(edge_index0);
-            self[wire_index0].push_front(edge0.clone());
-            self[wire_index0].push_back(edge0.inverse());
+            let mut inverse = path.inverse();
+            path.append(&mut self[wire_index0]);
+            path.append(&mut inverse);
+            std::mem::swap(&mut self[wire_index0].wire, &mut path);
         }
         match (a, b) {
             (Some((wire_index0, edge_index0)), Some((wire_index1, edge_index1))) => {
                 if wire_index0 == wire_index1 {
-                    let len = self[wire_index0].len() - 2;
-                    let edge_index1 = (len + edge_index1 - edge_index0) % len + 1;
+                    let len = self[wire_index0].len() - 2 * path_len;
+                    let edge_index1 = (len + edge_index1 - edge_index0) % len + path_len;
                     let new_wire = self[wire_index0].split_off(edge_index1);
                     self[wire_index0].status = status;
                     self.push(BoundaryWire::new(new_wire, status.not()));
@@ -268,13 +272,16 @@ impl<P: Copy, C: Clone> Loops<P, C> {
             }
             (None, Some((wire_index1, edge_index1))) => {
                 self[wire_index1].rotate_left(edge_index1);
-                self[wire_index1].push_front(edge0.inverse());
-                self[wire_index1].push_back(edge0);
+                let mut inverse = path.inverse();
+                inverse.append(&mut self[wire_index1]);
+                inverse.append(&mut path);
+                self[wire_index1].wire = inverse;
             }
-            (None, None) => self.push(BoundaryWire::new(
-                vec![edge0.inverse(), edge0].into(),
-                ShapesOpStatus::Unknown,
-            )),
+            (None, None) => {
+                let mut inverse = path.inverse();
+                inverse.append(&mut path);
+                self.push(BoundaryWire::new(inverse, ShapesOpStatus::Unknown));
+            }
             _ => {}
         }
     }
@@ -374,11 +381,19 @@ impl<C> LoopsStore<Point3, C> {
                     && (!(**record)(
                         edge_id,
                         &edge0,
-                        Some((parent_domain, parameter, BooleanCutSide::Before)),
+                        EdgeRewrite::Cut {
+                            parent_domain,
+                            parameter,
+                            side: BooleanCutSide::Before,
+                        },
                     ) || !(**record)(
                         edge_id,
                         &edge1,
-                        Some((parent_domain, parameter, BooleanCutSide::After)),
+                        EdgeRewrite::Cut {
+                            parent_domain,
+                            parameter,
+                            side: BooleanCutSide::After,
+                        },
                     ))
                 {
                     return Err("edge_lineage_work");
@@ -755,7 +770,8 @@ where
     C: SearchNearestParameter<CurveParameter, Point = Point3>
         + SearchParameter<CurveParameter, Point = Point3>
         + Cut<Point = Point3, Vector = Vector3>
-        + From<IntersectionCurve<PolylineCurve, S, S>>,
+        + From<IntersectionCurve<PolylineCurve, S, S>>
+        + TryIntoHomogeneousBsplineCurve,
     S: ParametricSurface3D
         + Clone
         + SearchParameter<SurfaceParameter, Point = Point3>
@@ -955,19 +971,28 @@ where
                                 return Ok(());
                             }
                             let interval = coordinates.map(native_interval::closed_interval);
-                            periodic_loops::add_closed_intersection(
+                            periodic_loops::add_intersection(
                                 (polyline, intersection_curve),
-                                [&mut geom_loops_store0, &mut geom_loops_store1],
-                                [&mut poly_loops_store0, &mut poly_loops_store1],
-                                [
-                                    (face_index0, &surface0, status0),
-                                    (face_index1, &surface1, status1),
-                                ],
+                                None,
+                                periodic_loops::IntersectionStores {
+                                    native: [&mut geom_loops_store0, &mut geom_loops_store1],
+                                    polygon: [&mut poly_loops_store0, &mut poly_loops_store1],
+                                    sides: [
+                                        (face_index0, &surface0, status0),
+                                        (face_index1, &surface1, status1),
+                                    ],
+                                },
                                 status,
                                 tolerance,
+                                work,
                                 &mut record,
                             )
-                            .map_err(|detail| failure("closed_intersection_chart", detail))?;
+                            .map_err(|error| match error {
+                                periodic_loops::AttachmentFailure::Geometry(detail) => {
+                                    failure("closed_intersection_chart", detail)
+                                }
+                                periodic_loops::AttachmentFailure::Work(error) => error,
+                            })?;
                             if let Some(interval) = interval {
                                 intervals.push(interval);
                             }
@@ -1227,32 +1252,28 @@ where
                             let leader = intersection_curve.leader_mut();
                             *leader.first_mut().unwrap() = gv0.point();
                             *leader.last_mut().unwrap() = gv1.point();
-                            let pedge = Edge::new(&pv0, &pv1, polyline);
-                            let gedge = Edge::new(&gv0, &gv1, intersection_curve.into());
-                            let corners0 = periodic_loops::endpoint_corners(
-                                &geom_loops_store0[face_index0],
-                                &surface0,
-                                &gedge,
+                            periodic_loops::add_intersection(
+                                (polyline, intersection_curve),
+                                Some([(pv0, gv0), (pv1, gv1)]),
+                                periodic_loops::IntersectionStores {
+                                    native: [&mut geom_loops_store0, &mut geom_loops_store1],
+                                    polygon: [&mut poly_loops_store0, &mut poly_loops_store1],
+                                    sides: [
+                                        (face_index0, &surface0, status0),
+                                        (face_index1, &surface1, status1),
+                                    ],
+                                },
+                                status,
+                                tolerance,
+                                work,
+                                &mut record,
                             )
-                            .map_err(|detail| failure("intersection_chart_corner0", detail))?;
-                            let corners1 = periodic_loops::endpoint_corners(
-                                &geom_loops_store1[face_index1],
-                                &surface1,
-                                &gedge,
-                            )
-                            .map_err(|detail| failure("intersection_chart_corner1", detail))?;
-                            poly_loops_store0[face_index0].add_edge(
-                                pedge.clone(),
-                                status0,
-                                corners0,
-                            );
-                            geom_loops_store0[face_index0].add_edge(
-                                gedge.clone(),
-                                status0,
-                                corners0,
-                            );
-                            poly_loops_store1[face_index1].add_edge(pedge, status1, corners1);
-                            geom_loops_store1[face_index1].add_edge(gedge, status1, corners1);
+                            .map_err(|error| match error {
+                                periodic_loops::AttachmentFailure::Geometry(detail) => {
+                                    failure("open_intersection_chart", detail)
+                                }
+                                periodic_loops::AttachmentFailure::Work(error) => error,
+                            })?;
                             if let Some(interval) = interval {
                                 intervals.push(interval);
                             }

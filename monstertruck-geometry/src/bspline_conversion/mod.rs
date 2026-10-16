@@ -62,6 +62,20 @@ fn parameter_range_reaches_outside(requested: (f64, f64), own: (f64, f64)) -> bo
     requested_min < own_min - pad || requested_max > own_max + pad
 }
 
+/// Borrowed literal native coefficients, without conversion or reparameterization.
+///
+/// These views are original data, not certificates of geometry or arithmetic.
+/// In particular, a rounded transformed or trimmed conversion cannot provide one.
+#[derive(Clone, Copy, Debug)]
+pub enum OriginalCurveCoefficients<'a> {
+    /// Original affine line coefficients in their native parameter gauge.
+    Line(&'a Line<Point3>),
+    /// Original polynomial controls and knots.
+    Polynomial(&'a BsplineCurve<Point3>),
+    /// Original homogeneous rational controls, weights and knots.
+    Rational(&'a NurbsCurve<Vector4>),
+}
+
 /// Attempts to produce an exact homogeneous B-spline curve representation.
 ///
 /// The returned control net is in homogeneous coordinates, so true rational
@@ -69,6 +83,14 @@ fn parameter_range_reaches_outside(requested: (f64, f64), own: (f64, f64)) -> bo
 pub trait TryIntoHomogeneousBsplineCurve {
     /// Converts this curve into a homogeneous B-spline curve, if possible.
     fn try_into_homogeneous_bspline_curve(&self) -> Option<BsplineCurve<Vector4>>;
+
+    /// Borrows literal source coefficients, with no constructed replacement net.
+    ///
+    /// The default refuses this capability. Wrappers and processors must not
+    /// return rounded converted coefficients as if they were their source data.
+    /// The borrowed object must retain this value's own original coefficients
+    /// and active native parameter domain. A view is not a geometric certificate.
+    fn original_curve_coefficients(&self) -> Option<OriginalCurveCoefficients<'_>> { None }
 
     /// Converts this curve into a homogeneous B-spline curve spanning the given
     /// parameter interval, which may lie wholly OUTSIDE the curve's own bounded
@@ -92,6 +114,28 @@ pub trait TryIntoHomogeneousBsplineCurve {
     }
 }
 
+/// Borrowed literal surface operands, without conversion or parameter changes.
+///
+/// These views are source data, not affine or planar certificates. Literal
+/// planes expose their defining frame through `original_plane` instead.
+#[derive(Clone, Copy, Debug)]
+pub enum OriginalSurfaceCoefficients<'a> {
+    /// Original polynomial tensor controls and knots.
+    Polynomial(&'a BsplineSurface<Point3>),
+    /// Original homogeneous tensor controls, weights and knots.
+    Rational(&'a NurbsSurface<Vector4>),
+    /// Original profile coefficients and the unchanged literal extrusion vector.
+    ///
+    /// These are the raw operands of `profile(u) + v * vector`, not a converted
+    /// tensor, a planar certificate, or a material-trim rectangle.
+    Extrusion {
+        /// Original profile in its own native gauge.
+        profile: OriginalCurveCoefficients<'a>,
+        /// Stored extrusion vector, copied without arithmetic or normalization.
+        vector: Vector3,
+    },
+}
+
 /// Attempts to produce an exact homogeneous B-spline surface representation.
 ///
 /// The returned control net is in homogeneous coordinates, so true rational
@@ -99,6 +143,12 @@ pub trait TryIntoHomogeneousBsplineCurve {
 pub trait TryIntoHomogeneousBsplineSurface {
     /// Converts this surface into a homogeneous B-spline surface, if possible.
     fn try_into_homogeneous_bspline_surface(&self) -> Option<BsplineSurface<Vector4>>;
+
+    /// Borrows this value's original literal tensor or extrusion operands.
+    ///
+    /// The parameter frame and complete source support must be unchanged.
+    /// Converted, fitted and processed replacement nets cannot supply a view.
+    fn original_surface_coefficients(&self) -> Option<OriginalSurfaceCoefficients<'_>> { None }
 
     /// Converts this surface into a homogeneous B-spline surface whose control
     /// net covers the given trim rectangle in this surface's OWN parameter
@@ -142,6 +192,10 @@ impl TryIntoHomogeneousBsplineCurve for Line<Point3> {
         )))
     }
 
+    fn original_curve_coefficients(&self) -> Option<OriginalCurveCoefficients<'_>> {
+        Some(OriginalCurveCoefficients::Line(self))
+    }
+
     /// A line is defined for every real parameter, so its restriction to any
     /// interval is the SAME line, exactly. The emitted degree-1 Bezier carries
     /// the requested interval as its knot vector, so `subs(t)` still equals
@@ -169,6 +223,10 @@ impl TryIntoHomogeneousBsplineCurve for BsplineCurve<Point3> {
     fn try_into_homogeneous_bspline_curve(&self) -> Option<BsplineCurve<Vector4>> {
         Some(BsplineCurve::lift_up(self.clone()))
     }
+
+    fn original_curve_coefficients(&self) -> Option<OriginalCurveCoefficients<'_>> {
+        Some(OriginalCurveCoefficients::Polynomial(self))
+    }
 }
 
 impl TryIntoHomogeneousBsplineCurve for BsplineCurve<Vector4> {
@@ -183,6 +241,14 @@ impl TryIntoHomogeneousBsplineCurve for NurbsCurve<Vector4> {
     fn try_into_homogeneous_bspline_curve(&self) -> Option<BsplineCurve<Vector4>> {
         Some(self.non_rationalized().clone())
     }
+
+    fn original_curve_coefficients(&self) -> Option<OriginalCurveCoefficients<'_>> {
+        Some(OriginalCurveCoefficients::Rational(self))
+    }
+}
+
+impl<C, S0, S1> TryIntoHomogeneousBsplineCurve for IntersectionCurve<C, S0, S1> {
+    fn try_into_homogeneous_bspline_curve(&self) -> Option<BsplineCurve<Vector4>> { None }
 }
 
 impl TryIntoHomogeneousBsplineCurve for TrimmedCurve<UnitCircle<Point3>> {
@@ -292,6 +358,10 @@ impl TryIntoHomogeneousBsplineSurface for BsplineSurface<Point3> {
     fn try_into_homogeneous_bspline_surface(&self) -> Option<BsplineSurface<Vector4>> {
         Some(BsplineSurface::lift_up(self.clone()))
     }
+
+    fn original_surface_coefficients(&self) -> Option<OriginalSurfaceCoefficients<'_>> {
+        Some(OriginalSurfaceCoefficients::Polynomial(self))
+    }
 }
 
 impl SupportsExactPatchDomains for BsplineSurface<Point3> {
@@ -319,6 +389,10 @@ impl TryIntoHomogeneousBsplineSurface for NurbsSurface<Vector4> {
     #[inline]
     fn try_into_homogeneous_bspline_surface(&self) -> Option<BsplineSurface<Vector4>> {
         Some(self.non_rationalized().clone())
+    }
+
+    fn original_surface_coefficients(&self) -> Option<OriginalSurfaceCoefficients<'_>> {
+        Some(OriginalSurfaceCoefficients::Rational(self))
     }
 }
 
@@ -705,6 +779,13 @@ where C: TryIntoHomogeneousBsplineCurve
             })
             .collect();
         Some(BsplineSurface::new(knot_vecs, control_points))
+    }
+
+    fn original_surface_coefficients(&self) -> Option<OriginalSurfaceCoefficients<'_>> {
+        Some(OriginalSurfaceCoefficients::Extrusion {
+            profile: self.entity_curve().original_curve_coefficients()?,
+            vector: self.extruding_vector(),
+        })
     }
 }
 

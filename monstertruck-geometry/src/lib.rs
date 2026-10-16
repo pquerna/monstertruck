@@ -79,9 +79,9 @@ pub mod prelude {
     };
     pub use base::*;
     pub use bspline_conversion::{
-        HomogeneousSurfaceConversion, SupportsExactPatchDomains, SurfaceFrameAxes,
-        SurfaceParameterRectangle, TryIntoBsplineSurface, TryIntoHomogeneousBsplineCurve,
-        TryIntoHomogeneousBsplineSurface,
+        HomogeneousSurfaceConversion, OriginalCurveCoefficients, OriginalSurfaceCoefficients,
+        SupportsExactPatchDomains, SurfaceFrameAxes, SurfaceParameterRectangle,
+        TryIntoBsplineSurface, TryIntoHomogeneousBsplineCurve, TryIntoHomogeneousBsplineSurface,
     };
     pub use decorators::*;
     pub use errors::*;

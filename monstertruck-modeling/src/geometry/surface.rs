@@ -503,6 +503,15 @@ impl TryIntoHomogeneousBsplineSurface for Surface {
         }
     }
 
+    fn original_surface_coefficients(&self) -> Option<OriginalSurfaceCoefficients<'_>> {
+        match self {
+            Self::BsplineSurface(surface) => surface.original_surface_coefficients(),
+            Self::NurbsSurface(surface) => surface.original_surface_coefficients(),
+            Self::ExtrusionSurface(surface) => surface.original_surface_coefficients(),
+            _ => None,
+        }
+    }
+
     fn try_into_homogeneous_bspline_surface_over(
         &self,
         parameter_range: Option<SurfaceParameterRectangle>,
@@ -612,6 +621,13 @@ impl TryIntoAnalyticSurfaceKind for Surface {
             // recorded as follow-on work instead of smuggled in here.
             Surface::SphericalSurface(s) => s.try_into_analytic_surface_kind(),
             Surface::ToroidalSurface(t) => t.try_into_analytic_surface_kind(),
+        }
+    }
+
+    fn original_plane(&self) -> Option<&Plane> {
+        match self {
+            Self::Plane(plane) => Some(plane),
+            _ => None,
         }
     }
 }
