@@ -16,6 +16,12 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Whole original degree-one UV branches can prove straight regularity from a
+  complete outward native derivative enclosure when checked exact endpoint
+  arithmetic cannot represent intermediate affine offsets. Original coefficient
+  scope, independent inverse gauges, native denominators and complete parameter
+  spans remain authoritative; collapsed maps, poles and unproved derivatives
+  do not gain a certificate. Shared work and cancellation failures remain fatal.
 - Query-local `PreparedFacePlaneRoots` retains complete original-3D and
   source-chart trim-root inventories for one exact face and plane. Numerical
   cut anchors and later full-face coverage borrow the same roots without

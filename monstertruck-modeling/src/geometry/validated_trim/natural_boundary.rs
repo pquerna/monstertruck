@@ -1,5 +1,5 @@
 use super::super::validated_interval::{
-    ProjectionExecution, ScalarProjection, Taylor, projected_spline,
+    ProjectionExecution, ScalarProjection, Taylor, projected_spline, validated_curve2d_jet,
 };
 use super::*;
 use crate::{KnotVector, Line, Point2};
@@ -82,6 +82,10 @@ pub fn certified_curve2d_endpoint_coordinate(
 /// exact endpoint signs exclude poles at every original level on the interval.
 /// A nonzero projective tangent numerator proves regularity and strict
 /// monotonicity; ambient matrix invertibility is not required.
+/// If checked endpoint arithmetic cannot represent intermediate coefficients,
+/// the same whole native span can instead prove regularity with an outward
+/// derivative enclosure. Its straight image still follows from the original
+/// degree-one coefficients and every retained affine operator, not samples.
 /// Either orientation of a finite active subrange is accepted. `false` also
 /// covers unsupported leaves. This supplies no source/3D correspondence,
 /// trim membership or domain-coverage authority.
@@ -130,47 +134,79 @@ pub fn certified_curve2d_is_straight_regular(
     if !affine {
         return Ok(false);
     }
-    let number = |value| {
-        planar::Dyadic::scalar(value).ok_or(TrimDomainError::Geometry(
-            ValidatedGeometryError::Unresolved,
-        ))
-    };
-    let point_at = |parameter, budget: &mut ValidatedGeometryBudget| match extrusion::exact_uv_point(
-        curve,
-        number(parameter)?,
-        0,
-        budget,
-        cancel,
-    ) {
-        Ok(point) => Ok(Some(point)),
-        Err(TrimDomainError::Geometry(ValidatedGeometryError::Singular)) => Ok(None),
-        Err(error) => Err(error),
-    };
-    let Some(a) = point_at(range[0], budget)? else {
-        return Ok(false);
-    };
-    let Some(b) = point_at(range[1], budget)? else {
-        return Ok(false);
-    };
-    let sign = a[2].compare(number(0.0)?);
-    if sign.is_eq() || b[2].compare(number(0.0)?) != sign {
-        return Ok(false);
-    }
-    for axis in 0..2 {
-        budget.charge(1, cancel)?;
-        // This cross product is (b - a) times the constant homogeneous
-        // tangent numerator, not the determinant of the ambient matrix.
-        let left = a[axis].multiply(b[2]).ok_or(TrimDomainError::Geometry(
-            ValidatedGeometryError::Unresolved,
-        ))?;
-        let right = b[axis].multiply(a[2]).ok_or(TrimDomainError::Geometry(
-            ValidatedGeometryError::Unresolved,
-        ))?;
-        if left != right {
-            return Ok(true);
+    let exact: Result<bool, TrimDomainError> = (|| {
+        let number = |value| {
+            planar::Dyadic::scalar(value).ok_or(TrimDomainError::Geometry(
+                ValidatedGeometryError::Unresolved,
+            ))
+        };
+        let point_at =
+            |parameter, budget: &mut ValidatedGeometryBudget| match extrusion::exact_uv_point(
+                curve,
+                number(parameter)?,
+                0,
+                budget,
+                cancel,
+            ) {
+                Ok(point) => Ok(Some(point)),
+                Err(TrimDomainError::Geometry(ValidatedGeometryError::Singular)) => Ok(None),
+                Err(error) => Err(error),
+            };
+        let Some(a) = point_at(range[0], budget)? else {
+            return Ok(false);
+        };
+        let Some(b) = point_at(range[1], budget)? else {
+            return Ok(false);
+        };
+        let sign = a[2].compare(number(0.0)?);
+        if sign.is_eq() || b[2].compare(number(0.0)?) != sign {
+            return Ok(false);
         }
+        for axis in 0..2 {
+            budget.charge(1, cancel)?;
+            // This cross product is (b - a) times the constant homogeneous
+            // tangent numerator, not the determinant of the ambient matrix.
+            let left = a[axis].multiply(b[2]).ok_or(TrimDomainError::Geometry(
+                ValidatedGeometryError::Unresolved,
+            ))?;
+            let right = b[axis].multiply(a[2]).ok_or(TrimDomainError::Geometry(
+                ValidatedGeometryError::Unresolved,
+            ))?;
+            if left != right {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })();
+    match exact {
+        Err(TrimDomainError::Geometry(ValidatedGeometryError::Unresolved)) => {
+            // The coefficient scope above proves a straight image, including
+            // rational weights and each native affine `Point2` operation.
+            // This independent whole-span query also checks native domains,
+            // continuity and denominators before bounding every derivative.
+            match validated_curve2d_jet(
+                curve,
+                [range[0].min(range[1]), range[0].max(range[1])],
+                budget,
+                cancel,
+            ) {
+                Ok(jet)
+                    if jet
+                        .first
+                        .into_iter()
+                        .any(|value| value.lower > 0.0 || value.upper < 0.0) =>
+                {
+                    Ok(true)
+                }
+                Err(
+                    error @ (ValidatedGeometryError::ResourceLimit
+                    | ValidatedGeometryError::Cancelled),
+                ) => Err(error.into()),
+                _ => Err(ValidatedGeometryError::Unresolved.into()),
+            }
+        }
+        result => result,
     }
-    Ok(false)
 }
 
 pub(super) fn same_use(
@@ -982,6 +1018,180 @@ mod natural_boundary_regressions {
                 .unwrap()
             );
         }
+    }
+
+    #[test]
+    fn decimal_raw_degree_one_spans_keep_complete_regularity_and_literal_longitudinal_endpoints() {
+        use crate::BsplineCurve;
+        // Retain the exporter decimals, not nearby mathematical pi constants.
+        // SAFETY: These fixed source strings are valid finite binary64 decimals.
+        let range = ["4.712388980385", "6.28318530718"].map(|raw| raw.parse::<f64>().unwrap());
+        let start_u = "-1.570796326795".parse::<f64>().unwrap();
+        let cancel = AtomicBool::new(false);
+        for longitudinal in [2.0, 16.0] {
+            let curve = Curve2D::BsplineCurve(BsplineCurve::new(
+                KnotVector::from(vec![range[0], range[0], range[1], range[1]]),
+                vec![
+                    Point2::new(start_u, longitudinal),
+                    Point2::new(0.0, longitudinal),
+                ],
+            ));
+            let mut budget = ValidatedGeometryBudget::new(100_000);
+            for query in [range, [range[1], range[0]]] {
+                assert!(
+                    certified_curve2d_is_straight_regular(&curve, query, &mut budget, &cancel,)
+                        .unwrap()
+                );
+            }
+            for (parameter, transverse) in [(range[0], start_u), (range[1], 0.0)] {
+                assert!(
+                    curve
+                        .subs(parameter)
+                        .near(&Point2::new(transverse, longitudinal))
+                );
+                for (axis, value) in [(0, transverse), (1, longitudinal)] {
+                    assert!(
+                        certified_curve2d_endpoint_coordinate(
+                            &curve,
+                            parameter,
+                            axis,
+                            value,
+                            &mut budget,
+                            &cancel,
+                        )
+                        .unwrap()
+                    );
+                    assert!(
+                        !certified_curve2d_endpoint_coordinate(
+                            &curve,
+                            parameter,
+                            axis,
+                            value.next_up(),
+                            &mut budget,
+                            &cancel,
+                        )
+                        .unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn whole_affine_regularity_survives_unrepresentable_offsets_and_raw_inverse_gauges() {
+        use crate::{Invertible, Matrix3, Processor, TrimmedCurve, Vector2};
+        // SAFETY: These fixed source strings are valid finite binary64 decimals.
+        let range = ["4.712388980385", "6.28318530718"].map(|raw| raw.parse::<f64>().unwrap());
+        let cancel = AtomicBool::new(false);
+        for inverted in [false, true] {
+            let mut posed = Processor::with_transform(
+                TrimmedCurve::new(
+                    Box::new(Curve2D::Line(Line(
+                        Point2::new(0.0, 1e-100),
+                        Point2::new(1.0, 1e-100),
+                    ))),
+                    (range[0], range[1]),
+                ),
+                Matrix3::new(0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 1.0),
+            );
+            if inverted {
+                posed.invert();
+            }
+            let curve = Curve2D::TrimmedCurve(posed);
+            for parameter in [range[0], 5.5, range[1]] {
+                assert_eq!(curve.subs(parameter).x, 1.0);
+                assert_eq!(
+                    curve.der(parameter),
+                    Vector2::new(0.0, if inverted { -1.0 } else { 1.0 })
+                );
+            }
+            for query in [range, [range[1], range[0]]] {
+                let mut budget = ValidatedGeometryBudget::new(100_000);
+                assert!(
+                    certified_curve2d_is_straight_regular(&curve, query, &mut budget, &cancel,)
+                        .unwrap()
+                );
+                assert!(budget.consumed() > 1);
+            }
+        }
+    }
+
+    #[test]
+    fn unrepresentable_offsets_do_not_authorize_collapsed_affine_images_or_native_poles() {
+        use crate::{BsplineCurve, Matrix3, NurbsCurve, Processor, TrimmedCurve, Vector3};
+        let collapsed = Curve2D::TrimmedCurve(Processor::with_transform(
+            TrimmedCurve::new(
+                Box::new(Curve2D::Line(Line(
+                    Point2::new(0.0, 1e-100),
+                    Point2::new(1.0, 1e-100),
+                ))),
+                (0.0, 1.0),
+            ),
+            Matrix3::new(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0),
+        ));
+        let pole = Curve2D::TrimmedCurve(Processor::with_transform(
+            TrimmedCurve::new(
+                Box::new(Curve2D::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
+                    KnotVector::from(vec![0.0, 0.0, 1.0, 1.0]),
+                    vec![
+                        Vector3::new(0.0, -0.5e-100, -0.5),
+                        Vector3::new(1.0, 0.5e-100, 0.5),
+                    ],
+                )))),
+                (0.0, 1.0),
+            ),
+            Matrix3::new(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0),
+        ));
+        for curve in [collapsed, pole] {
+            assert!(matches!(
+                certified_curve2d_is_straight_regular(
+                    &curve,
+                    [0.0, 1.0],
+                    &mut ValidatedGeometryBudget::new(100_000),
+                    &AtomicBool::new(false),
+                ),
+                Err(TrimDomainError::Geometry(
+                    ValidatedGeometryError::Unresolved
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn whole_affine_regularity_preserves_shared_work_and_cancellation_failures() {
+        use crate::{Matrix3, Processor, TrimmedCurve};
+        let curve = Curve2D::TrimmedCurve(Processor::with_transform(
+            TrimmedCurve::new(
+                Box::new(Curve2D::Line(Line(
+                    Point2::new(0.0, 1e-100),
+                    Point2::new(1.0, 1e-100),
+                ))),
+                (0.0, 1.0),
+            ),
+            Matrix3::new(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0),
+        ));
+        let mut limited = ValidatedGeometryBudget::new(2);
+        assert!(matches!(
+            certified_curve2d_is_straight_regular(
+                &curve,
+                [0.0, 1.0],
+                &mut limited,
+                &AtomicBool::new(false),
+            ),
+            Err(TrimDomainError::Geometry(
+                ValidatedGeometryError::ResourceLimit
+            ))
+        ));
+        assert!(limited.consumed() > 0);
+        assert!(matches!(
+            certified_curve2d_is_straight_regular(
+                &curve,
+                [0.0, 1.0],
+                &mut ValidatedGeometryBudget::new(100_000),
+                &AtomicBool::new(true),
+            ),
+            Err(TrimDomainError::Geometry(ValidatedGeometryError::Cancelled))
+        ));
     }
 
     #[test]
