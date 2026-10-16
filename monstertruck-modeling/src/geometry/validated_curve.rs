@@ -414,7 +414,7 @@ impl PreparedValidatedCurve<'_> {
         let (first, second, leader) = carriers(self.source.curve()?)?;
         let mut projection = None;
         let mut covered = false;
-        for piece in &self.pieces {
+        for piece in self.intersecting_pieces(range, budget, cancel)? {
             budget.charge(1, cancel)?;
             let Some(part) = range.intersection(ValidatedInterval {
                 lower: piece.parameter[0],
@@ -475,7 +475,7 @@ impl PreparedValidatedCurve<'_> {
             return Ok(self.evaluate(range.lower, budget, cancel)?.error);
         }
         let mut result: Option<[ValidatedInterval; 3]> = None;
-        for piece in &self.pieces {
+        for piece in self.intersecting_pieces(range, budget, cancel)? {
             budget.charge(1, cancel)?;
             let Some(part) = range.intersection(ValidatedInterval {
                 lower: piece.parameter[0],
@@ -567,7 +567,7 @@ impl PreparedValidatedCurve<'_> {
             let (transform, active, orientation) = self.source.mapping()?;
             let mut result: Option<ValidatedCurveJet> = None;
             let mut projection = None;
-            for piece in &self.pieces {
+            for piece in self.intersecting_pieces(range, budget, cancel)? {
                 budget.charge(1, cancel)?;
                 let Some(part) = range.intersection(ValidatedInterval {
                     lower: piece.parameter[0],
@@ -605,7 +605,7 @@ impl PreparedValidatedCurve<'_> {
         }
         let mut result: Option<ValidatedCurveJet> = None;
         let mut projection = None;
-        for piece in &self.pieces {
+        for piece in self.intersecting_pieces(range, budget, cancel)? {
             budget.charge(1, cancel)?;
             let Some(part) = range.intersection(ValidatedInterval {
                 lower: piece.parameter[0],
@@ -742,7 +742,7 @@ impl PreparedValidatedCurve<'_> {
         }
         if let Some(coefficients) = coefficients {
             let mut position: Option<ValidatedInterval> = None;
-            for piece in &self.pieces {
+            for piece in self.intersecting_pieces(interval, budget, cancel)? {
                 budget.charge(1, cancel)?;
                 let Some(part) = interval.intersection(ValidatedInterval {
                     lower: piece.parameter[0],
@@ -833,7 +833,7 @@ impl PreparedValidatedCurve<'_> {
         let mut options = self.options;
         options.endpoint_tolerance = tolerance;
         let mut result: Option<[ValidatedInterval; 3]> = None;
-        for piece in &self.pieces {
+        for piece in self.intersecting_pieces(range, budget, cancel)? {
             budget.charge(1, cancel)?;
             let Some(part) = range.intersection(ValidatedInterval {
                 lower: piece.parameter[0],
@@ -864,6 +864,52 @@ impl PreparedValidatedCurve<'_> {
             });
         }
         result.ok_or(ValidatedGeometryError::ParameterOutOfRange)
+    }
+
+    /// Restricts traversal without changing closed-piece incidence or order.
+    ///
+    /// Construction appends an ascending, gap-free partition (back-anchored
+    /// continuation reverses it once; mapped continuation appends in its own
+    /// native order). Both endpoint sequences are therefore nondecreasing.
+    /// Strict exclusion keeps every incident piece at a point or span end;
+    /// callers retain their own positive-width and projection-joint rules.
+    fn intersecting_pieces(
+        &self,
+        range: ValidatedInterval,
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<&[ValidatedCurvePiece], ValidatedGeometryError> {
+        if self.pieces.len() <= 1 || (range.lower == self.range[0] && range.upper == self.range[1])
+        {
+            return Ok(&self.pieces);
+        }
+        let mut first = 0;
+        let mut end = self.pieces.len();
+        if range.lower > self.range[0] {
+            let mut upper = end;
+            while first < upper {
+                budget.charge(1, cancel)?;
+                let middle = first + (upper - first) / 2;
+                if self.pieces[middle].parameter[1] < range.lower {
+                    first = middle + 1;
+                } else {
+                    upper = middle;
+                }
+            }
+        }
+        if range.upper < self.range[1] {
+            let mut lower = first;
+            while lower < end {
+                budget.charge(1, cancel)?;
+                let middle = lower + (end - lower) / 2;
+                if self.pieces[middle].parameter[0] <= range.upper {
+                    lower = middle + 1;
+                } else {
+                    end = middle;
+                }
+            }
+        }
+        Ok(&self.pieces[first..end])
     }
 
     fn check_range(&self, range: ValidatedInterval) -> Result<(), ValidatedGeometryError> {
@@ -3471,6 +3517,11 @@ mod continuation_regressions {
                     .is_smooth_on([0.1, 0.2], &mut budget, &cancel)
                     .unwrap()
             );
+            // A closed C0 point query encloses both one-sided velocities,
+            // without promoting their union to a smoothness certificate.
+            let joint = prepared.jet([0.5, 0.5], &mut budget, &cancel).unwrap();
+            assert!(joint.first[1].lower <= 0.0);
+            assert!(joint.first[1].upper >= 2.0 * bend);
             let image = prepared
                 .position_bounds([0.0, 1.0], &mut budget, &cancel)
                 .unwrap();
@@ -3501,6 +3552,119 @@ mod continuation_regressions {
             ));
             assert!(matches!(
                 prepared.is_smooth_on([0.4, 0.6], &mut budget, &AtomicBool::new(true)),
+                Err(ValidatedGeometryError::Cancelled)
+            ));
+        }
+    }
+
+    #[test]
+    fn native_and_reflected_coordinate_joints_keep_closed_incidence() {
+        let Curve::IntersectionCurve(intersection) = plane_intersection(false) else {
+            unreachable!();
+        };
+        let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+            intersection.surface0().clone(),
+            intersection.surface1().clone(),
+            Box::new(Curve::BsplineCurve(crate::BsplineCurve::new(
+                KnotVector::from(vec![2.0, 2.0, 3.0, 6.0, 6.0]),
+                vec![
+                    Point3::new(0.0, 0.0, 0.0),
+                    Point3::new(0.0, 0.25, 0.0),
+                    Point3::new(0.0, 0.75, 0.0),
+                ],
+            ))),
+            None,
+            None,
+        ));
+        let mut wrapper = Processor::new(TrimmedCurve::new(Box::new(curve.clone()), (2.0, 6.0)));
+        wrapper.invert();
+        let reflected = Curve::TrimmedCurve(wrapper);
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(4_000_000);
+        for (source, reversed, joint, spans) in [
+            (
+                &curve,
+                false,
+                3.0,
+                [([2.0, 3.0], 0.25), ([3.0, 6.0], 1.0 / 6.0)],
+            ),
+            (
+                &reflected,
+                true,
+                5.0,
+                [([2.0, 5.0], -1.0 / 6.0), ([5.0, 6.0], -0.25)],
+            ),
+        ] {
+            let prepared = prepared_validated_curve(
+                source,
+                [2.0, 6.0],
+                &ValidatedCurveOptions::default(),
+                &mut budget,
+                &cancel,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "prepare full native binding: reversed={reversed}, range=[2,6], joint={joint}, error={error:?}",
+                )
+            });
+            // A point at a coordinate joint sees both incident charts; a
+            // positive-width one-sided span does not cross its endpoint.
+            for range in [[joint, joint], [joint - 0.125, joint + 0.125]] {
+                assert!(!prepared.is_smooth_on(range, &mut budget, &cancel).unwrap());
+                assert!(matches!(
+                    prepared.jet(range, &mut budget, &cancel),
+                    Err(ValidatedGeometryError::NonSmooth)
+                ));
+                assert!(matches!(
+                    prepared.projected_jet(range, [0.0; 3], [0.0, 1.0, 0.0], &mut budget, &cancel,),
+                    Err(ValidatedGeometryError::NonSmooth)
+                ));
+                let image = prepared
+                    .position_bounds(range, &mut budget, &cancel)
+                    .unwrap();
+                assert!(image[1].lower <= 0.25 && image[1].upper >= 0.25);
+            }
+            let point = prepared.evaluate(joint, &mut budget, &cancel).unwrap();
+            assert!(point.error[1].lower <= 0.25 && point.error[1].upper >= 0.25);
+            for (range, speed) in spans {
+                assert!(prepared.is_smooth_on(range, &mut budget, &cancel).unwrap());
+                let jet = prepared.jet(range, &mut budget, &cancel).unwrap();
+                assert!(
+                    jet.first[1].lower <= speed && speed <= jet.first[1].upper,
+                    "reversed={reversed}, range={range:?}, expected_speed={speed:?}, jet={jet:?}",
+                );
+                let scalar = prepared
+                    .projected_jet(range, [0.0; 3], [0.0, 1.0, 0.0], &mut budget, &cancel)
+                    .unwrap();
+                assert!(
+                    scalar.first.lower <= speed && speed <= scalar.first.upper,
+                    "reversed={reversed}, range={range:?}, expected_speed={speed:?}, scalar={scalar:?}",
+                );
+                for parameter in range {
+                    let native_parameter = if reversed { 8.0 - parameter } else { parameter };
+                    let expected = if native_parameter <= 3.0 {
+                        (native_parameter - 2.0) * 0.25
+                    } else {
+                        0.25 + (native_parameter - 3.0) / 6.0
+                    };
+                    let point = prepared.evaluate(parameter, &mut budget, &cancel).unwrap();
+                    assert!(point.error[1].lower <= expected && expected <= point.error[1].upper);
+                }
+            }
+            assert!(matches!(
+                prepared.jet([1.0, 2.0], &mut budget, &cancel),
+                Err(ValidatedGeometryError::ParameterOutOfRange)
+            ));
+            assert!(matches!(
+                prepared.jet(
+                    [joint, joint],
+                    &mut ValidatedGeometryBudget::new(0),
+                    &cancel
+                ),
+                Err(ValidatedGeometryError::ResourceLimit)
+            ));
+            assert!(matches!(
+                prepared.jet([joint, joint], &mut budget, &AtomicBool::new(true)),
                 Err(ValidatedGeometryError::Cancelled)
             ));
         }

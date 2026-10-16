@@ -1,5 +1,5 @@
 use super::{
-    Taylor, ValidatedCurveJet, ValidatedCurveJet2D, ValidatedGeometryBudget,
+    ONE, Taylor, ValidatedCurveJet, ValidatedCurveJet2D, ValidatedGeometryBudget,
     ValidatedGeometryError, ValidatedInterval, ValidatedSurfaceJet, curve_jet_from_taylor,
     interval_range,
 };
@@ -629,8 +629,17 @@ pub(super) fn processed_parameter_with_extension(
     if orientation {
         return Ok(t);
     }
-    let mut reflected =
-        Taylor::interval(ValidatedInterval::point(lower) + ValidatedInterval::point(upper)) - t;
+    let anchor = ValidatedInterval::point(lower) + ValidatedInterval::point(upper);
+    let mut reflected = Taylor::interval(anchor) - t;
+    // Reflection is decreasing: evaluate each endpoint with the existing
+    // outward point arithmetic, whose TwoSum proof retains exact differences.
+    // Ranged subtraction would widen even exactly representable endpoint
+    // images across a coordinate joint. Inexact anchors and images still
+    // retain their full uncertainty; no knot or range endpoint is snapped.
+    reflected.0[0][0] = ValidatedInterval {
+        lower: (anchor - ValidatedInterval::point(t.0[0][0].upper)).lower,
+        upper: (anchor - ValidatedInterval::point(t.0[0][0].lower)).upper,
+    };
     if contained {
         // Reflection maps its complete declared domain back into that domain.
         reflected.0[0][0] = reflected.0[0][0]
@@ -976,7 +985,7 @@ pub(super) fn basis(
         budget.charge(order + 1, cancel)?;
         let end = span.min(knots.len() - order - 2);
         for index in start..=end {
-            let a = if knots[index + order] == knots[index] {
+            let mut a = if knots[index + order] == knots[index] {
                 Taylor::ZERO
             } else {
                 (parameter - Taylor::constant(knots[index]))
@@ -986,7 +995,7 @@ pub(super) fn basis(
                         .reciprocal()?,
                     )
             };
-            let b = if knots[index + order + 1] == knots[index + 1] {
+            let mut b = if knots[index + order + 1] == knots[index + 1] {
                 Taylor::ZERO
             } else {
                 (Taylor::constant(knots[index + order + 1]) - parameter)
@@ -996,6 +1005,29 @@ pub(super) fn basis(
                         .reciprocal()?,
                     )
             };
+            // Preserve the exact affine endpoint identities before recurrence:
+            // (b-a)/(b-a) = 1 and (a-a)/(b-a) = 0. Independent outward
+            // reciprocal products need not have an exact endpoint midpoint;
+            // knot-plane proposals must not acquire that arithmetic drift.
+            // Only the value is simplified; Taylor derivatives keep their
+            // original outward coefficient arithmetic.
+            let point = parameter.0[0][0];
+            if point.lower == point.upper {
+                if knots[index + order] != knots[index] {
+                    if point.lower == knots[index] {
+                        a.0[0][0] = super::ZERO;
+                    } else if point.lower == knots[index + order] {
+                        a.0[0][0] = ONE;
+                    }
+                }
+                if knots[index + order + 1] != knots[index + 1] {
+                    if point.lower == knots[index + order + 1] {
+                        b.0[0][0] = super::ZERO;
+                    } else if point.lower == knots[index + 1] {
+                        b.0[0][0] = ONE;
+                    }
+                }
+            }
             let offset = index - start;
             values[offset] = a * values[offset] + b * values[offset + 1];
         }
