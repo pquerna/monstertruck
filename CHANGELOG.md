@@ -16,15 +16,31 @@ monstertruck 0.4.0.
 
 ### Fixed
 
-- Whole-span implicit jets independently recertify centered coordinate-domain
-  proposals when image-containing contraction stagnates. Nonlinear coordinates
-  can tighten while other coordinates vary over the full parameter span;
-  accepted jets retain the original branch, and rejected proposals preserve
-  the previous valid bounds without relaxing limits or refunding work.
+- Query-local `PreparedFacePlaneRoots` retains complete original-3D and
+  source-chart trim-root inventories for one exact face and plane. Numerical
+  cut anchors and later full-face coverage borrow the same roots without
+  repeating isolation. Reuse checks the original retained curve bindings,
+  units, ranges, chart errors and exact carrier/Processor snapshot; mutated
+  native carriers or edges and foreign inputs refuse rather than reuse proof.
+  Candidate continuation, original incidence and full coverage remain fresh.
+  All inventory capacities share the existing local storage cap with coverage.
+- Shared prepared trim domains admit an immutable query-specific winding byte
+  limit, including retained metadata, without poisoning later queries after a
+  smaller allowance. Constructor and monotone owned limits cannot be widened.
+- Whole-span implicit jets try image-containing contraction before independently
+  recertified centered coordinate proposals. They stop when no proposal tightens
+  physical position/derivative bounds, rather than repeatedly spending work on
+  auxiliary-domain motion. Accepted jets retain the original complete parameter
+  span and branch; failed proposals preserve valid bounds without relaxing
+  limits or refunding work.
 - Prepared native trim domains support monotone narrowing of their shared
   retained-metadata and classification-scratch allowance. Growing caller-owned
   output need not leave winding allocations admitted against stale capacity;
   limits below retained metadata fail without changing the existing allowance.
+- `validated_surface_geometric_normal` provides bounded continuous oriented
+  source-geometric normal authority, including qualified affine processors and
+  native sphere poles. It does not promote legacy nearby-normal heuristics,
+  positional continuity or a singular parameter Jacobian into regularity proof.
 - Revolution `ToSameGeometry` conversion no longer reverses non-axis-parallel
   source profiles. Original active parameters, evaluations, derivatives and
   oriented normals survive the generic STEP surface construction and roundtrip.
@@ -59,10 +75,11 @@ monstertruck 0.4.0.
 - Generated face/plane curve preparation accepts original `Front`, `Back`
   or `Both` chart proposals with its borrowed carrier. Back-anchored continuation
   traverses original spans backward and returns ascending pieces without changing
-  their parameters, projections or derivative signs. The trim-root helper shares
-  the complete original/UV root census and exact retained-source association with
-  endpoint coverage. Original masters, continuation, endpoint, work, storage and
-  cancellation bounds remain unchanged; no guessed period shift is introduced.
+  their parameters, projections or derivative signs. Query-local trim-root
+  inventories preserve the complete independent original/UV gauges and exact
+  retained-source association for endpoint coverage. Original masters,
+  continuation, endpoint, work, storage and cancellation bounds remain unchanged;
+  no guessed period shift is introduced.
 - Generated face/plane coordinate proposals coalesce across guide knots only
   under bounded conditioning checks; original-carrier continuation, source
   support and complete coverage remain authoritative. Numerical proposal

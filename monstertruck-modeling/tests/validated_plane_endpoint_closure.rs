@@ -257,9 +257,12 @@ fn coverage(
     };
     validated_face_plane_coverage(
         &domain,
-        &plane,
-        &candidates,
-        &bindings,
+        &ValidatedPlaneCoverageQuery {
+            plane: &plane,
+            candidates: &candidates,
+            endpoint_bindings: &bindings,
+            prepared_roots: None,
+        },
         &options,
         &mut budget,
         &query_cancel,
@@ -459,15 +462,18 @@ fn periodic_original_seam_root_seeds_complete_closed_face_coverage() {
             ..initial_binding
         },
     ];
-    let initial_chart = validated_plane_trim_root_chart(
+    let roots = prepared_face_plane_roots(
         &domain,
         &plane,
-        &bindings[0],
+        &[bindings[0].boundary_binding()],
         32 * 1024 * 1024,
         &mut preparation,
         &cancel,
     )
-    .expect("complete original and nominal root censuses select the actual seam occurrence");
+    .expect("complete original and nominal root censuses");
+    let initial_chart = roots
+        .root_chart_for_cut(3, source_cut_parameter, &mut preparation, &cancel)
+        .expect("select the actual seam occurrence in the independent original gauge");
     assert!(initial_chart[0].lower <= 0.5 && 0.5 <= initial_chart[0].upper);
     assert!(initial_chart[1].lower <= TAU && TAU <= initial_chart[1].upper);
     let unrelated_candidate_tags = ValidatedPlaneTrimEndpointBinding {
@@ -476,14 +482,20 @@ fn periodic_original_seam_root_seeds_complete_closed_face_coverage() {
         ..bindings[0]
     };
     assert_eq!(
-        validated_plane_trim_root_chart(
+        prepared_face_plane_roots(
             &domain,
             &plane,
-            &unrelated_candidate_tags,
+            &[unrelated_candidate_tags.boundary_binding()],
             32 * 1024 * 1024,
             &mut preparation,
             &cancel,
         )
+        .and_then(|roots| roots.root_chart_for_cut(
+            unrelated_candidate_tags.coedge_index,
+            unrelated_candidate_tags.source_cut_parameter,
+            &mut preparation,
+            &cancel,
+        ))
         .expect("a source-chart proposal does not depend on generated candidate tags"),
         initial_chart
     );
@@ -555,9 +567,12 @@ fn periodic_original_seam_root_seeds_complete_closed_face_coverage() {
     assert!(
         validated_face_plane_coverage(
             &domain,
-            &plane,
-            &[&unseeded],
-            &bindings,
+            &ValidatedPlaneCoverageQuery {
+                plane: &plane,
+                candidates: &[&unseeded],
+                endpoint_bindings: &bindings,
+                prepared_roots: None,
+            },
             &options,
             &mut wrong_sheet_budget,
             &cancel,
@@ -567,9 +582,12 @@ fn periodic_original_seam_root_seeds_complete_closed_face_coverage() {
     let mut budget = ValidatedGeometryBudget::new(2_000_000);
     let proof = validated_face_plane_coverage(
         &domain,
-        &plane,
-        &[&candidate],
-        &bindings,
+        &ValidatedPlaneCoverageQuery {
+            plane: &plane,
+            candidates: &[&candidate],
+            endpoint_bindings: &bindings,
+            prepared_roots: None,
+        },
         &options,
         &mut budget,
         &cancel,
@@ -855,9 +873,12 @@ fn back_anchored_taper_coverage(
     ];
     let result = validated_face_plane_coverage(
         &domain,
-        &plane,
-        &[&curves[0], &curves[1]],
-        &bindings,
+        &ValidatedPlaneCoverageQuery {
+            plane: &plane,
+            candidates: &[&curves[0], &curves[1]],
+            endpoint_bindings: &bindings,
+            prepared_roots: None,
+        },
         &ValidatedPlaneCoverageOptions {
             maximum_endpoint_extension_mm: EXTENSION_LIMIT,
             ..ValidatedPlaneCoverageOptions::default()

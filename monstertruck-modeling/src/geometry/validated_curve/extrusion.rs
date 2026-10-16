@@ -378,7 +378,8 @@ mod tests {
     use super::*;
     use crate::{
         BsplineCurve, Curve2D, Edge, ExtrusionSurface, Face, KnotVector, Line, Point2, Point3,
-        TrimDomainLimits, Vector3, Wire, builder, prepare_face_parameter_domain_with_uncertainty,
+        TrimDomainLimits, ValidatedPlaneTrimBoundaryBinding, Vector3, Wire, builder,
+        prepare_face_parameter_domain_with_uncertainty, prepared_face_plane_roots,
     };
     use monstertruck_topology::trimmed::TrimmedFace;
 
@@ -545,9 +546,12 @@ mod tests {
             };
             let coverage = validated_face_plane_coverage(
                 &domain,
-                &plane,
-                &[&prepared],
-                &bindings,
+                &ValidatedPlaneCoverageQuery {
+                    plane: &plane,
+                    candidates: &[&prepared],
+                    endpoint_bindings: &bindings,
+                    prepared_roots: None,
+                },
                 &coverage_options,
                 &mut budget,
                 &cancel,
@@ -565,9 +569,12 @@ mod tests {
             assert!(
                 validated_face_plane_coverage(
                     &domain,
-                    &plane,
-                    &[&prepared],
-                    &[],
+                    &ValidatedPlaneCoverageQuery {
+                        plane: &plane,
+                        candidates: &[&prepared],
+                        endpoint_bindings: &[],
+                        prepared_roots: None,
+                    },
                     &coverage_options,
                     &mut ValidatedGeometryBudget::new(2_000_000),
                     &cancel,
@@ -613,19 +620,45 @@ mod tests {
                     };
                     binding
                 });
-                assert!(
-                    validated_face_plane_coverage(
-                        &domain,
-                        &low_plane,
-                        &[&low],
-                        &low_bindings,
-                        &coverage_options,
-                        &mut ValidatedGeometryBudget::new(2_000_000),
-                        &cancel,
-                    )
-                    .is_err(),
-                    "complete original off-grid roots remain mandatory"
-                );
+                let original_bindings: Vec<_> = boundaries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, boundary)| ValidatedPlaneTrimBoundaryBinding {
+                        coedge_index: index,
+                        original_edge_id: domain.coedges()[index].identity.edge_id,
+                        boundary,
+                        boundary_range: boundary.range(),
+                        boundary_scale: 1.0,
+                        source_chart_error_mm: 0.0,
+                    })
+                    .collect();
+                let low_roots = prepared_face_plane_roots(
+                    &domain,
+                    &low_plane,
+                    &original_bindings,
+                    coverage_options.max_retained_bytes,
+                    &mut ValidatedGeometryBudget::new(2_000_000),
+                    &cancel,
+                )
+                .expect("complete original inventory includes both off-grid lower-cap roots");
+                for inventory in [None, Some(&low_roots)] {
+                    assert!(
+                        validated_face_plane_coverage(
+                            &domain,
+                            &ValidatedPlaneCoverageQuery {
+                                plane: &low_plane,
+                                candidates: &[&low],
+                                endpoint_bindings: &low_bindings,
+                                prepared_roots: inventory,
+                            },
+                            &coverage_options,
+                            &mut ValidatedGeometryBudget::new(2_000_000),
+                            &cancel,
+                        )
+                        .is_err(),
+                        "complete original off-grid roots remain mandatory"
+                    );
+                }
             }
 
             // Same endpoints and guide, but a different original profile interior.
@@ -656,9 +689,12 @@ mod tests {
             assert!(
                 validated_face_plane_coverage(
                     &domain,
-                    &plane,
-                    &[&wrong],
-                    &bindings,
+                    &ValidatedPlaneCoverageQuery {
+                        plane: &plane,
+                        candidates: &[&wrong],
+                        endpoint_bindings: &bindings,
+                        prepared_roots: None,
+                    },
                     &coverage_options,
                     &mut ValidatedGeometryBudget::new(2_000_000),
                     &cancel,

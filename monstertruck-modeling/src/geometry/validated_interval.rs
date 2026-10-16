@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
 mod explicit;
+mod normal;
 mod projection;
 mod smoothness;
 pub(crate) use explicit::{
@@ -19,6 +20,7 @@ pub use explicit::{
     validated_boundary_jet, validated_curve_jet, validated_curve2d_jet, validated_surface_jet,
     validated_surface_piecewise_jet,
 };
+pub use normal::validated_surface_geometric_normal;
 pub use projection::validated_curve_projected_jet;
 pub(crate) use projection::{ProjectionExecution, ScalarProjection, projected_spline};
 pub(crate) use smoothness::{curve_span_smooth, surface_box_smooth};

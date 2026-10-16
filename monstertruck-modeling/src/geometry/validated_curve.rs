@@ -36,9 +36,10 @@ use std::sync::atomic::AtomicBool;
 mod coverage;
 mod extrusion;
 pub use coverage::{
-    ValidatedPlaneCoverage, ValidatedPlaneCoverageOptions, ValidatedPlaneTrimEndpoint,
-    ValidatedPlaneTrimEndpointBinding, validated_face_plane_coverage,
-    validated_plane_trim_root_chart, validated_same_surface_coefficients,
+    PreparedFacePlaneRoots, ValidatedPlaneCoverage, ValidatedPlaneCoverageOptions,
+    ValidatedPlaneCoverageQuery, ValidatedPlaneTrimBoundaryBinding, ValidatedPlaneTrimEndpoint,
+    ValidatedPlaneTrimEndpointBinding, prepared_face_plane_roots, validated_face_plane_coverage,
+    validated_same_surface_coefficients,
 };
 
 /// Bounded continuation and certified endpoint refinement policy.
@@ -2016,6 +2017,19 @@ fn centered_root_domain(tube: &Tube) -> [ValidatedInterval; 4] {
     })
 }
 
+fn intersect_refined_jet(
+    jet: &mut ValidatedCurveJet,
+    refined: ValidatedCurveJet,
+) -> Result<bool, ValidatedGeometryError> {
+    let previous = *jet;
+    jet.position = intersect3(jet.position, refined.position)?;
+    jet.first = intersect3(jet.first, refined.first)?;
+    jet.second = intersect3(jet.second, refined.second)?;
+    Ok(jet.position != previous.position
+        || jet.first != previous.first
+        || jet.second != previous.second)
+}
+
 fn refine_implicit_jet(
     source: Certification<'_, '_>,
     projection: Projection,
@@ -2035,13 +2049,38 @@ fn refine_implicit_jet(
     for _ in 1..options.max_iterations {
         budget.charge(1, cancel)?;
         let next = root_image_domain(&tube)?;
-        let proposed = centered_root_domain(&tube);
-        let mut refined = None;
-        // Near-unit contraction can leave one nonlinear chart coordinate broad
-        // even when the requested parameter span is tiny. Tighten coordinates
-        // separately: another coordinate may genuinely vary over the full span.
-        // No centered proposal, guide, endpoint or midpoint supplies authority.
+        // Prefer the image-containing contraction. A healthy root tube needs
+        // no speculative coordinate certificates while its physical jet gains.
+        let image_progress = (0..4).any(|i| {
+            let padding = root_image_padding(tube.rooted_domain[i]);
+            next[i].lower - tube.domain[i].lower > padding
+                || tube.domain[i].upper - next[i].upper > padding
+        });
+        if image_progress {
+            match source.certify(projection, parameter, next, budget, cancel) {
+                Ok(refined) => match implicit_jet(&refined) {
+                    Ok(refined_jet) => {
+                        let gained = intersect_refined_jet(&mut jet, refined_jet)?;
+                        tube = refined;
+                        if gained {
+                            continue;
+                        }
+                    }
+                    Err(error) if retryable(error) => {}
+                    Err(error) => return Err(error),
+                },
+                Err(error) if retryable(error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        // Stagnation gets a fair centered escape over the unchanged complete
+        // parameter span. Tighten coordinates separately: another coordinate
+        // may genuinely vary over the full span. Only fresh inclusion within
+        // the preceding uniqueness domain authorizes the same selected roots.
+        let mut gained = false;
         for axis in 0..4 {
+            let next = root_image_domain(&tube)?;
+            let proposed = centered_root_domain(&tube);
             let padding = root_image_padding(tube.rooted_domain[axis]);
             if proposed[axis].lower - next[axis].lower <= padding
                 && next[axis].upper - proposed[axis].upper <= padding
@@ -2050,43 +2089,27 @@ fn refine_implicit_jet(
             }
             let mut candidate = next;
             candidate[axis] = proposed[axis];
-            match source.certify(projection, parameter, candidate, budget, cancel) {
-                Ok(tube) => {
-                    refined = Some(tube);
-                    break;
-                }
-                Err(error) if retryable(error) => {}
+            let refined = match source.certify(projection, parameter, candidate, budget, cancel) {
+                Ok(tube) => tube,
+                Err(error) if retryable(error) => continue,
                 Err(error) => return Err(error),
+            };
+            let refined_jet = match implicit_jet(&refined) {
+                Ok(jet) => jet,
+                Err(error) if retryable(error) => continue,
+                Err(error) => return Err(error),
+            };
+            gained = intersect_refined_jet(&mut jet, refined_jet)?;
+            tube = refined;
+            if gained {
+                break;
             }
         }
-        let refined = match refined {
-            Some(tube) => tube,
-            None => {
-                // An unsuccessful proposal cannot discard the old valid jet.
-                // Retain the image-containing contraction when it progresses.
-                if !(0..4).any(|i| {
-                    let padding = root_image_padding(tube.rooted_domain[i]);
-                    next[i].lower - tube.domain[i].lower > padding
-                        || tube.domain[i].upper - next[i].upper > padding
-                }) {
-                    break;
-                }
-                match source.certify(projection, parameter, next, budget, cancel) {
-                    Ok(tube) => tube,
-                    Err(error) if retryable(error) => break,
-                    Err(error) => return Err(error),
-                }
-            }
-        };
-        let refined_jet = match implicit_jet(&refined) {
-            Ok(jet) => jet,
-            Err(error) if retryable(error) => break,
-            Err(error) => return Err(error),
-        };
-        jet.position = intersect3(jet.position, refined_jet.position)?;
-        jet.first = intersect3(jet.first, refined_jet.first)?;
-        jet.second = intersect3(jet.second, refined_jet.second)?;
-        tube = refined;
+        // Keep the latest independently valid jet, including a successful
+        // no-gain certificate. Source-chart motion alone earns no more work.
+        if !gained {
+            break;
+        }
     }
     Ok(jet)
 }
@@ -3646,7 +3669,7 @@ mod continuation_regressions {
         )
         .unwrap();
         let old_jet = implicit_jet(&tube).unwrap();
-        let prepared = PreparedValidatedCurve {
+        let mut prepared = PreparedValidatedCurve {
             source: PreparedSource::Borrowed(&curve),
             range: [0.0, 1.0],
             pieces: vec![ValidatedCurvePiece {
@@ -3660,7 +3683,11 @@ mod continuation_regressions {
             options,
             mapped: None,
         };
-        let jet = prepared.jet(requested, &mut budget, &cancel).unwrap();
+        // A well-conditioned nonlinear query must resolve useful physical
+        // bounds within a fixed query allowance even with ample iterations.
+        prepared.options.max_iterations = 128;
+        let mut query_work = ValidatedGeometryBudget::new(2_000);
+        let jet = prepared.jet(requested, &mut query_work, &cancel).unwrap();
         assert!(
             green(&jet).lower > 0.0,
             "fresh whole-span Green sign must resolve"

@@ -962,7 +962,12 @@ impl<'a> PreparedFaceParameterDomain<'a> {
         self.classify_parameter_box([[point[0]; 2], [point[1]; 2]], budget, cancel)
     }
 
-    fn admit_winding_scratch(&self, arcs: usize, pending: usize) -> Result<(), TrimDomainError> {
+    fn admit_winding_scratch(
+        &self,
+        arcs: usize,
+        pending: usize,
+        byte_limit: usize,
+    ) -> Result<(), TrimDomainError> {
         let bytes = self
             .retained_bytes()
             .checked_add(size_of::<Vec<WindingArc>>())
@@ -970,7 +975,7 @@ impl<'a> PreparedFaceParameterDomain<'a> {
             .and_then(|bytes| bytes.checked_add(arcs.checked_mul(size_of::<WindingArc>())?))
             .and_then(|bytes| bytes.checked_add(pending.checked_mul(size_of::<TrimSpan>())?))
             .ok_or(TrimDomainError::ResourceLimit)?;
-        admit_bytes(bytes, self.limits.max_retained_bytes)
+        admit_bytes(bytes, byte_limit)
     }
 
     /// Classifies the complete connected query box, not a finite set of probes.
@@ -985,7 +990,31 @@ impl<'a> PreparedFaceParameterDomain<'a> {
         budget: &mut ValidatedGeometryBudget,
         cancel: &AtomicBool,
     ) -> Result<ParameterBoxClassification, TrimDomainError> {
+        self.classify_parameter_box_with_byte_limit(
+            bounds,
+            self.limits.max_retained_bytes,
+            budget,
+            cancel,
+        )
+    }
+
+    /// Classifies a box with an immutable, query-scoped storage allowance.
+    ///
+    /// The limit includes retained domain metadata and every live winding
+    /// scratch capacity. It only narrows the constructor's current allowance;
+    /// a failed or small query does not change the allowance for later queries.
+    /// This permits shared prepared domains to receive current remaining bytes
+    /// after other query buffers grow without retaining a stale scratch budget.
+    pub fn classify_parameter_box_with_byte_limit(
+        &self,
+        bounds: [[f64; 2]; 2],
+        max_retained_bytes: usize,
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<ParameterBoxClassification, TrimDomainError> {
         budget.charge(1, cancel)?;
+        let byte_limit = self.limits.max_retained_bytes.min(max_retained_bytes);
+        admit_bytes(self.retained_bytes(), byte_limit)?;
         let query = validate_box(bounds)?;
         let query = [
             query[0] + ValidatedInterval::new(-self.uncertainty_uv[0], self.uncertainty_uv[0])?,
@@ -1008,10 +1037,10 @@ impl<'a> PreparedFaceParameterDomain<'a> {
             .len()
             .checked_add(self.joints.len())
             .ok_or(TrimDomainError::ResourceLimit)?;
-        self.admit_winding_scratch(initial_arcs, 0)?;
+        self.admit_winding_scratch(initial_arcs, 0, byte_limit)?;
         budget.charge(initial_arcs, cancel)?;
         let mut arcs = Vec::with_capacity(initial_arcs);
-        self.admit_winding_scratch(arcs.capacity(), 0)?;
+        self.admit_winding_scratch(arcs.capacity(), 0, byte_limit)?;
         for joint in &self.joints {
             budget.charge(1, cancel)?;
             if !disjoint(joint.enclosure, query) {
@@ -1028,9 +1057,10 @@ impl<'a> PreparedFaceParameterDomain<'a> {
             self.admit_winding_scratch(
                 arcs.capacity(),
                 growing_capacity(pending.len(), pending.capacity()),
+                byte_limit,
             )?;
             pending.push(*span);
-            self.admit_winding_scratch(arcs.capacity(), pending.capacity())?;
+            self.admit_winding_scratch(arcs.capacity(), pending.capacity(), byte_limit)?;
             while let Some(span) = pending.pop() {
                 budget.charge(1, cancel)?;
                 nodes = nodes.checked_add(1).ok_or(TrimDomainError::ResourceLimit)?;
@@ -1054,9 +1084,10 @@ impl<'a> PreparedFaceParameterDomain<'a> {
                     self.admit_winding_scratch(
                         growing_capacity(arcs.len(), arcs.capacity()),
                         pending.capacity(),
+                        byte_limit,
                     )?;
                     arcs.push(WindingArc { front, back });
-                    self.admit_winding_scratch(arcs.capacity(), pending.capacity())?;
+                    self.admit_winding_scratch(arcs.capacity(), pending.capacity(), byte_limit)?;
                 } else {
                     let middle = span.range[0] * 0.5 + span.range[1] * 0.5;
                     if middle <= span.range[0] || middle >= span.range[1] {
@@ -1066,21 +1097,23 @@ impl<'a> PreparedFaceParameterDomain<'a> {
                     self.admit_winding_scratch(
                         arcs.capacity(),
                         growing_capacity(pending.len(), pending.capacity()),
+                        byte_limit,
                     )?;
                     pending.push(TrimSpan {
                         range: [middle, span.range[1]],
                         ..span
                     });
-                    self.admit_winding_scratch(arcs.capacity(), pending.capacity())?;
+                    self.admit_winding_scratch(arcs.capacity(), pending.capacity(), byte_limit)?;
                     self.admit_winding_scratch(
                         arcs.capacity(),
                         growing_capacity(pending.len(), pending.capacity()),
+                        byte_limit,
                     )?;
                     pending.push(TrimSpan {
                         range: [span.range[0], middle],
                         ..span
                     });
-                    self.admit_winding_scratch(arcs.capacity(), pending.capacity())?;
+                    self.admit_winding_scratch(arcs.capacity(), pending.capacity(), byte_limit)?;
                 }
             }
         }
@@ -1254,6 +1287,54 @@ mod native_trim_regressions {
             .unwrap();
         assert!(matches!(
             domain.classify_parameter_box(hole, &mut budget, &cancel),
+            Err(TrimDomainError::ResourceLimit),
+        ));
+    }
+
+    #[test]
+    fn shared_query_winding_limit_recovers_without_widening_constructor_cap() {
+        let face = square_with_hole();
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(1_000_000);
+        let mut domain =
+            prepare_face_parameter_domain(&face, limits(), &mut budget, &cancel).unwrap();
+        let material = [[0.25, 0.75], [1.5, 2.5]];
+        let hole = [[1.5, 2.5], [1.5, 2.5]];
+        let retained = domain.retained_bytes();
+        for bytes in [retained - 1, retained] {
+            let before = budget.consumed();
+            assert!(matches!(
+                domain.classify_parameter_box_with_byte_limit(
+                    material,
+                    bytes,
+                    &mut budget,
+                    &cancel,
+                ),
+                Err(TrimDomainError::ResourceLimit),
+            ));
+            assert!(budget.consumed() > before);
+            for (query, expected) in [
+                (material, ParameterBoxClassification::Inside),
+                (hole, ParameterBoxClassification::Outside),
+            ] {
+                assert_eq!(
+                    domain
+                        .classify_parameter_box_with_byte_limit(
+                            query,
+                            usize::MAX,
+                            &mut budget,
+                            &cancel,
+                        )
+                        .unwrap(),
+                    expected,
+                );
+            }
+        }
+        domain
+            .restrict_retained_byte_limit(retained, &mut budget, &cancel)
+            .unwrap();
+        assert!(matches!(
+            domain.classify_parameter_box_with_byte_limit(hole, usize::MAX, &mut budget, &cancel,),
             Err(TrimDomainError::ResourceLimit),
         ));
     }

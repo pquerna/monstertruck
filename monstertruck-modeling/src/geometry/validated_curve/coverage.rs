@@ -13,9 +13,12 @@ use crate::{
 use std::sync::atomic::AtomicBool;
 
 mod endpoints;
+#[cfg(test)]
+mod root_reuse_regressions;
 mod source_identity;
 pub use endpoints::{
-    ValidatedPlaneTrimEndpoint, ValidatedPlaneTrimEndpointBinding, validated_plane_trim_root_chart,
+    PreparedFacePlaneRoots, ValidatedPlaneTrimBoundaryBinding, ValidatedPlaneTrimEndpoint,
+    ValidatedPlaneTrimEndpointBinding, prepared_face_plane_roots,
 };
 
 const COVERAGE_STACK_BYTES: usize = 16 * 1024;
@@ -27,7 +30,8 @@ pub struct ValidatedPlaneCoverageOptions {
     pub max_depth: usize,
     /// Maximum additional physical endpoint error, zero to disable collars.
     pub maximum_endpoint_extension_mm: f64,
-    /// Combined owned matches, original root proofs and endpoint receipts.
+    /// Owned coverage storage, excluding a separately charged prepared inventory.
+    /// Inventory and coverage together still obey the 32 MiB local cap.
     pub max_retained_bytes: usize,
 }
 impl Default for ValidatedPlaneCoverageOptions {
@@ -38,6 +42,22 @@ impl Default for ValidatedPlaneCoverageOptions {
             max_retained_bytes: 32 * 1024 * 1024,
         }
     }
+}
+
+/// Borrowed plane, candidates and original endpoint associations for one query.
+///
+/// Numerical candidates are not source authority; whole-face coverage validates
+/// their association with the original domain and any prepared root inventory.
+#[derive(Clone, Copy, Debug)]
+pub struct ValidatedPlaneCoverageQuery<'a> {
+    /// Exact native plane coefficients used by candidates and original roots.
+    pub plane: &'a Plane,
+    /// Actual prepared candidate branches, not sampled guide polylines.
+    pub candidates: &'a [&'a PreparedValidatedCurve<'a>],
+    /// Original trim incidence of actual candidate endpoints.
+    pub endpoint_bindings: &'a [ValidatedPlaneTrimEndpointBinding<'a>],
+    /// Optional source-only inventory shared with numerical anchor selection.
+    pub prepared_roots: Option<&'a PreparedFacePlaneRoots<'a>>,
 }
 
 /// A completed full-chart zero-candidate census, not a sampled absence test.
@@ -76,15 +96,26 @@ pub struct ValidatedPlaneCoverage {
 /// Endpoint closure additionally proves its oriented transverse trim incidence
 /// and unique continuation from the actual retained candidate end. The caller
 /// must consume every returned endpoint metric in sampling and area bounds.
+///
+/// [`ValidatedPlaneCoverageQuery::prepared_roots`], when supplied, must belong
+/// to this exact original domain, carrier coefficients, plane and retained
+/// boundary associations. Coverage borrows its complete inventories without
+/// re-isolating roots. `None` performs the same source-only preparation for this
+/// standalone query. Candidate-end association, missing-incidence exclusion and
+/// all coverage proofs remain fresh.
 pub fn validated_face_plane_coverage(
     domain: &PreparedFaceParameterDomain<'_>,
-    plane: &Plane,
-    candidates: &[&PreparedValidatedCurve<'_>],
-    endpoint_bindings: &[ValidatedPlaneTrimEndpointBinding<'_>],
+    query: &ValidatedPlaneCoverageQuery<'_>,
     options: &ValidatedPlaneCoverageOptions,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<ValidatedPlaneCoverage, ValidatedGeometryError> {
+    let ValidatedPlaneCoverageQuery {
+        plane,
+        candidates,
+        endpoint_bindings,
+        prepared_roots,
+    } = *query;
     budget.charge(1, cancel)?;
     if options.max_depth > 48
         || !options.maximum_endpoint_extension_mm.is_finite()
@@ -92,9 +123,13 @@ pub fn validated_face_plane_coverage(
     {
         return Err(ValidatedGeometryError::InvalidInput);
     }
+    let external_root_bytes = prepared_roots.map_or(0, PreparedFacePlaneRoots::retained_bytes);
+    let local_remaining = (32 * 1024 * 1024usize)
+        .checked_sub(external_root_bytes)
+        .ok_or(ValidatedGeometryError::ResourceLimit)?;
     let storage_limit = options
         .max_retained_bytes
-        .min(32 * 1024 * 1024)
+        .min(local_remaining)
         .checked_sub(COVERAGE_STACK_BYTES)
         .ok_or(ValidatedGeometryError::ResourceLimit)?;
     let bounds = domain.closed_parameter_box();
@@ -109,6 +144,9 @@ pub fn validated_face_plane_coverage(
             plane,
             options.maximum_endpoint_extension_mm,
         )?;
+        if let Some(roots) = prepared_roots {
+            roots.validate_context(&context, budget, cancel)?;
+        }
         let normal = context.normal;
         let origin = context.origin;
         let mut matches = Vec::new();
@@ -151,15 +189,49 @@ pub fn validated_face_plane_coverage(
             .checked_sub(match_bytes)
             .and_then(|x| x.checked_sub(receipt_bytes))
             .ok_or(ValidatedGeometryError::ResourceLimit)?;
+        let owned_roots;
+        let roots = if let Some(roots) = prepared_roots {
+            roots
+        } else {
+            owned_roots = endpoints::prepare_roots(
+                domain,
+                plane,
+                &context,
+                endpoint_bindings
+                    .iter()
+                    .map(ValidatedPlaneTrimEndpointBinding::boundary_binding),
+                endpoint_allowance,
+                budget,
+                cancel,
+            )?;
+            &owned_roots
+        };
+        let owned_root_bytes = if prepared_roots.is_none() {
+            roots.retained_bytes()
+        } else {
+            0
+        };
+        let endpoint_allowance = endpoint_allowance
+            .checked_sub(owned_root_bytes)
+            .ok_or(ValidatedGeometryError::ResourceLimit)?;
         let prepared_endpoints = endpoints::prepare_endpoints(
             &context,
             candidates,
             endpoint_bindings,
+            roots,
             endpoint_allowance,
             budget,
             cancel,
         )
         .map_err(|error| coverage_context(error, "complete original trim-root census", None))?;
+        let endpoint_bytes = prepared_endpoints
+            .capacity()
+            .checked_mul(size_of::<endpoints::PreparedEndpoint<'_>>())
+            .ok_or(ValidatedGeometryError::ResourceLimit)?;
+        let winding_limit = endpoint_allowance
+            .checked_sub(endpoint_bytes)
+            .and_then(|scratch| scratch.checked_add(domain.retained_bytes()))
+            .ok_or(ValidatedGeometryError::ResourceLimit)?;
         budget.charge(endpoint_bindings.len(), cancel)?;
         let mut endpoint_strata = Vec::new();
         endpoint_strata
@@ -314,7 +386,7 @@ pub fn validated_face_plane_coverage(
             // cannot discharge this cell. It must not spend the trim subdivision
             // allowance on cells already proved empty or covered.
             if domain
-                .classify_parameter_box(root_cell, budget, cancel)
+                .classify_parameter_box_with_byte_limit(root_cell, winding_limit, budget, cancel)
                 .map_err(trim_error)?
                 == ParameterBoxClassification::Outside
             {
@@ -2241,9 +2313,12 @@ mod plane_zero_cell_regressions {
             let mut budget = ValidatedGeometryBudget::new(256);
             let coverage = validated_face_plane_coverage(
                 &domain,
-                &plane,
-                &[],
-                &[],
+                &ValidatedPlaneCoverageQuery {
+                    plane: &plane,
+                    candidates: &[],
+                    endpoint_bindings: &[],
+                    prepared_roots: None,
+                },
                 &ValidatedPlaneCoverageOptions::default(),
                 &mut budget,
                 &cancel,

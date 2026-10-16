@@ -2,7 +2,27 @@ use super::super::{CoordinatePlane, Projection, certify, implicit_jet};
 use super::*;
 use crate::{BoundedCurve, ValidatedScalarCurveJet, validated_curve2d_jet};
 use monstertruck_topology::EdgeId;
-use std::collections::HashMap;
+use std::fmt;
+/// Original source geometry for one oriented trim occurrence, without a candidate.
+///
+/// This binding retains the original native gauge and the independently proved
+/// chart correspondence. Neither an edge identity nor a numerical cut is source
+/// geometry authority without the complete retained coefficient association.
+#[derive(Clone, Copy, Debug)]
+pub struct ValidatedPlaneTrimBoundaryBinding<'a> {
+    /// Original occurrence in the prepared face domain.
+    pub coedge_index: usize,
+    /// Original shared edge identity, checked against the occurrence.
+    pub original_edge_id: EdgeId<Curve>,
+    /// Immutable original native boundary continuation.
+    pub boundary: &'a PreparedValidatedCurve<'a>,
+    /// Actual active native domain, without an assumed affine rescaling.
+    pub boundary_range: [f64; 2],
+    /// Certified source-to-query spatial unit map.
+    pub boundary_scale: f64,
+    /// Already certified physical source/chart correspondence error.
+    pub source_chart_error_mm: f64,
+}
 
 /// Original coedge incidence of an actual selected Boolean curve endpoint.
 ///
@@ -29,6 +49,20 @@ pub struct ValidatedPlaneTrimEndpointBinding<'a> {
     pub source_cut_parameter: f64,
     /// Already certified physical source/chart correspondence error.
     pub source_chart_error_mm: f64,
+}
+
+impl<'a> ValidatedPlaneTrimEndpointBinding<'a> {
+    /// Borrows only the original source association, without candidate or cut tags.
+    pub const fn boundary_binding(&self) -> ValidatedPlaneTrimBoundaryBinding<'a> {
+        ValidatedPlaneTrimBoundaryBinding {
+            coedge_index: self.coedge_index,
+            original_edge_id: self.original_edge_id,
+            boundary: self.boundary,
+            boundary_range: self.boundary_range,
+            boundary_scale: self.boundary_scale,
+            source_chart_error_mm: self.source_chart_error_mm,
+        }
+    }
 }
 
 /// A proved original trim-root stratum attached to one retained candidate end.
@@ -275,7 +309,7 @@ impl<'a, 'd> FacePlaneContext<'a, 'd> {
 
 fn validate_binding_input(
     domain: &PreparedFaceParameterDomain<'_>,
-    binding: &ValidatedPlaneTrimEndpointBinding<'_>,
+    binding: &ValidatedPlaneTrimBoundaryBinding<'_>,
 ) -> Result<(), ValidatedGeometryError> {
     let coedge = domain
         .coedges()
@@ -284,7 +318,6 @@ fn validate_binding_input(
     if coedge.identity.edge_id != binding.original_edge_id
         || !binding.boundary_scale.is_finite()
         || binding.boundary_scale <= 0.0
-        || !binding.source_cut_parameter.is_finite()
         || !binding.source_chart_error_mm.is_finite()
         || binding.source_chart_error_mm < 0.0
     {
@@ -295,8 +328,6 @@ fn validate_binding_input(
     if binding.boundary_range[0] >= binding.boundary_range[1]
         || binding.boundary_range[0] < retained_range[0]
         || binding.boundary_range[1] > retained_range[1]
-        || binding.source_cut_parameter < binding.boundary_range[0]
-        || binding.source_cut_parameter > binding.boundary_range[1]
     {
         return Err(ValidatedGeometryError::ParameterOutOfRange);
     }
@@ -305,7 +336,7 @@ fn validate_binding_input(
 
 fn validate_binding_source(
     domain: &PreparedFaceParameterDomain<'_>,
-    binding: &ValidatedPlaneTrimEndpointBinding<'_>,
+    binding: &ValidatedPlaneTrimBoundaryBinding<'_>,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<(), ValidatedGeometryError> {
@@ -320,6 +351,8 @@ fn validate_binding_source(
         .and_then(|wire| wire.get(coedge.identity.coedge_index))
         .ok_or(ValidatedGeometryError::InvalidInput)?;
     if edge.id() != binding.original_edge_id
+        || coedge.identity.face_id != domain.face().id()
+        || coedge.identity.orientation != (edge.orientation() == domain.face().orientation())
         || !edge.with_curve(|actual| {
             source_identity::retains_original_curve(
                 binding.boundary,
@@ -345,7 +378,7 @@ struct TrimRoots {
 fn isolate_trim_roots(
     context: &FacePlaneContext<'_, '_>,
     index: usize,
-    binding: &ValidatedPlaneTrimEndpointBinding<'_>,
+    binding: &ValidatedPlaneTrimBoundaryBinding<'_>,
     maximum_bytes: usize,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
@@ -410,71 +443,249 @@ fn isolate_trim_roots(
     })
 }
 
-/// Encloses an actual original trim/plane root in its retained source chart.
+struct PreparedBoundaryRoots<'a> {
+    binding: ValidatedPlaneTrimBoundaryBinding<'a>,
+    roots: TrimRoots,
+}
+
+/// Complete original-3D and source-chart trim roots for one exact face and plane.
 ///
-/// This uses the cut genealogy's native parameter only to select among complete
-/// original and chart root inventories; their gauges are never identified.
-/// The returned chart box is a numerical hint for generated face/plane curve
-/// preparation, not a branch, endpoint or whole-face coverage certificate.
-/// Candidate index and endpoint side do not participate in this hint operation.
-/// Call outside an original face carrier or edge-curve mutex callback.
-pub fn validated_plane_trim_root_chart(
-    domain: &PreparedFaceParameterDomain<'_>,
-    plane: &Plane,
-    binding: &ValidatedPlaneTrimEndpointBinding<'_>,
+/// This query-local inventory is not candidate or full-face authority. It borrows
+/// stable original owners, copies binding records, and retains a bounded deep
+/// coefficient snapshot because native face carriers can be mutated through
+/// topology handles. Its private root vectors are borrowed, never cloned, by
+/// endpoint selection and coverage.
+pub struct PreparedFacePlaneRoots<'a> {
+    domain: &'a PreparedFaceParameterDomain<'a>,
+    plane: &'a Plane,
+    surface_snapshot: Surface,
+    face_orientation: bool,
+    boundaries: Vec<Option<PreparedBoundaryRoots<'a>>>,
+    retained_bytes: usize,
+}
+
+impl fmt::Debug for PreparedFacePlaneRoots<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedFacePlaneRoots")
+            .field("face_id", &self.domain.face().id())
+            .field("plane", &self.plane)
+            .field("retained_bytes", &self.retained_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+fn same_binding(
+    a: &ValidatedPlaneTrimBoundaryBinding<'_>,
+    b: &ValidatedPlaneTrimBoundaryBinding<'_>,
+) -> bool {
+    a.coedge_index == b.coedge_index
+        && a.original_edge_id == b.original_edge_id
+        && std::ptr::eq(a.boundary, b.boundary)
+        && a.boundary_range == b.boundary_range
+        && a.boundary_scale == b.boundary_scale
+        && a.source_chart_error_mm == b.source_chart_error_mm
+}
+
+/// Prepares each selected original coedge's complete trim-root inventories once.
+///
+/// Bindings contain no candidate endpoint or cut hint. Repeated identical
+/// bindings are admitted without repeating isolation. All retained capacities
+/// and the carrier coefficient snapshot share `max_retained_bytes`, narrowed
+/// by the existing 32 MiB local cap and bounded preparation stack allowance.
+/// Call outside original face-carrier and edge-curve mutex callbacks.
+pub fn prepared_face_plane_roots<'a>(
+    domain: &'a PreparedFaceParameterDomain<'a>,
+    plane: &'a Plane,
+    boundaries: &[ValidatedPlaneTrimBoundaryBinding<'a>],
     max_retained_bytes: usize,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<[ValidatedInterval; 2], ValidatedGeometryError> {
+) -> Result<PreparedFacePlaneRoots<'a>, ValidatedGeometryError> {
     budget.charge(1, cancel)?;
-    validate_binding_input(domain, binding)?;
-    validate_binding_source(domain, binding, budget, cancel)?;
-    let remaining = max_retained_bytes
+    let limit = max_retained_bytes
         .min(32 * 1024 * 1024)
         .checked_sub(COVERAGE_STACK_BYTES)
         .ok_or(ValidatedGeometryError::ResourceLimit)?;
-    domain
-        .face()
-        .with_surface(|surface| {
-            let context = FacePlaneContext::new(domain, surface, plane, 0.0)?;
-            let roots = isolate_trim_roots(
-                &context,
-                binding.coedge_index,
-                binding,
-                remaining,
-                budget,
-                cancel,
-            )?;
-            let mut selected = None;
-            for (&chart, original) in roots.chart.iter().zip(&roots.original) {
-                budget.charge(1, cancel)?;
-                if binding.source_cut_parameter < original.witness[0]
-                    || binding.source_cut_parameter > original.witness[1]
-                {
-                    continue;
-                }
-                if selected.is_some() {
-                    return Err(ValidatedGeometryError::AmbiguousBranch);
-                }
-                selected = Some(
-                    root_chart_enclosure(&context, binding.coedge_index, chart, budget, cancel)?.0,
-                );
+    domain.face().with_surface(|surface| {
+        let context = FacePlaneContext::new(domain, surface, plane, 0.0)?;
+        prepare_roots(
+            domain,
+            plane,
+            &context,
+            boundaries.iter().copied(),
+            limit,
+            budget,
+            cancel,
+        )
+    })
+}
+
+pub(super) fn prepare_roots<'a>(
+    domain: &'a PreparedFaceParameterDomain<'a>,
+    plane: &'a Plane,
+    context: &FacePlaneContext<'_, '_>,
+    bindings: impl Iterator<Item = ValidatedPlaneTrimBoundaryBinding<'a>>,
+    maximum_bytes: usize,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<PreparedFacePlaneRoots<'a>, ValidatedGeometryError> {
+    budget.charge(1, cancel)?;
+    let count = context.domain.coedges().len();
+    let slot_bytes = count
+        .checked_mul(size_of::<Option<PreparedBoundaryRoots<'_>>>())
+        .and_then(|bytes| bytes.checked_add(size_of::<PreparedFacePlaneRoots<'_>>()))
+        .ok_or(ValidatedGeometryError::ResourceLimit)?;
+    let remaining = maximum_bytes
+        .checked_sub(slot_bytes)
+        .ok_or(ValidatedGeometryError::ResourceLimit)?;
+    let snapshot_bytes = crate::surface_owned_bytes(context.surface, remaining, budget, cancel)?;
+    if !exact_surface(context.surface, context.surface, 0, budget, cancel)? {
+        return Err(ValidatedGeometryError::Unsupported);
+    }
+    budget.charge(count, cancel)?;
+    let mut boundaries = Vec::new();
+    boundaries
+        .try_reserve_exact(count)
+        .map_err(|_| ValidatedGeometryError::ResourceLimit)?;
+    boundaries.resize_with(count, || None);
+    let retained_bytes = boundaries
+        .capacity()
+        .checked_mul(size_of::<Option<PreparedBoundaryRoots<'_>>>())
+        .and_then(|bytes| bytes.checked_add(size_of::<PreparedFacePlaneRoots<'_>>()))
+        .and_then(|bytes| bytes.checked_add(snapshot_bytes))
+        .filter(|bytes| *bytes <= maximum_bytes)
+        .ok_or(ValidatedGeometryError::ResourceLimit)?;
+    let mut prepared = PreparedFacePlaneRoots {
+        domain,
+        plane,
+        surface_snapshot: context.surface.clone(),
+        face_orientation: context.domain.face().orientation(),
+        boundaries,
+        retained_bytes,
+    };
+    for binding in bindings {
+        budget.charge(1, cancel)?;
+        validate_binding_input(context.domain, &binding)?;
+        if let Some(previous) = &prepared.boundaries[binding.coedge_index] {
+            if !same_binding(&previous.binding, &binding) {
+                return Err(ValidatedGeometryError::InvalidInput);
             }
-            selected.ok_or(ValidatedGeometryError::Unresolved)
-        })
-        .map_err(|error| {
-            coverage_context(
-                error,
-                "original trim chart / generated candidate start",
-                None,
-            )
-        })
+            continue;
+        }
+        validate_binding_source(context.domain, &binding, budget, cancel)?;
+        let remaining = maximum_bytes
+            .checked_sub(prepared.retained_bytes)
+            .ok_or(ValidatedGeometryError::ResourceLimit)?;
+        let roots = isolate_trim_roots(
+            context,
+            binding.coedge_index,
+            &binding,
+            remaining,
+            budget,
+            cancel,
+        )?;
+        prepared.retained_bytes = prepared
+            .retained_bytes
+            .checked_add(roots.retained_bytes)
+            .ok_or(ValidatedGeometryError::ResourceLimit)?;
+        prepared.boundaries[binding.coedge_index] = Some(PreparedBoundaryRoots { binding, roots });
+    }
+    Ok(prepared)
+}
+
+impl PreparedFacePlaneRoots<'_> {
+    /// Returns owned object, binding-slot, root-capacity and snapshot bytes.
+    ///
+    /// Borrowed original curves, source domain metadata and native topology are
+    /// excluded; their owners must remain charged by the calling query.
+    pub const fn retained_bytes(&self) -> usize { self.retained_bytes }
+
+    pub(super) fn validate_context(
+        &self,
+        context: &FacePlaneContext<'_, '_>,
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), ValidatedGeometryError> {
+        budget.charge(1, cancel)?;
+        if !std::ptr::eq(self.domain, context.domain)
+            || self.plane != context.plane
+            || self.face_orientation != context.domain.face().orientation()
+            || !exact_surface(&self.surface_snapshot, context.surface, 0, budget, cancel)?
+        {
+            return Err(ValidatedGeometryError::InvalidInput);
+        }
+        budget.charge(self.boundaries.len(), cancel)?;
+        for boundary in self.boundaries.iter().flatten() {
+            budget.charge(1, cancel)?;
+            validate_binding_input(context.domain, &boundary.binding)?;
+            validate_binding_source(context.domain, &boundary.binding, budget, cancel)?;
+        }
+        Ok(())
+    }
+
+    /// Selects a numerical UV anchor using an original native cut parameter.
+    ///
+    /// The complete inventories and derivative/crossing witnesses remain
+    /// authoritative; this numerical anchor is not candidate endpoint authority.
+    /// Original and chart gauges are separately retained and never identified.
+    pub fn root_chart_for_cut(
+        &self,
+        coedge_index: usize,
+        source_cut_parameter: f64,
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[ValidatedInterval; 2], ValidatedGeometryError> {
+        budget.charge(1, cancel)?;
+        self.domain
+            .face()
+            .with_surface(|surface| {
+                let context = FacePlaneContext::new(self.domain, surface, self.plane, 0.0)?;
+                self.validate_context(&context, budget, cancel)?;
+                let boundary = self
+                    .boundaries
+                    .get(coedge_index)
+                    .and_then(Option::as_ref)
+                    .ok_or(ValidatedGeometryError::InvalidInput)?;
+                if !source_cut_parameter.is_finite()
+                    || source_cut_parameter < boundary.binding.boundary_range[0]
+                    || source_cut_parameter > boundary.binding.boundary_range[1]
+                {
+                    return Err(ValidatedGeometryError::ParameterOutOfRange);
+                }
+                let mut selected = None;
+                for (&chart, original) in boundary.roots.chart.iter().zip(&boundary.roots.original)
+                {
+                    budget.charge(1, cancel)?;
+                    if source_cut_parameter < original.witness[0]
+                        || source_cut_parameter > original.witness[1]
+                    {
+                        continue;
+                    }
+                    if selected.is_some() {
+                        return Err(ValidatedGeometryError::AmbiguousBranch);
+                    }
+                    selected = Some(
+                        root_chart_enclosure(&context, coedge_index, chart, budget, cancel)?.0,
+                    );
+                }
+                selected.ok_or(ValidatedGeometryError::Unresolved)
+            })
+            .map_err(|error| {
+                coverage_context(
+                    error,
+                    "original trim chart / generated candidate start",
+                    None,
+                )
+            })
+    }
 }
 
 pub(super) fn prepare_endpoints<'a>(
     context: &FacePlaneContext<'_, '_>,
     candidates: &[&PreparedValidatedCurve<'_>],
     bindings: &[ValidatedPlaneTrimEndpointBinding<'a>],
+    roots: &PreparedFacePlaneRoots<'_>,
     maximum_bytes: usize,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
@@ -485,75 +696,41 @@ pub(super) fn prepare_endpoints<'a>(
         ..
     } = context;
     let mut result: Vec<PreparedEndpoint<'a>> = Vec::new();
-    let entry_bytes = size_of::<(EdgeId<Curve>, usize)>() + 8;
-    let map_admission = domain
-        .coedges()
-        .len()
-        .checked_mul(entry_bytes)
-        .and_then(|x| x.checked_mul(8))
-        .ok_or(ValidatedGeometryError::ResourceLimit)?;
-    if map_admission > maximum_bytes {
-        return Err(ValidatedGeometryError::ResourceLimit);
-    }
-    budget.charge(domain.coedges().len(), cancel)?;
-    let mut uses = HashMap::<EdgeId<Curve>, usize>::new();
-    uses.try_reserve(domain.coedges().len())
-        .map_err(|_| ValidatedGeometryError::ResourceLimit)?;
-    let map_bytes = uses
-        .capacity()
-        .checked_mul(entry_bytes)
-        .and_then(|x| x.checked_mul(4))
-        .ok_or(ValidatedGeometryError::ResourceLimit)?;
-    if map_bytes > map_admission {
-        return Err(ValidatedGeometryError::ResourceLimit);
-    }
-    let maximum_bytes = maximum_bytes
-        .checked_sub(map_bytes)
-        .ok_or(ValidatedGeometryError::ResourceLimit)?;
-    for coedge in domain.coedges() {
-        budget.charge(1, cancel)?;
-        uses.entry(coedge.identity.edge_id).or_insert(usize::MAX);
-    }
-    for (binding_index, binding) in bindings.iter().enumerate() {
+    for binding in bindings {
         budget.charge(1, cancel)?;
         if binding.candidate_index >= candidates.len() {
             return Err(ValidatedGeometryError::InvalidInput);
         }
-        validate_binding_input(domain, binding)?;
-        let use_ = uses
-            .get_mut(&binding.original_edge_id)
+        let source = binding.boundary_binding();
+        validate_binding_input(domain, &source)?;
+        if !binding.source_cut_parameter.is_finite()
+            || binding.source_cut_parameter < source.boundary_range[0]
+            || binding.source_cut_parameter > source.boundary_range[1]
+        {
+            return Err(ValidatedGeometryError::ParameterOutOfRange);
+        }
+        let original = roots
+            .boundaries
+            .get(binding.coedge_index)
+            .and_then(Option::as_ref)
             .ok_or(ValidatedGeometryError::InvalidInput)?;
-        if *use_ == usize::MAX {
-            validate_binding_source(domain, binding, budget, cancel)?;
-            *use_ = binding_index;
-        } else {
-            let first = &bindings[*use_];
-            if !std::ptr::eq(binding.boundary, first.boundary)
-                || binding.boundary_range != first.boundary_range
-                || binding.boundary_scale != first.boundary_scale
-            {
-                return Err(ValidatedGeometryError::InvalidInput);
-            }
+        if !same_binding(&source, &original.binding) {
+            return Err(ValidatedGeometryError::InvalidInput);
         }
     }
-    for (index, boundary) in domain.coedges().iter().enumerate() {
-        let &first_index = uses
-            .get(&boundary.identity.edge_id)
-            .ok_or(ValidatedGeometryError::InvalidInput)?;
-        let Some(first) = bindings.get(first_index) else {
-            // Missing incidence is not inferred from a nominal pcurve. The
-            // COMPLETE source-chart uncertainty tube must exclude the plane.
+    for index in 0..domain.coedges().len() {
+        budget.charge(1, cancel)?;
+        let Some(boundary) = &roots.boundaries[index] else {
+            // Missing incidence still needs the complete actual uncertainty
+            // tube to exclude the plane; cached nominal absence is insufficient.
             prove_no_crossing(context, index, budget, cancel)?;
             continue;
         };
-        let occupied = result
-            .capacity()
-            .checked_mul(size_of::<PreparedEndpoint<'_>>())
-            .ok_or(ValidatedGeometryError::ResourceLimit)?;
-        let root_allowance = maximum_bytes
-            .checked_sub(occupied)
-            .ok_or(ValidatedGeometryError::ResourceLimit)?;
-        let roots = isolate_trim_roots(context, index, first, root_allowance, budget, cancel)?;
+        let first = &boundary.binding;
+        let roots = &boundary.roots;
+        if roots.chart.is_empty() {
+            prove_no_crossing(context, index, budget, cancel)?;
+        }
         let scale = ValidatedInterval::point(first.boundary_scale);
         for (&root, &original) in roots.chart.iter().zip(&roots.original) {
             // Native and UV gauges are independently retained. Pair complete
@@ -571,10 +748,7 @@ pub(super) fn prepare_endpoints<'a>(
                 if selected.is_some() {
                     return Err(ValidatedGeometryError::AmbiguousBranch);
                 }
-                if !std::ptr::eq(binding.boundary, first.boundary)
-                    || binding.boundary_scale != first.boundary_scale
-                    || binding.boundary_range != first.boundary_range
-                {
+                if !same_binding(&binding.boundary_binding(), first) {
                     return Err(ValidatedGeometryError::InvalidInput);
                 }
                 selected = Some(binding);
@@ -599,14 +773,7 @@ pub(super) fn prepare_endpoints<'a>(
             {
                 return Err(ValidatedGeometryError::Unresolved);
             }
-            let temporary = roots.retained_bytes;
-            super::super::reserve_native_vec(
-                &mut result,
-                maximum_bytes,
-                temporary,
-                budget,
-                cancel,
-            )?;
+            super::super::reserve_native_vec(&mut result, maximum_bytes, 0, budget, cancel)?;
             result.push(PreparedEndpoint {
                 binding,
                 original,

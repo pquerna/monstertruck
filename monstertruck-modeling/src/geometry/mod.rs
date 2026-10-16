@@ -58,11 +58,12 @@ pub use parameter_curves::{ToCompressedTrimmedParameterCurves, ToTrimmedParamete
 pub use storage::{MAX_NATIVE_GEOMETRY_NESTING, curve_owned_bytes, surface_owned_bytes};
 pub use surface::Surface;
 pub use validated_curve::{
-    CoordinatePlane, PreparedValidatedCurve, ValidatedCurveOptions, ValidatedCurvePiece,
-    ValidatedCurvePoint, ValidatedFacePlaneSource, ValidatedFacePlaneSourceAnchor,
-    ValidatedPlaneCoverage, ValidatedPlaneCoverageOptions, ValidatedPlaneTrimEndpoint,
-    ValidatedPlaneTrimEndpointBinding, prepared_face_plane_curve, prepared_validated_curve,
-    prepared_validated_curve_owned, validated_face_plane_coverage, validated_plane_trim_root_chart,
+    CoordinatePlane, PreparedFacePlaneRoots, PreparedValidatedCurve, ValidatedCurveOptions,
+    ValidatedCurvePiece, ValidatedCurvePoint, ValidatedFacePlaneSource,
+    ValidatedFacePlaneSourceAnchor, ValidatedPlaneCoverage, ValidatedPlaneCoverageOptions,
+    ValidatedPlaneCoverageQuery, ValidatedPlaneTrimBoundaryBinding, ValidatedPlaneTrimEndpoint,
+    ValidatedPlaneTrimEndpointBinding, prepared_face_plane_curve, prepared_face_plane_roots,
+    prepared_validated_curve, prepared_validated_curve_owned, validated_face_plane_coverage,
     validated_same_surface_coefficients,
 };
 pub use validated_interval::{
@@ -71,7 +72,7 @@ pub use validated_interval::{
     ValidatedPlaneCoverageWitness, ValidatedPlaneEndpointWitness, ValidatedPlaneJunctionCondition,
     ValidatedPlaneJunctionRejection, ValidatedPlaneJunctionWitness, ValidatedScalarCurveJet,
     ValidatedSurfaceJet, validated_boundary_jet, validated_curve_jet,
-    validated_curve_projected_jet, validated_curve2d_jet, validated_sin_cos, validated_surface_jet,
-    validated_surface_piecewise_jet,
+    validated_curve_projected_jet, validated_curve2d_jet, validated_sin_cos,
+    validated_surface_geometric_normal, validated_surface_jet, validated_surface_piecewise_jet,
 };
 pub use validated_phase::{validated_asin, validated_atan2};
