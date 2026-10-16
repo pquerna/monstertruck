@@ -86,21 +86,6 @@ fn add_constraint_through_existing_vertices(
     });
 }
 
-fn surface_is_nearly_planar(surface: &impl PreMeshableSurface, boundary: &PolyBoundary) -> bool {
-    let u0 = boundary.uv_min.x;
-    let u1 = boundary.uv_max.x;
-    let v0 = boundary.uv_min.y;
-    let v1 = boundary.uv_max.y;
-    if ![u0, u1, v0, v1].into_iter().all(f64::is_finite) {
-        false
-    } else {
-        let center = ((u0 + u1) * 0.5, (v0 + v1) * 0.5);
-        let normal = surface.normal(center.0, center.1);
-        [(u0, v0), (u1, v0), (u0, v1), (u1, v1), center]
-            .into_iter()
-            .all(|(u, v)| normal.dot(surface.normal(u, v)) > 1.0 - 1.0e-6)
-    }
-}
 
 /// Tessellates a bounded surface without any trimming.
 ///
@@ -878,24 +863,6 @@ fn insert_surface(
         (polyline.uv_min.x, polyline.uv_max.x),
         (polyline.uv_min.y, polyline.uv_max.y),
     );
-    if surface_is_nearly_planar(&surface, polyline) {
-        log_mesh_trace(
-            face_idx,
-            "parameter_division",
-            format!(
-                "range=({:.6},{:.6})x({:.6},{:.6}) planar_skip=true",
-                range.0.0, range.0.1, range.1.0, range.1.1,
-            ),
-            Instant::now(),
-        );
-        log_mesh_trace(
-            face_idx,
-            "insert_surface",
-            "inserted_points=0",
-            Instant::now(),
-        );
-        return;
-    }
     let division_start = Instant::now();
     let (udiv, vdiv) = densify_surface_divisions(
         &surface,
@@ -973,9 +940,10 @@ fn triangulation_into_polymesh<'a>(
     polyline: &PolyBoundary,
     boundary_map: &HashMap<FixedVertexHandle, Point3>,
 ) -> PolygonMesh {
-    let mut positions = Vec::<Point3>::new();
-    let mut uv_coords = Vec::<Vector2>::new();
-    let mut normals = Vec::<Vector3>::new();
+    let vertex_count = vertices.len();
+    let mut positions = Vec::<Point3>::with_capacity(vertex_count);
+    let mut uv_coords = Vec::<Vector2>::with_capacity(vertex_count);
+    let mut normals = Vec::<Vector3>::with_capacity(vertex_count);
     let mut surface_point_cache = HashMap::<UvKey, Point3>::default();
     let mut normal_cache = HashMap::<UvKey, Vector3>::default();
     let vmap: HashMap<_, _> = vertices
@@ -1000,7 +968,8 @@ fn triangulation_into_polymesh<'a>(
             (idx, i)
         })
         .collect();
-    let tri_faces: Vec<[StandardVertex; 3]> = triangles
+    let mut tri_faces = Vec::<[StandardVertex; 3]>::with_capacity(triangles.len());
+    tri_faces.extend(triangles
         .map(|tri| tri.vertices())
         .filter(|tri| {
             fn sp2cg(p: SPoint2) -> Point2 { Point2::new(p.x, p.y) }
@@ -1013,8 +982,7 @@ fn triangulation_into_polymesh<'a>(
         .map(|tri| {
             let idcs = array![i => vmap[&tri[i].fix()]; 3];
             array![i => [idcs[i], idcs[i], idcs[i]].into(); 3]
-        })
-        .collect();
+        }));
     PolygonMesh::debug_new(
         StandardAttributes {
             positions,

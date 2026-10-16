@@ -16,6 +16,13 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Trimmed mesh seeds retain their interior surface parameter subdivisions.
+  Matching normals at four corners and the center no longer masquerade as a
+  whole-surface planarity proof or flatten periodic rational tensors into
+  facets spanning genuine holes.
+  CDT output reserves its known vertex and triangle iterator bounds instead of
+  doubling retained buffers; geometry, attributes and byte accounting remain
+  unchanged.
 - Full and scalar/paired tensor Taylor evaluation separates original row and
   column differences before mixed basis products when both original bases prove
   partition unity. Additive coefficients retain their derivative independence
