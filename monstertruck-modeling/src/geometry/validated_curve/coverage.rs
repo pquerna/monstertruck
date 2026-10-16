@@ -1198,6 +1198,61 @@ fn certified_endpoint_subpath(
     }))
 }
 
+// This is one already-qualified subpath endpoint, not a whole-curve knot query.
+// Bind its complete original projection/range and nested uniqueness domain to
+// this same prepared source. Generic point queries still retain both incident
+// pieces; they need not replace this particular sealed path's authority.
+fn sealed_outer_position(
+    candidate: &PreparedValidatedCurve<'_>,
+    piece: &ValidatedCurvePiece,
+    back: bool,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<[ValidatedInterval; 3], ValidatedGeometryError> {
+    budget.charge(1, cancel)?;
+    candidate.check_range(interval_range(piece.parameter)?)?;
+    let domain = flatten(
+        piece
+            .source_parameters
+            .ok_or(ValidatedGeometryError::InvalidInput)?,
+    );
+    let mut bound = false;
+    for original in &candidate.pieces {
+        budget.charge(1, cancel)?;
+        if original.projection != piece.projection
+            || piece.parameter[0] < original.parameter[0]
+            || piece.parameter[1] > original.parameter[1]
+        {
+            continue;
+        }
+        let original_domain = flatten(
+            original
+                .source_parameters
+                .ok_or(ValidatedGeometryError::InvalidInput)?,
+        );
+        if (0..4).all(|i| {
+            original_domain[i].lower <= domain[i].lower
+                && domain[i].upper <= original_domain[i].upper
+        }) {
+            bound = true;
+            break;
+        }
+    }
+    if !bound {
+        return Err(ValidatedGeometryError::InvalidInput);
+    }
+    super::refine_endpoint(
+        super::Certification::Prepared(candidate),
+        piece.projection,
+        ValidatedInterval::point(piece.parameter[usize::from(!back)]),
+        domain,
+        &candidate.options,
+        budget,
+        cancel,
+    )
+    .map(|(_, position)| position)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum JoinedPaths {
     Covered,
@@ -1218,6 +1273,7 @@ fn joined_paths_cover(
     let (first_curve, first_piece, first_back) = first;
     let (second_curve, second_piece, second_back) = second;
     let mut monotone = false;
+    let mut outer_positions = None;
     for axis in 0..3 {
         budget.charge(1, cancel)?;
         let away = |piece: &ValidatedCurvePiece, back: bool| {
@@ -1277,20 +1333,15 @@ fn joined_paths_cover(
             continue;
         }
         monotone = true;
-        let first_outer = first_curve
-            .evaluate(
-                first_piece.parameter[usize::from(!first_back)],
-                budget,
-                cancel,
-            )?
-            .error[axis];
-        let second_outer = second_curve
-            .evaluate(
-                second_piece.parameter[usize::from(!second_back)],
-                budget,
-                cancel,
-            )?
-            .error[axis];
+        let positions = match &mut outer_positions {
+            Some(positions) => positions,
+            slot => slot.insert((
+                sealed_outer_position(first_curve, first_piece, first_back, budget, cancel)?,
+                sealed_outer_position(second_curve, second_piece, second_back, budget, cancel)?,
+            )),
+        };
+        let first_outer = positions.0[axis];
+        let second_outer = positions.1[axis];
         let (lower, upper) = if first_positive {
             (second_outer, first_outer)
         } else {

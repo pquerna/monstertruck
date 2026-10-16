@@ -427,72 +427,161 @@ pub(super) fn certify(
             break;
         }
     }
-    // This full spatial jet covers every root for the unchanged whole t span.
-    // Scalar inclusion is not authority for a spatial derivative substitute.
-    let rooted = validated_surface_piecewise_jet(
-        source,
-        image.map(|bound| [bound.lower, bound.upper]),
-        budget,
-        cancel,
-    )?;
-    let tangent = cross3(cross3(rooted.du, rooted.dv), chart.normal);
-    let transverse = tangent
-        .map(ValidatedInterval::square)
-        .into_iter()
-        .fold(ZERO, |a, b| a + b);
-    if transverse.lower <= 0.0 {
-        return Err(ValidatedGeometryError::NonTransverse);
-    }
-    budget.charge(1, cancel)?;
     let plane_index = 2 - source_index;
-    let direct_uv = chart.parameters(rooted.position);
-    // Differentiate the exact affine chart functional BEFORE multiplying
-    // source-coordinate displacements. Use rooted gradients only when BOTH
-    // center coordinates lie in that image, proving every segment to a root
-    // stays inside it. Otherwise the convex original source box supplies the
-    // complete gradient hull, including when the center is outside the image.
-    // All exact chart coefficient uncertainty remains outward.
-    budget.charge(1, cancel)?;
-    let center_in_image =
-        (0..2).all(|i| image[i].lower <= middle[i] && middle[i] <= image[i].upper);
-    let original_gradients;
-    let gradients = if center_in_image {
-        &rooted
-    } else {
-        original_gradients = validated_surface_piecewise_jet(
+    let mut refinement_used = false;
+    let mut original_gradients = None;
+    let mut retained_center_chart = None;
+    let (rooted, uv) = loop {
+        // This full spatial jet covers every root for the unchanged whole t
+        // span. Scalar inclusion cannot substitute for spatial derivatives.
+        let rooted = validated_surface_piecewise_jet(
             source,
-            source_domain.map(|bound| [bound.lower, bound.upper]),
+            image.map(|bound| [bound.lower, bound.upper]),
             budget,
             cancel,
         )?;
-        &original_gradients
-    };
-    let image_delta = std::array::from_fn(|i| image[i] - ValidatedInterval::point(middle[i]));
-    let center_chart = projected_surface_functionals(
-        source,
-        middle.map(ValidatedInterval::point),
-        chart.functionals(),
-        &mut ProjectionExecution { budget, cancel },
-    )?
-    .map(|jet| jet.position);
-    let mean_uv =
-        chart.mean_value_parameters(center_chart, gradients, image_delta, budget, cancel)?;
-    let mut uv = direct_uv;
-    for i in 0..2 {
+        let tangent = cross3(cross3(rooted.du, rooted.dv), chart.normal);
+        let transverse = tangent
+            .map(ValidatedInterval::square)
+            .into_iter()
+            .fold(ZERO, |a, b| a + b);
+        if transverse.lower <= 0.0 {
+            return Err(ValidatedGeometryError::NonTransverse);
+        }
         budget.charge(1, cancel)?;
-        uv[i] = direct_uv[i]
-            .intersection(mean_uv[i])
-            .ok_or(ValidatedGeometryError::ConditioningFailure)?;
-    }
-    // The reconstructed entire image must fit the original admitted chart.
-    // Clipping it could silently discard roots certified by the reduced system.
-    if !(0..2).all(|i| {
-        uv[i].is_finite()
-            && domain[plane_index + i].lower <= uv[i].lower
-            && uv[i].upper <= domain[plane_index + i].upper
-    }) {
-        return Err(ValidatedGeometryError::Unresolved);
-    }
+        let direct_uv = chart.parameters(rooted.position);
+        // Differentiate the exact affine chart functional BEFORE multiplying
+        // source-coordinate displacements. Rooted gradients cover the entire
+        // center-to-root segment only if both center coordinates lie in the
+        // image. Otherwise retain the original convex-box gradient hull.
+        budget.charge(1, cancel)?;
+        let center_in_image =
+            (0..2).all(|i| image[i].lower <= middle[i] && middle[i] <= image[i].upper);
+        let gradients = if center_in_image {
+            &rooted
+        } else {
+            match &mut original_gradients {
+                Some(gradients) => gradients,
+                slot => slot.insert(validated_surface_piecewise_jet(
+                    source,
+                    source_domain.map(|bound| [bound.lower, bound.upper]),
+                    budget,
+                    cancel,
+                )?),
+            }
+        };
+        let image_delta = std::array::from_fn(|i| image[i] - ValidatedInterval::point(middle[i]));
+        let center_chart = match retained_center_chart {
+            Some(center) => center,
+            None => {
+                let center = projected_surface_functionals(
+                    source,
+                    middle.map(ValidatedInterval::point),
+                    chart.functionals(),
+                    &mut ProjectionExecution { budget, cancel },
+                )?
+                .map(|jet| jet.position);
+                retained_center_chart = Some(center);
+                center
+            }
+        };
+        let mean_uv =
+            chart.mean_value_parameters(center_chart, gradients, image_delta, budget, cancel)?;
+        let mut uv = direct_uv;
+        for i in 0..2 {
+            budget.charge(1, cancel)?;
+            uv[i] = direct_uv[i]
+                .intersection(mean_uv[i])
+                .ok_or(ValidatedGeometryError::ConditioningFailure)?;
+        }
+        // Reconstructed bounds must fit the immutable original plane domain.
+        // Never clip those bounds into that domain to discard certified roots.
+        if (0..2).all(|i| {
+            uv[i].is_finite()
+                && domain[plane_index + i].lower <= uv[i].lower
+                && uv[i].upper <= domain[plane_index + i].upper
+        }) {
+            break (rooted, uv);
+        }
+        if refinement_used {
+            // The hull of the unchanged center and the WHOLE root image is a
+            // complete convex enclosure of every center-to-root segment. A
+            // center outside the image does not require gradients over the
+            // entire original box when this smaller proved hull is available.
+            // This is another original-source path proof, not UV clipping,
+            // an assumed smaller uniqueness domain or a time-point derivative.
+            budget.charge(1, cancel)?;
+            let segment_domain =
+                std::array::from_fn(|i| image[i].hull(ValidatedInterval::point(middle[i])));
+            if !center_in_image && segment_domain != source_domain {
+                // The old whole-box gradients are dead after their mean-UV
+                // enclosure; reuse that same accounted spatial-jet slot.
+                original_gradients = None;
+                let segment = original_gradients.insert(validated_surface_piecewise_jet(
+                    source,
+                    segment_domain.map(|bound| [bound.lower, bound.upper]),
+                    budget,
+                    cancel,
+                )?);
+                let segment_uv = chart.mean_value_parameters(
+                    center_chart,
+                    segment,
+                    image_delta,
+                    budget,
+                    cancel,
+                )?;
+                for i in 0..2 {
+                    budget.charge(1, cancel)?;
+                    uv[i] = uv[i]
+                        .intersection(segment_uv[i])
+                        .ok_or(ValidatedGeometryError::ConditioningFailure)?;
+                }
+                if (0..2).all(|i| {
+                    uv[i].is_finite()
+                        && domain[plane_index + i].lower <= uv[i].lower
+                        && uv[i].upper <= domain[plane_index + i].upper
+                }) {
+                    break (rooted, uv);
+                }
+            }
+            return Err(ValidatedGeometryError::Unresolved);
+        }
+        refinement_used = true;
+        // Only failed reconstruction needs stronger necessary-root bounds.
+        // Isolate each diagonal in delta = -correction + defect * delta,
+        // retaining the SAME original whole-domain/time Jacobian enclosure.
+        // rho < 1 proves each denominator excludes zero; every update still
+        // intersects the old genuine root image. Existence and uniqueness
+        // remain the original strict Krawczyk proof, not this contraction.
+        budget.charge(2, cancel)?;
+        let inverse_diagonal = [
+            (ONE - defect[0][0]).reciprocal()?,
+            (ONE - defect[1][1]).reciprocal()?,
+        ];
+        let original_image = image;
+        for _ in 0..3 {
+            budget.charge(1, cancel)?;
+            let previous = image;
+            for i in 0..2 {
+                let other = 1 - i;
+                let remainder =
+                    defect[i][other] * (image[other] - ValidatedInterval::point(middle[other]));
+                let isolated = ValidatedInterval::point(middle[i])
+                    + (-correction[i] + remainder) * inverse_diagonal[i];
+                image[i] = image[i]
+                    .intersection(isolated)
+                    .ok_or(ValidatedGeometryError::ConditioningFailure)?;
+            }
+            if image == previous {
+                break;
+            }
+        }
+        if image == original_image {
+            return Err(ValidatedGeometryError::Unresolved);
+        }
+        // Fresh original spatial, derivative and UV proofs must now admit the
+        // contracted whole-time image; the old refused UV bounds grant nothing.
+    };
     let plane_position = chart.position(uv);
     let position = intersect3(rooted.position, plane_position)?;
     let residual = if source_index == 0 {
@@ -810,6 +899,195 @@ mod regressions {
             cancel,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn diagonal_root_image_closure_preserves_both_original_branches_and_whole_raw_time() {
+        let cancel = AtomicBool::new(false);
+        for side in [-1.0, 1.0] {
+            for weight in [-1.0, 1.0] {
+                // The original tensor is S(u,v)=(2u-1,2v-1,(2u-1)^2).
+                // The plane z=1/4 has two components; each original guide
+                // selects one, over its unchanged affine raw time [-2,2].
+                let source = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+                    (KnotVector::bezier_knot(2), KnotVector::bezier_knot(1)),
+                    [(-1.0, 1.0), (0.0, -1.0), (1.0, 1.0)]
+                        .into_iter()
+                        .map(|(x, z)| {
+                            [-1.0, 1.0]
+                                .into_iter()
+                                .map(|y| Vector4::new(x * weight, y * weight, z * weight, weight))
+                                .collect()
+                        })
+                        .collect(),
+                )));
+                let plane = Surface::Plane(Plane::new(
+                    Point3::new(-1.0, -1.0, 0.25),
+                    Point3::new(1.0, -1.0, 0.25),
+                    Point3::new(-1.0, 1.0, 0.25),
+                ));
+                let x = side * 0.5;
+                let u = if side < 0.0 { 0.25 } else { 0.75 };
+                let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+                    Box::new(source),
+                    Box::new(plane),
+                    // The whole v image excludes the original box midpoint;
+                    // reconstructing it still needs the original gradient hull.
+                    Box::new(Curve::Line(Line(
+                        Point3::new(x, 0.5, 0.25),
+                        Point3::new(x, 0.53125, 0.25),
+                    ))),
+                    None,
+                    None,
+                ));
+                let original_u = interval_range([u - 0.21875, u + 0.21875]).unwrap();
+                let original_v = interval_range([0.1, 0.9]).unwrap();
+                let domain = [original_u, original_v, original_u, original_v];
+                let mut work = ValidatedGeometryBudget::new(1_000_000);
+                let tube = certify(
+                    &curve,
+                    Projection::Native,
+                    interval_range([-2.0, 2.0]).unwrap(),
+                    domain,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .unwrap();
+                assert!(matches!(tube.authority, TubeAuthority::Plane(_)));
+                assert_eq!(tube.domain, domain);
+                assert!(tube.contraction_bound() > 0.8 && tube.contraction_bound() < 1.0);
+                let jet = implicit_jet(&tube).unwrap();
+                for carrier in [0, 2] {
+                    contains(tube.rooted_domain[carrier], u);
+                    assert!(tube.rooted_domain[carrier].width() < 1.0e-10);
+                    for v in [0.71875, 0.78125] {
+                        contains(tube.rooted_domain[carrier + 1], v);
+                    }
+                }
+                contains(jet.position[0], x);
+                contains(jet.position[1], 0.4375);
+                contains(jet.position[1], 0.5625);
+                contains(jet.position[2], 0.25);
+                for (axis, first) in [0.0, 0.03125, 0.0].into_iter().enumerate() {
+                    contains(jet.first[axis], first);
+                    contains(jet.second[axis], 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn coupled_original_roots_reconstruct_plane_uvs_on_both_whole_time_branches() {
+        let cancel = AtomicBool::new(false);
+        for side in [-1.0, 1.0] {
+            // Original inverted chart: S(u,v)=(2v-1,2u-1,(2v-1)^2+(2u-1)^2).
+            // The plane cuts a circle. The original line coordinate selects
+            // one of its two x branches over the complete raw time [-2,2].
+            let coefficients = [(-1.0, 1.0), (0.0, -1.0), (1.0, 1.0)];
+            let source = Surface::BsplineSurface(BsplineSurface::new(
+                (KnotVector::bezier_knot(2), KnotVector::bezier_knot(2)),
+                coefficients
+                    .into_iter()
+                    .map(|(x, xx)| {
+                        coefficients
+                            .into_iter()
+                            .map(|(y, yy)| Point3::new(x, y, xx + yy))
+                            .collect()
+                    })
+                    .collect(),
+            ))
+            .inverse();
+            let plane = Surface::Plane(Plane::new(
+                Point3::new(0.0, 0.0, 0.25),
+                Point3::new(1.0, 0.0, 0.25),
+                Point3::new(0.0, 1.0, 0.25),
+            ));
+            let speed = 1.0 / 128.0;
+            // Declare the original affine guide's actual raw restriction.
+            // The identity wrapper keeps its coefficients and parameter gauge.
+            let guide = Curve::TrimmedCurve(Processor::new(TrimmedCurve::new(
+                Box::new(Curve::Line(Line(
+                    Point3::new(side * 0.3, 0.4, 0.25),
+                    Point3::new(side * 0.3, 0.4 + speed, 0.25),
+                ))),
+                (-2.0, 2.0),
+            )));
+            let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+                Box::new(source),
+                Box::new(plane),
+                Box::new(guide),
+                None,
+                None,
+            ));
+            let mut work = ValidatedGeometryBudget::new(1_000_000);
+            let options = ValidatedCurveOptions::default();
+            let prepared =
+                prepared_validated_curve(&curve, [-2.0, 2.0], &options, &mut work, &cancel)
+                    .unwrap();
+            assert_eq!(prepared.range(), [-2.0, 2.0]);
+            let mut covered = -2.0;
+            for piece in prepared.pieces() {
+                assert_eq!(piece.parameter[0], covered);
+                covered = piece.parameter[1];
+                let domain = flatten(piece.source_parameters.expect("original UV binding"));
+                let tube = certify(
+                    &curve,
+                    piece.projection,
+                    interval_range(piece.parameter).unwrap(),
+                    domain,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(tube.domain, domain);
+                for t in piece.parameter {
+                    let y = 0.4 + speed * t;
+                    let x = side * (0.25_f64 - y * y).sqrt();
+                    contains(tube.rooted_domain[0], (y + 1.0) * 0.5);
+                    contains(tube.rooted_domain[1], (x + 1.0) * 0.5);
+                    contains(tube.rooted_domain[2], x);
+                    contains(tube.rooted_domain[3], y);
+                }
+            }
+            assert_eq!(covered, 2.0);
+            let jet = prepared.jet([-2.0, 2.0], &mut work, &cancel).unwrap();
+            assert!(if side > 0.0 {
+                jet.position[0].lower > 0.0
+            } else {
+                jet.position[0].upper < 0.0
+            });
+            for t in [-2.0, 0.0, 2.0] {
+                let y = 0.4 + speed * t;
+                let x = side * (0.25_f64 - y * y).sqrt();
+                contains(jet.position[0], x);
+                contains(jet.position[1], y);
+                contains(jet.position[2], 0.25);
+                contains(jet.first[0], -y * speed / x);
+                contains(jet.first[1], speed);
+                contains(jet.first[2], 0.0);
+                contains(jet.second[0], -0.25 * speed * speed / (x * x * x));
+                contains(jet.second[1], 0.0);
+                contains(jet.second[2], 0.0);
+                let point = prepared.evaluate(t, &mut work, &cancel).unwrap();
+                for (axis, expected) in [x, y, 0.25].into_iter().enumerate() {
+                    contains(point.error[axis], expected);
+                    contains(point.error[axis], point.position[axis]);
+                    assert!(point.error[axis].width() <= options.endpoint_tolerance);
+                }
+            }
+            for outside in [-2.25, 2.25] {
+                assert!(matches!(
+                    prepared.evaluate(outside, &mut work, &cancel),
+                    Err(ValidatedGeometryError::ParameterOutOfRange)
+                ));
+            }
+            assert!(matches!(
+                prepared.evaluate(0.0, &mut work, &AtomicBool::new(true)),
+                Err(ValidatedGeometryError::Cancelled)
+            ));
+        }
     }
 
     #[test]

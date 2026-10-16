@@ -111,6 +111,103 @@ pub(crate) fn validated_projection_leader_jet(
     })
 }
 
+/// Borrows one immutable original leader's admitted knot structure.
+///
+/// Coordinate-plane proposals query many knots of the same original spline.
+/// Admit its complete requested range once, then retain the identical closed
+/// incident-span basis/evidence arithmetic at each point. This receipt carries
+/// no root, containment, smoothness-across-kinks or geometry-replacement authority.
+pub(crate) struct ProjectionLeaderKnotEvaluator<'a> {
+    curve: &'a Curve,
+    range: ValidatedInterval,
+    degree: Option<usize>,
+}
+
+impl<'a> ProjectionLeaderKnotEvaluator<'a> {
+    pub(crate) fn new(
+        curve: &'a Curve,
+        range: [f64; 2],
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, ValidatedGeometryError> {
+        budget.charge(1, cancel)?;
+        let range = interval_range(range)?;
+        let coefficients = match curve {
+            Curve::BsplineCurve(curve) => Some((curve.knot_vector(), curve.control_points().len())),
+            Curve::NurbsCurve(curve) => Some((curve.knot_vector(), curve.control_points().len())),
+            _ => None,
+        };
+        let degree = coefficients
+            .map(|(knots, count)| {
+                validate_knots_with_policy(knots, count, range, false, true, budget, cancel)
+            })
+            .transpose()?;
+        Ok(Self {
+            curve,
+            range,
+            degree,
+        })
+    }
+
+    pub(crate) fn jet(
+        &self,
+        parameter: f64,
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<ValidatedCurveJet, ValidatedGeometryError> {
+        budget.charge(1, cancel)?;
+        if !parameter.is_finite() || parameter < self.range.lower || parameter > self.range.upper {
+            return Err(ValidatedGeometryError::ParameterOutOfRange);
+        }
+        let Some(degree) = self.degree else {
+            return validated_projection_leader_jet(self.curve, [parameter; 2], budget, cancel);
+        };
+        let parameter = Taylor::variable(ValidatedInterval::point(parameter), 0);
+        let values = match self.curve {
+            Curve::BsplineCurve(curve) => {
+                curve_sum_with_validated_knots(
+                    curve.knot_vector(),
+                    (curve.control_points().len(), degree),
+                    parameter,
+                    |i| {
+                        let point = curve.control_points()[i];
+                        [point.x, point.y, point.z]
+                    },
+                    None,
+                    (budget, cancel),
+                )?
+                .values
+            }
+            Curve::NurbsCurve(curve) => {
+                let homogeneous = curve_sum_with_validated_knots(
+                    curve.knot_vector(),
+                    (curve.control_points().len(), degree),
+                    parameter,
+                    |i| {
+                        let point = curve.control_points()[i];
+                        [point.x, point.y, point.z, point.w]
+                    },
+                    Some(3),
+                    (budget, cancel),
+                )?;
+                let values = normalized(homogeneous)?;
+                [values[0], values[1], values[2]]
+            }
+            _ => return Err(ValidatedGeometryError::InvalidInput),
+        };
+        values
+            .into_iter()
+            .try_for_each(|value| value.finite().map(|_| ()))?;
+        let [position, first, second, third] = curve_jet_from_taylor(values);
+        Ok(ValidatedCurveJet {
+            position,
+            first,
+            second,
+            third,
+        })
+    }
+}
+
 /// Encloses a native parameter-space curve, including posed analytic conics.
 pub fn validated_curve2d_jet(
     curve: &Curve2D,
@@ -955,8 +1052,56 @@ fn curve_sum<const N: usize>(
         budget,
         cancel,
     )?;
+    curve_sum_with_validated_knots(
+        knots,
+        (count, degree),
+        parameter,
+        control,
+        weight_axis,
+        (budget, cancel),
+    )
+}
+
+// The caller owns complete immutable knot admission for this same range.
+// Binary searches retain both incident closed spans at an exact knot.
+fn curve_sum_with_validated_knots<const N: usize>(
+    knots: &KnotVector,
+    (count, degree): (usize, usize),
+    parameter: Taylor,
+    control: impl Fn(usize) -> [f64; N],
+    weight_axis: Option<usize>,
+    (budget, cancel): (&mut ValidatedGeometryBudget, &AtomicBool),
+) -> Result<ControlSum<N>, ValidatedGeometryError> {
+    let bound = parameter.0[0][0];
+    let mut boundary = |strict: bool| -> Result<usize, ValidatedGeometryError> {
+        let (mut low, mut high) = (0, knots.len());
+        while low < high {
+            budget.charge(1, cancel)?;
+            let middle = low + (high - low) / 2;
+            if if strict {
+                knots[middle] <= bound.upper
+            } else {
+                knots[middle] < bound.lower
+            } {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        Ok(low)
+    };
+    let first = if bound.lower == knots[0] {
+        0
+    } else {
+        boundary(false)?.saturating_sub(1)
+    };
+    let end = if bound.upper == knots[knots.len() - 1] {
+        knots.len() - 1
+    } else {
+        boundary(true)?.min(knots.len() - 1)
+    };
     let mut result: Option<ControlSum<N>> = None;
-    for span in 0..knots.len() - 1 {
+    for span in first..end {
         budget.charge(1, cancel)?;
         if knots[span] == knots[span + 1] {
             continue;
@@ -1897,7 +2042,127 @@ fn rational_surface<P, const N: usize>(
 #[cfg(test)]
 mod denominator_regressions {
     use super::*;
-    use crate::{BsplineCurve, NurbsCurve, Vector3};
+    use crate::{BsplineCurve, NurbsCurve, Point3, Vector3, Vector4};
+
+    #[test]
+    fn borrowed_original_knot_queries_retain_identical_closed_jets_at_knots_and_between_spans() {
+        let cancel = AtomicBool::new(false);
+        for rational in [false, true] {
+            let knots = KnotVector::from(
+                std::iter::once(0.0)
+                    .chain((0..=128).map(|i| f64::from(i) / 128.0))
+                    .chain(std::iter::once(1.0))
+                    .collect::<Vec<_>>(),
+            );
+            let points = (0..=128)
+                .map(|i| {
+                    let t = f64::from(i) / 128.0;
+                    Point3::new(t, t * t, t * t * t)
+                })
+                .collect::<Vec<_>>();
+            let curve = if rational {
+                Curve::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
+                    knots,
+                    points
+                        .iter()
+                        .enumerate()
+                        .map(|(i, point)| {
+                            let weight = -1.0 - i as f64 / 256.0;
+                            Vector4::new(
+                                point.x * weight,
+                                point.y * weight,
+                                point.z * weight,
+                                weight,
+                            )
+                        })
+                        .collect(),
+                )))
+            } else {
+                Curve::BsplineCurve(BsplineCurve::new(knots, points))
+            };
+            let mut reused_work = ValidatedGeometryBudget::new(1_000_000);
+            let mut repeated_work = ValidatedGeometryBudget::new(1_000_000);
+            let queries =
+                ProjectionLeaderKnotEvaluator::new(&curve, [0.0, 1.0], &mut reused_work, &cancel)
+                    .unwrap();
+            for i in 0..=256 {
+                let t = f64::from(i) / 256.0;
+                let reused = queries.jet(t, &mut reused_work, &cancel).unwrap();
+                let repeated =
+                    validated_projection_leader_jet(&curve, [t; 2], &mut repeated_work, &cancel)
+                        .unwrap();
+                assert_eq!(reused.position, repeated.position);
+                assert_eq!(reused.first, repeated.first);
+                assert_eq!(reused.second, repeated.second);
+                assert_eq!(reused.third, repeated.third);
+                if !rational && i > 0 && i < 256 && i % 2 == 0 {
+                    // The independent piecewise-linear y=t² interpolant has
+                    // distinct adjacent slopes; a closed knot query keeps both.
+                    assert!(reused.first[1].lower <= 2.0 * t - 1.0 / 128.0);
+                    assert!(reused.first[1].upper >= 2.0 * t + 1.0 / 128.0);
+                }
+            }
+            for outside in [-1.0 / 128.0, 1.0 + 1.0 / 128.0] {
+                assert!(matches!(
+                    queries.jet(outside, &mut reused_work, &cancel),
+                    Err(ValidatedGeometryError::ParameterOutOfRange)
+                ));
+            }
+            assert!(matches!(
+                queries.jet(0.5, &mut reused_work, &AtomicBool::new(true)),
+                Err(ValidatedGeometryError::Cancelled)
+            ));
+            assert!(matches!(
+                queries.jet(0.5, &mut ValidatedGeometryBudget::new(0), &cancel),
+                Err(ValidatedGeometryError::ResourceLimit)
+            ));
+        }
+    }
+
+    #[test]
+    fn borrowed_original_knot_queries_preserve_poles_and_discontinuous_source_refusals() {
+        let cancel = AtomicBool::new(false);
+        let pole = Curve::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 1.0, 1.0]),
+            vec![
+                Vector4::new(1.0, 0.0, 0.0, 1.0),
+                Vector4::new(1.0, 0.0, 0.0, -1.0),
+            ],
+        )));
+        let mut work = ValidatedGeometryBudget::new(100_000);
+        let queries =
+            ProjectionLeaderKnotEvaluator::new(&pole, [0.0, 1.0], &mut work, &cancel).unwrap();
+        assert!(matches!(
+            queries.jet(0.5, &mut work, &cancel),
+            Err(ValidatedGeometryError::DenominatorContainsZero)
+        ));
+        let jump = Curve::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 0.5, 0.5, 1.0, 1.0]),
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(0.5, 0.0, 0.0),
+                Point3::new(0.5, 1.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+            ],
+        ));
+        assert!(matches!(
+            ProjectionLeaderKnotEvaluator::new(&jump, [0.0, 1.0], &mut work, &cancel),
+            Err(ValidatedGeometryError::NonSmooth)
+        ));
+        for knots in [
+            KnotVector::from(vec![0.0, 1.0]),
+            KnotVector::from(vec![0.0, 0.0, f64::INFINITY, f64::INFINITY]),
+        ] {
+            let invalid = Curve::BsplineCurve(BsplineCurve::new_unchecked(
+                knots,
+                vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)],
+            ));
+            assert!(matches!(
+                ProjectionLeaderKnotEvaluator::new(&invalid, [0.0, 1.0], &mut work, &cancel),
+                Err(ValidatedGeometryError::InvalidInput)
+            ));
+        }
+    }
 
     #[test]
     fn unit_weight_span_and_negative_equivalent_have_nonzero_denominators() {

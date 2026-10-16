@@ -26,10 +26,10 @@
 //! coverage authorities continue to consume that same original binding.
 
 use super::validated_interval::{
-    ONE, Taylor, ValidatedCurveJet, ValidatedGeometryBudget, ValidatedGeometryError,
-    ValidatedInterval, ValidatedScalarCurveJet, ValidatedSurfaceJet, ZERO, curve_span_smooth,
-    interval_range, processed_parameter, surface_box_smooth, validated_curve_piecewise_jet,
-    validated_curve_position_bounds, validated_curve_projected_jet,
+    ONE, ProjectionLeaderKnotEvaluator, Taylor, ValidatedCurveJet, ValidatedGeometryBudget,
+    ValidatedGeometryError, ValidatedInterval, ValidatedScalarCurveJet, ValidatedSurfaceJet, ZERO,
+    curve_span_smooth, interval_range, processed_parameter, surface_box_smooth,
+    validated_curve_piecewise_jet, validated_curve_position_bounds, validated_curve_projected_jet,
     validated_projection_leader_jet, validated_surface_piecewise_jet,
 };
 use crate::{
@@ -3167,7 +3167,8 @@ fn coordinate_spans(
     reserve_native_vec(&mut knots, memory_limit, 0, budget, cancel)?;
     knots.push(range[1]);
     let mut result = Vec::new();
-    let natural_start = coordinate_plane(leader, knots[0], None, budget, cancel)?;
+    let leader_queries = ProjectionLeaderKnotEvaluator::new(leader, range, budget, cancel)?;
+    let natural_start = coordinate_plane(&leader_queries, knots[0], None, budget, cancel)?;
     let mut previous = endpoint_coordinate_planes[0].map_or(natural_start, |coordinate| {
         coordinate.aligned_to(natural_start)
     });
@@ -3175,7 +3176,7 @@ fn coordinate_spans(
         budget.charge(1, cancel)?;
         let next = match endpoint_coordinate_planes[1].filter(|_| pair[1] == range[1]) {
             Some(coordinate) => coordinate.aligned_to(previous),
-            None => coordinate_plane(leader, pair[1], Some(previous), budget, cancel)?,
+            None => coordinate_plane(&leader_queries, pair[1], Some(previous), budget, cancel)?,
         };
         let parameter = [pair[0], pair[1]];
         if parameter[0] >= parameter[1] {
@@ -3213,7 +3214,14 @@ fn coordinate_spans(
         // Coalescing is optional: retain the original admissible partition if
         // its additional bounded stack cannot coexist with these same buffers.
         if live.is_some_and(|bytes| bytes <= memory_limit) {
-            coalesce_coordinate_spans(leader, &mut result, max_depth, budget, cancel)?;
+            coalesce_coordinate_spans(
+                leader,
+                &leader_queries,
+                &mut result,
+                max_depth,
+                budget,
+                cancel,
+            )?;
         }
     }
     let coalesced = result.len() < previous_count;
@@ -3230,6 +3238,7 @@ const COARSE_COORDINATE_SCRATCH_BYTES: usize = size_of::<[(usize, usize, usize);
 
 fn coalesce_coordinate_spans(
     leader: &Curve,
+    leader_queries: &ProjectionLeaderKnotEvaluator<'_>,
     spans: &mut CoordinateSpans,
     max_depth: usize,
     budget: &mut ValidatedGeometryBudget,
@@ -3254,7 +3263,14 @@ fn coalesce_coordinate_spans(
         let first = spans[start];
         let last = spans[end - 1];
         let range = [first.0[0], last.0[1]];
-        let proposal = coarse_coordinate_proposal(leader, range, [first.1, last.1], budget, cancel);
+        let proposal = coarse_coordinate_proposal(
+            leader,
+            leader_queries,
+            range,
+            [first.1, last.1],
+            budget,
+            cancel,
+        );
         match proposal {
             Ok(Some(projection)) => {
                 spans[output] = (range, projection);
@@ -3281,6 +3297,7 @@ fn coalesce_coordinate_spans(
 
 fn coarse_coordinate_proposal(
     leader: &Curve,
+    leader_queries: &ProjectionLeaderKnotEvaluator<'_>,
     range: [f64; 2],
     projections: [Projection; 2],
     budget: &mut ValidatedGeometryBudget,
@@ -3306,8 +3323,8 @@ fn coarse_coordinate_proposal(
     }
     // Do not turn opposite natural tangent directions into an apparently
     // mergeable proposal merely by negating equivalent plane coefficients.
-    let natural_first = coordinate_plane(leader, range[0], None, budget, cancel)?;
-    let natural_last = coordinate_plane(leader, range[1], None, budget, cancel)?;
+    let natural_first = coordinate_plane(leader_queries, range[0], None, budget, cancel)?;
+    let natural_last = coordinate_plane(leader_queries, range[1], None, budget, cancel)?;
     if !positive_dot(natural_first.normal, natural_last.normal) {
         return Ok(None);
     }
@@ -3326,13 +3343,13 @@ fn coarse_coordinate_proposal(
 }
 
 fn coordinate_plane(
-    leader: &Curve,
+    leader_queries: &ProjectionLeaderKnotEvaluator<'_>,
     parameter: f64,
     previous: Option<CoordinatePlane>,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<CoordinatePlane, ValidatedGeometryError> {
-    let guide = validated_projection_leader_jet(leader, [parameter, parameter], budget, cancel)?;
+    let guide = leader_queries.jet(parameter, budget, cancel)?;
     let point = guide.position.map(ValidatedInterval::midpoint);
     let mut normal = guide.first.map(ValidatedInterval::midpoint);
     let scale = normal.into_iter().map(f64::abs).fold(0.0, f64::max);
@@ -3386,7 +3403,7 @@ mod continuation_regressions {
     use super::*;
     use crate::{
         BsplineSurface, Invertible, Line, NurbsSurface, Processor, RevolutionSurface, TrimmedCurve,
-        Vector4,
+        Vector3, Vector4,
     };
 
     #[test]
@@ -3514,6 +3531,51 @@ mod continuation_regressions {
             None,
             None,
         ))
+    }
+
+    #[test]
+    fn coincident_original_cylinder_charts_do_not_certify_a_selected_seam() {
+        let cancel = AtomicBool::new(false);
+        for opposite_chart in [false, true] {
+            let cylinder = |radius| {
+                Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+                    Curve::Line(Line(
+                        Point3::new(radius, 0.0, 0.0),
+                        Point3::new(radius, 0.0, 1.0),
+                    )),
+                    Point3::new(0.0, 0.0, 0.0),
+                    Vector3::new(0.0, 0.0, 1.0),
+                )))
+            };
+            // Distinct original charts of a coincident carrier do not isolate
+            // a one-dimensional component, even when the leader lies exactly
+            // on both and specifies the desired topological seam.
+            let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+                Box::new(cylinder(2.0)),
+                Box::new(cylinder(if opposite_chart { -2.0 } else { 2.0 })),
+                Box::new(Curve::Line(Line(
+                    Point3::new(2.0, 0.0, 0.0),
+                    Point3::new(2.0, 0.0, 1.0),
+                ))),
+                None,
+                None,
+            ));
+            let mut budget = ValidatedGeometryBudget::new(100_000);
+            assert!(matches!(
+                prepared_validated_curve(
+                    &curve,
+                    [0.0, 1.0],
+                    &ValidatedCurveOptions::default(),
+                    &mut budget,
+                    &cancel,
+                ),
+                Err(ValidatedGeometryError::Singular
+                    | ValidatedGeometryError::ConditioningFailure
+                    | ValidatedGeometryError::NonTransverse
+                    | ValidatedGeometryError::Unresolved)
+            ));
+            assert!(budget.consumed() > 0);
+        }
     }
 
     #[test]
@@ -3758,7 +3820,7 @@ mod continuation_regressions {
         let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
             profile,
             Point3::new(0.0, 0.0, 0.0),
-            crate::Vector3::unit_z(),
+            Vector3::unit_z(),
         )))
         .inverse();
         let plane = Plane::new(
@@ -4025,7 +4087,7 @@ mod continuation_regressions {
     fn owned_original_nested_trim_reuses_the_same_reflections_and_pose() {
         let mut inner = Processor::with_transform(
             TrimmedCurve::new(Box::new(plane_intersection(false)), (0.125, 0.875)),
-            Matrix4::from_translation(crate::Vector3::new(2.0, 3.0, 5.0)),
+            Matrix4::from_translation(Vector3::new(2.0, 3.0, 5.0)),
         );
         inner.invert();
         let mut outer = Processor::with_transform(
@@ -4160,7 +4222,7 @@ mod continuation_regressions {
         let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
             profile,
             Point3::new(0.0, 0.0, 0.0),
-            crate::Vector3::unit_z(),
+            Vector3::unit_z(),
         )))
         .inverse();
         let plane = Plane::new(
@@ -4279,7 +4341,7 @@ mod continuation_regressions {
                 Point3::new(24.0, 1.0, 2.0),
             )),
             Point3::new(22.0, 0.0, 2.0),
-            crate::Vector3::new(-0.0, 1.0, 0.0),
+            Vector3::new(-0.0, 1.0, 0.0),
         )))
         .inverse();
         let height = 0.0999999285714281;
@@ -4350,7 +4412,7 @@ mod continuation_regressions {
                 Point3::new(24.0, 1.0, 2.0),
             )),
             Point3::new(22.0, 0.0, 2.0),
-            crate::Vector3::unit_y(),
+            Vector3::unit_y(),
         )))
         .inverse();
         let angle: f64 = 1.253236011880648;
@@ -4442,7 +4504,7 @@ mod continuation_regressions {
                 Point3::new(24.0, 1.0, 2.0),
             )),
             Point3::new(22.0, 0.0, 2.0),
-            crate::Vector3::unit_y(),
+            Vector3::unit_y(),
         )))
         .inverse();
         let angle: f64 = 1.253236011880648;

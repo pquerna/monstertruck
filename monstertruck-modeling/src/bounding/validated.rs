@@ -140,10 +140,13 @@ pub fn validated_inverse_affine_point(
 /// For a straight revolution, regular profile-coordinate extrema of a compact
 /// face occur on its chart boundary. Possible profile-axis intersections are
 /// included separately because a cone apex can be an interior singular stratum.
-/// The actual stored-axis norm defect is retained in the Rodrigues projection
-/// formula, rather than assuming its rounded normalization is mathematically
-/// unit length. The resulting box is a conservative broad-phase enclosure,
-/// never a tight support witness or a trim-coverage certificate.
+/// Axial projection bounds a profile with nonzero axial slope; otherwise a
+/// lower singular-value bound for the actual Rodrigues map bounds the original
+/// profile from the complete spatial boundary. Neither path clamps an original
+/// line's affine continuation to its displayed unit interval. The stored-axis
+/// norm defect is retained rather than assuming its rounded normalization is
+/// mathematically unit length. The result is a conservative broad-phase
+/// enclosure, never a tight support witness or a trim-coverage certificate.
 ///
 /// The caller must already have admitted the face topology and boundary/carrier
 /// correspondence. A disconnected or geometrically inconsistent input does not
@@ -203,12 +206,47 @@ pub fn validated_face_bounding_box_with_boundary_enclosure(
                 let offset = std::array::from_fn(|i| p0[i] - origin[i]);
                 let direction = std::array::from_fn(|i| p1[i] - p0[i]);
                 let axis_squared = dot(axis, axis);
-                let factor = point(1.0)? + Interval::new(0.0, 2.0)? * (axis_squared - point(1.0)?);
-                let along = dot(axis, std::array::from_fn(|i| local[i] - origin[i]))
-                    * factor.reciprocal()?;
                 let slope = dot(axis, direction);
                 let intercept = dot(axis, offset);
-                let mut profile_range = (along - intercept) * slope.reciprocal()?;
+                let mut profile_range = if slope.contains_zero() {
+                    budget.charge(1, cancel)?;
+                    // On the axis, Rodrigues has eigenvalue q+(1-q)cos(v);
+                    // on its orthogonal plane the squared length factor is
+                    // cos(v)^2+q*sin(v)^2, where q is the actual axis norm
+                    // squared. Thus min(1,2q-1)>0 bounds every singular value
+                    // below, including every full-period angle. The spatial
+                    // L1 radius bounds the Euclidean radius without a rounded
+                    // square-root premise. Inverting one nonconstant original
+                    // profile coordinate then encloses every boundary t.
+                    let minimum = point(1.0)? + point(2.0)? * (axis_squared - point(1.0)?);
+                    if minimum.lower <= 0.0 {
+                        return Err(ValidatedGeometryError::ConditioningFailure);
+                    }
+                    let inverse_minimum =
+                        Interval::new(minimum.lower.min(1.0), 1.0)?.reciprocal()?;
+                    let radius = (0..3)
+                        .map(|i| point((local[i] - origin[i]).magnitude()))
+                        .try_fold(point(0.0)?, |sum, value| {
+                            Ok::<_, ValidatedGeometryError>(sum + value?)
+                        })?
+                        * inverse_minimum;
+                    let index = (0..3)
+                        .filter(|i| !direction[*i].contains_zero())
+                        .max_by(|a, b| {
+                            direction[*a]
+                                .magnitude()
+                                .total_cmp(&direction[*b].magnitude())
+                        })
+                        .ok_or(ValidatedGeometryError::Singular)?;
+                    (Interval::new(-radius.upper, radius.upper)? - offset[index])
+                        * direction[index].reciprocal()?
+                } else {
+                    let factor =
+                        point(1.0)? + Interval::new(0.0, 2.0)? * (axis_squared - point(1.0)?);
+                    let along = dot(axis, std::array::from_fn(|i| local[i] - origin[i]))
+                        * factor.reciprocal()?;
+                    (along - intercept) * slope.reciprocal()?
+                };
                 let inverse_axis_squared = axis_squared.reciprocal()?;
                 let radial_offset: [Interval; 3] =
                     std::array::from_fn(|i| offset[i] - axis[i] * intercept * inverse_axis_squared);
@@ -288,6 +326,86 @@ mod tests {
         (0..3).for_each(|i| {
             assert!(enclosure[i].lower <= source[i] && source[i] <= enclosure[i].upper);
         });
+    }
+
+    #[test]
+    fn radial_revolution_bounds_whole_original_affine_profile_and_stored_axis() {
+        let cancel = AtomicBool::new(false);
+        for oblique in [false, true] {
+            for inverted in [false, true] {
+                let origin = Point3::new(1.0, -2.0, 0.5);
+                let (axis, first, last) = if oblique {
+                    (
+                        Vector3::new(1.0, 1.0, 1.0),
+                        Point3::new(3.0, -4.0, 3.5),
+                        Point3::new(4.0, -5.0, 3.5),
+                    )
+                } else {
+                    (
+                        Vector3::unit_z(),
+                        Point3::new(3.0, -2.0, 3.5),
+                        Point3::new(4.0, -2.0, 3.5),
+                    )
+                };
+                let frame = Matrix4::from_cols(
+                    Vector4::new(2.0, 0.0, 0.0, 0.0),
+                    Vector4::new(0.5, -3.0, 0.0, 0.0),
+                    Vector4::new(0.0, 0.25, 4.0, 0.0),
+                    Vector4::new(5.0, -6.0, 7.0, 1.0),
+                );
+                let mut processor = Processor::with_transform(
+                    RevolutionSurface::by_revolution(Curve::Line(Line(first, last)), origin, axis),
+                    frame,
+                );
+                if inverted {
+                    processor.invert();
+                }
+                let surface = Surface::RevolutionSurface(processor);
+                let uv = |t, angle| {
+                    if inverted {
+                        Point2::new(angle, t)
+                    } else {
+                        Point2::new(t, angle)
+                    }
+                };
+                // The actual material uses t in [2,4], entirely outside the
+                // displayed unit interval of the original affine profile.
+                let corners = [uv(2.0, 0.0), uv(4.0, 0.0), uv(4.0, 1.75), uv(2.0, 1.75)];
+                let vertices = corners.map(|uv| Vertex::new(surface.subs(uv.x, uv.y)));
+                let wire = Wire::from(
+                    (0..4)
+                        .map(|i| {
+                            let next = (i + 1) % 4;
+                            Edge::new(
+                                &vertices[i],
+                                &vertices[next],
+                                Curve::ParameterCurve(ParameterCurve::new(
+                                    Curve2D::Line(Line(corners[i], corners[next])),
+                                    Box::new(surface.clone()),
+                                )),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                let face = Face::new(vec![wire], surface.clone());
+                let bounds = validated_face_bounding_box(
+                    &face,
+                    &mut ValidatedGeometryBudget::new(100_000),
+                    &cancel,
+                )
+                .expect("radial ruling does not require a nonzero axial slope");
+                for t in [2.0, 2.5, 3.0, 3.5, 4.0] {
+                    for angle in [0.0, 0.25, 0.875, 1.25, 1.75] {
+                        let uv = uv(t, angle);
+                        let actual = surface.subs(uv.x, uv.y);
+                        for coordinate in 0..3 {
+                            assert!(bounds.min()[coordinate] <= actual[coordinate]);
+                            assert!(actual[coordinate] <= bounds.max()[coordinate]);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
