@@ -1,6 +1,6 @@
 use super::explicit::{
     basis, clipped_parameter, curve_taylor_with_extension, curve2d_taylor, processed_parameter,
-    processed_parameter_with_extension, surface_taylor_with_policy, validate_knots,
+    processed_parameter_with_extension, surface_taylor_with_policy, validate_knots_with_policy,
 };
 use super::{
     Taylor, ValidatedGeometryBudget, ValidatedGeometryError as E, ValidatedInterval as I,
@@ -25,6 +25,429 @@ pub(crate) struct ScalarProjection<const N: usize> {
 pub(crate) struct ProjectionExecution<'a> {
     pub(crate) budget: &'a mut ValidatedGeometryBudget,
     pub(crate) cancel: &'a AtomicBool,
+}
+
+#[derive(Clone, Copy)]
+struct SplineProjectionPolicy {
+    rational: bool,
+    allow_c0: bool,
+}
+
+/// Keep an interval displacement origin inside every source coefficient.
+#[derive(Clone, Copy)]
+pub(crate) struct SurfaceFunctional {
+    pub(crate) direction: [I; 3],
+    pub(crate) origin: [I; 3],
+    pub(crate) offset: I,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SurfaceFunctionalJet {
+    pub(crate) position: I,
+    pub(crate) du: I,
+    pub(crate) dv: I,
+}
+
+impl SurfaceFunctional {
+    fn homogeneous(self, point: [I; 4]) -> Result<I, E> {
+        if !point.into_iter().all(I::is_finite) {
+            return Err(E::InvalidInput);
+        }
+        let value = (0..3)
+            .map(|i| self.direction[i] * (point[i] - self.origin[i] * point[3]))
+            .fold(self.offset * point[3], |a, b| a + b);
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(E::ConditioningFailure)
+        }
+    }
+}
+
+/// Original piecewise first jets, sharing basis and denominator admission.
+/// This grants no new smoothness or Hessian authority; existing scalar callers
+/// retain their original admission policy.
+pub(crate) fn projected_surface_functionals(
+    surface: &Surface,
+    domain: [I; 2],
+    functionals: [SurfaceFunctional; 2],
+    execution: &mut ProjectionExecution<'_>,
+) -> Result<[SurfaceFunctionalJet; 2], E> {
+    execution.budget.charge(1, execution.cancel)?;
+    if !domain.into_iter().all(I::is_finite)
+        || !functionals.into_iter().all(|functional| {
+            functional
+                .direction
+                .into_iter()
+                .chain(functional.origin)
+                .chain([functional.offset])
+                .all(I::is_finite)
+        })
+    {
+        return Err(E::ConditioningFailure);
+    }
+    let uv = [
+        Taylor::variable(domain[0], 0),
+        Taylor::variable(domain[1], 1),
+    ];
+    let values = match surface {
+        Surface::BsplineSurface(surface) => projected_tensor_functionals(
+            (surface.knot_vectors(), surface.control_points()),
+            uv,
+            |point| [point.x, point.y, point.z],
+            |point| {
+                let point = [
+                    I::point(point[0]),
+                    I::point(point[1]),
+                    I::point(point[2]),
+                    I::point(1.0),
+                ];
+                Ok([
+                    functionals[0].homogeneous(point)?,
+                    functionals[1].homogeneous(point)?,
+                ])
+            },
+            |point, reference| {
+                let point = [
+                    I::point(point[0]) - I::point(reference[0]),
+                    I::point(point[1]) - I::point(reference[1]),
+                    I::point(point[2]) - I::point(reference[2]),
+                    ZERO,
+                ];
+                Ok([
+                    functionals[0].homogeneous(point)?,
+                    functionals[1].homogeneous(point)?,
+                ])
+            },
+            SplineProjectionPolicy {
+                rational: false,
+                allow_c0: true,
+            },
+            execution,
+        )?,
+        Surface::NurbsSurface(surface) => projected_tensor_functionals(
+            (surface.knot_vectors(), surface.control_points()),
+            uv,
+            |point| [point.x, point.y, point.z, point.w],
+            |point| {
+                let point = point.map(I::point);
+                Ok([
+                    functionals[0].homogeneous(point)?,
+                    functionals[1].homogeneous(point)?,
+                ])
+            },
+            |point, reference| {
+                let point = std::array::from_fn(|i| I::point(point[i]) - I::point(reference[i]));
+                Ok([
+                    functionals[0].homogeneous(point)?,
+                    functionals[1].homogeneous(point)?,
+                ])
+            },
+            SplineProjectionPolicy {
+                rational: true,
+                allow_c0: true,
+            },
+            execution,
+        )?,
+        Surface::RevolutionSurface(processor)
+            if matches!(
+                processor.entity().entity_curve(),
+                Curve::Line(_) | Curve::BsplineCurve(_) | Curve::NurbsCurve(_)
+            ) =>
+        {
+            projected_revolution_pair(surface, uv, functionals, execution)?
+        }
+        _ => {
+            // Shared original evaluation, never a substituted carrier family.
+            // The complete interval leader is subtracted BEFORE its normal.
+            let source = surface_taylor_with_policy(
+                surface,
+                uv[0],
+                uv[1],
+                0,
+                true,
+                execution.budget,
+                execution.cancel,
+            )?;
+            functionals.map(|functional| {
+                (0..3)
+                    .map(|i| {
+                        (source[i] - Taylor::interval(functional.origin[i]))
+                            * Taylor::interval(functional.direction[i])
+                    })
+                    .fold(Taylor::interval(functional.offset), |a, b| a + b)
+            })
+        }
+    };
+    let mut result = [SurfaceFunctionalJet {
+        position: ZERO,
+        du: ZERO,
+        dv: ZERO,
+    }; 2];
+    for k in 0..2 {
+        let value = values[k].finite()?;
+        result[k] = SurfaceFunctionalJet {
+            position: value.0[0][0],
+            du: value.0[1][0],
+            dv: value.0[0][1],
+        };
+    }
+    Ok(result)
+}
+
+fn projected_revolution_pair(
+    surface: &Surface,
+    uv: [Taylor; 2],
+    functionals: [SurfaceFunctional; 2],
+    execution: &mut ProjectionExecution<'_>,
+) -> Result<[Taylor; 2], E> {
+    let Surface::RevolutionSurface(processor) = surface else {
+        unreachable!()
+    };
+    let matrix = processor.transform();
+    if matches!(
+        processor.entity().entity_curve(),
+        Curve::Line(_) | Curve::BsplineCurve(_)
+    ) && (0..3).all(|j| matrix[j][3] == 0.0)
+        && matrix[3][3] == 1.0
+    {
+        // Polynomial profiles under an actual affine processor have no
+        // denominator to subdivide. Keep their basis/admission in the same
+        // coefficient evaluator, without reserving the rational stack.
+        return projected_revolution_cell(surface, uv, functionals, execution);
+    }
+    projected_revolution_subdivided(surface, uv, functionals, execution)
+}
+
+fn projected_revolution_subdivided(
+    surface: &Surface,
+    uv: [Taylor; 2],
+    functionals: [SurfaceFunctional; 2],
+    execution: &mut ProjectionExecution<'_>,
+) -> Result<[Taylor; 2], E> {
+    let mut pending = [(uv, 0usize); 49];
+    let mut length = 1;
+    let mut result: Option<[Taylor; 2]> = None;
+    while length != 0 {
+        execution.budget.charge(1, execution.cancel)?;
+        length -= 1;
+        let (uv, depth) = pending[length];
+        match projected_revolution_cell(surface, uv, functionals, execution) {
+            Ok(value) => {
+                result = Some(result.map_or(value, |previous| {
+                    std::array::from_fn(|i| previous[i].hull(value[i]))
+                }))
+            }
+            Err(E::DenominatorContainsZero) => {
+                let axis = usize::from(uv[1].0[0][0].width() > uv[0].0[0][0].width());
+                let middle = uv[axis].0[0][0].midpoint();
+                if depth == 48
+                    || middle <= uv[axis].0[0][0].lower
+                    || middle >= uv[axis].0[0][0].upper
+                {
+                    return Err(E::DenominatorContainsZero);
+                }
+                let mut lower = uv;
+                let mut upper = uv;
+                lower[axis].0[0][0].upper = middle;
+                upper[axis].0[0][0].lower = middle;
+                execution.budget.charge(2, execution.cancel)?;
+                pending[length] = (upper, depth + 1);
+                pending[length + 1] = (lower, depth + 1);
+                length += 2;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    result.ok_or(E::ParameterOutOfRange)
+}
+
+fn projected_revolution_cell(
+    surface: &Surface,
+    [u, v]: [Taylor; 2],
+    functionals: [SurfaceFunctional; 2],
+    execution: &mut ProjectionExecution<'_>,
+) -> Result<[Taylor; 2], E> {
+    let Surface::RevolutionSurface(processor) = surface else {
+        unreachable!()
+    };
+    let (u, v) = if processor.orientation() {
+        (u, v)
+    } else {
+        (v, u)
+    };
+    let revolution = processor.entity();
+    let matrix = *processor.transform();
+    let origin = revolution.origin();
+    let origin = [origin.x, origin.y, origin.z].map(I::point);
+    let axis = revolution.axis();
+    let axis = [axis.x, axis.y, axis.z].map(I::point);
+    if !(0..4).all(|j| (0..4).all(|i| matrix[j][i].is_finite()))
+        || !origin.into_iter().chain(axis).all(I::is_finite)
+    {
+        return Err(E::InvalidInput);
+    }
+    let affine = (0..3).all(|j| matrix[j][3] == 0.0) && matrix[3][3] == 1.0;
+    let denominator_direction = [matrix[0][3], matrix[1][3], matrix[2][3]].map(I::point);
+    let denominator_origin = (0..3)
+        .map(|j| denominator_direction[j] * origin[j])
+        .fold(I::point(matrix[3][3]), |a, b| a + b);
+    let mut directions = [[ZERO; 3]; 2];
+    let mut constants = [ZERO; 2];
+    for k in 0..2 {
+        let functional = functionals[k];
+        for j in 0..3 {
+            directions[k][j] = (0..3)
+                .map(|i| {
+                    functional.direction[i]
+                        * (I::point(matrix[j][i]) - functional.origin[i] * denominator_direction[j])
+                })
+                .fold(functional.offset * denominator_direction[j], |a, b| a + b);
+        }
+        // Center spatial coefficients before applying their normal; affine
+        // placement translations cancel before profile/basis separation.
+        constants[k] = (0..3)
+            .map(|i| {
+                let centered = (0..3).map(|j| I::point(matrix[j][i]) * origin[j]).fold(
+                    I::point(matrix[3][i]) - functional.origin[i] * denominator_origin,
+                    |a, b| a + b,
+                );
+                functional.direction[i] * centered
+            })
+            .fold(functional.offset * denominator_origin, |a, b| a + b);
+    }
+    let (sine, cosine) = v.sin_cos();
+    let decompose = |point: [I; 4]| {
+        let delta: [I; 3] = std::array::from_fn(|i| point[i] - origin[i] * point[3]);
+        let axial = (0..3).map(|i| axis[i] * delta[i]).fold(ZERO, |a, b| a + b);
+        [
+            axis.map(|value| value * axial),
+            std::array::from_fn(|i| delta[i] - axis[i] * axial),
+            [
+                axis[1] * delta[2] - axis[2] * delta[1],
+                axis[2] * delta[0] - axis[0] * delta[2],
+                axis[0] * delta[1] - axis[1] * delta[0],
+            ],
+        ]
+    };
+    let project = |components: [[I; 3]; 3], direction: [I; 3], constant: I| {
+        let scalar = components.map(|vector| {
+            (0..3)
+                .map(|i| direction[i] * vector[i])
+                .fold(ZERO, |a, b| a + b)
+        });
+        // Rotation is applied to scalar CONTROL coefficients, before the
+        // original shared profile basis. No spatial surface jet is built.
+        let mut value = Taylor::interval(constant + scalar[0]);
+        if scalar[1] != ZERO {
+            value = value + Taylor::interval(scalar[1]) * cosine;
+        }
+        if scalar[2] != ZERO {
+            value = value + Taylor::interval(scalar[2]) * sine;
+        }
+        value
+    };
+    if affine {
+        projected_profile_functionals(
+            revolution.entity_curve(),
+            u,
+            |point| {
+                let components = decompose(point);
+                Ok(std::array::from_fn(|k| {
+                    project(components, directions[k], constants[k] * point[3])
+                }))
+            },
+            execution,
+        )
+    } else {
+        let values = projected_profile_functionals(
+            revolution.entity_curve(),
+            u,
+            |point| {
+                let components = decompose(point);
+                Ok([
+                    project(components, directions[0], constants[0] * point[3]),
+                    project(components, directions[1], constants[1] * point[3]),
+                    project(
+                        components,
+                        denominator_direction,
+                        denominator_origin * point[3],
+                    ),
+                ])
+            },
+            execution,
+        )?;
+        let reciprocal = values[2].reciprocal()?;
+        Ok([values[0] * reciprocal, values[1] * reciprocal])
+    }
+}
+
+fn projected_profile_functionals<const K: usize>(
+    curve: &Curve,
+    parameter: Taylor,
+    coefficient: impl Fn([I; 4]) -> Result<[Taylor; K], E>,
+    execution: &mut ProjectionExecution<'_>,
+) -> Result<[Taylor; K], E> {
+    execution.budget.charge(1, execution.cancel)?;
+    let checked_coefficient = |point: [I; 4]| {
+        if !point.into_iter().all(I::is_finite) {
+            return Err(E::InvalidInput);
+        }
+        coefficient(point)
+    };
+    match curve {
+        Curve::Line(line) => {
+            let a = [line.0.x, line.0.y, line.0.z, 1.0].map(I::point);
+            let b = [line.1.x, line.1.y, line.1.z, 1.0].map(I::point);
+            let start = checked_coefficient(a)?;
+            let delta = checked_coefficient(std::array::from_fn(|i| b[i] - a[i]))?;
+            Ok(std::array::from_fn(|i| {
+                if delta[i].0 == Taylor::ZERO.0 {
+                    start[i]
+                } else {
+                    start[i] + delta[i] * parameter
+                }
+            }))
+        }
+        Curve::BsplineCurve(curve) => projected_spline_cell(
+            (curve.knot_vector(), curve.control_points().len()),
+            parameter,
+            &|i| {
+                let point = curve.control_points()[i];
+                [point.x, point.y, point.z]
+            },
+            &|point| {
+                checked_coefficient([
+                    I::point(point[0]),
+                    I::point(point[1]),
+                    I::point(point[2]),
+                    I::point(1.0),
+                ])
+            },
+            SplineProjectionPolicy {
+                rational: false,
+                allow_c0: true,
+            },
+            false,
+            execution,
+        ),
+        Curve::NurbsCurve(curve) => projected_spline_cell(
+            (curve.knot_vector(), curve.control_points().len()),
+            parameter,
+            &|i| {
+                let point = curve.control_points()[i];
+                [point.x, point.y, point.z, point.w]
+            },
+            &|point| checked_coefficient(point.map(I::point)),
+            SplineProjectionPolicy {
+                rational: true,
+                allow_c0: true,
+            },
+            false,
+            execution,
+        ),
+        _ => unreachable!(),
+    }
 }
 
 /// Encloses `direction dot (curve(t) - origin)` before coordinate separation.
@@ -381,15 +804,58 @@ fn projected_tensor<P, const N: usize>(
     rational: bool,
     execution: &mut ProjectionExecution<'_>,
 ) -> Result<Taylor, E> {
+    projected_tensor_functionals(
+        source,
+        uv,
+        control,
+        |point| {
+            Ok([coefficient(
+                point,
+                projection.direction,
+                projection.offset,
+                projection.center,
+            )?])
+        },
+        |point, reference| Ok([dot_difference(point, reference, projection.direction)?]),
+        SplineProjectionPolicy {
+            rational,
+            allow_c0: false,
+        },
+        execution,
+    )
+    .map(|[value]| value)
+}
+
+fn projected_tensor_functionals<P, const N: usize, const K: usize>(
+    source: (&(KnotVector, KnotVector), &[Vec<P>]),
+    uv: [Taylor; 2],
+    control: impl Fn(&P) -> [f64; N],
+    coefficient: impl Fn([f64; N]) -> Result<[I; K], E>,
+    difference: impl Fn([f64; N], [f64; N]) -> Result<[I; K], E>,
+    policy: SplineProjectionPolicy,
+    execution: &mut ProjectionExecution<'_>,
+) -> Result<[Taylor; K], E> {
     let mut pending = [(uv, 0usize); 49];
     let mut length = 1;
-    let mut result: Option<Taylor> = None;
+    let mut result: Option<[Taylor; K]> = None;
     while length != 0 {
         execution.budget.charge(1, execution.cancel)?;
         length -= 1;
         let (uv, depth) = pending[length];
-        match projected_tensor_cell(source, uv, &control, projection, rational, execution) {
-            Ok(value) => result = Some(result.map_or(value, |previous| previous.hull(value))),
+        match projected_tensor_cell(
+            source,
+            uv,
+            &control,
+            &coefficient,
+            &difference,
+            policy,
+            execution,
+        ) {
+            Ok(value) => {
+                result = Some(result.map_or(value, |previous| {
+                    std::array::from_fn(|i| previous[i].hull(value[i]))
+                }));
+            }
             Err(E::DenominatorContainsZero) => {
                 let axis = usize::from(uv[1].0[0][0].width() > uv[0].0[0][0].width());
                 let middle = uv[axis].0[0][0].midpoint();
@@ -414,14 +880,15 @@ fn projected_tensor<P, const N: usize>(
     result.ok_or(E::ParameterOutOfRange)
 }
 
-fn projected_tensor_cell<P, const N: usize>(
+fn projected_tensor_cell<P, const N: usize, const K: usize>(
     (knots, controls): (&(KnotVector, KnotVector), &[Vec<P>]),
     [u, v]: [Taylor; 2],
     control: &impl Fn(&P) -> [f64; N],
-    projection: ScalarProjection<N>,
-    rational: bool,
+    coefficient: &impl Fn([f64; N]) -> Result<[I; K], E>,
+    difference: &impl Fn([f64; N], [f64; N]) -> Result<[I; K], E>,
+    SplineProjectionPolicy { rational, allow_c0 }: SplineProjectionPolicy,
     execution: &mut ProjectionExecution<'_>,
-) -> Result<Taylor, E> {
+) -> Result<[Taylor; K], E> {
     if controls.is_empty() || controls[0].is_empty() {
         return Err(E::InvalidInput);
     }
@@ -433,23 +900,25 @@ fn projected_tensor_cell<P, const N: usize>(
             return Err(E::InvalidInput);
         }
     }
-    let pu = validate_knots(
+    let pu = validate_knots_with_policy(
         &knots.0,
         nu,
         u.0[0][0],
         true,
+        allow_c0,
         execution.budget,
         execution.cancel,
     )?;
-    let pv = validate_knots(
+    let pv = validate_knots_with_policy(
         &knots.1,
         nv,
         v.0[0][0],
         true,
+        allow_c0,
         execution.budget,
         execution.cancel,
     )?;
-    let mut result: Option<Taylor> = None;
+    let mut result: Option<[Taylor; K]> = None;
     for su in 0..knots.0.len() - 1 {
         execution.budget.charge(1, execution.cancel)?;
         if knots.0[su] == knots.0[su + 1] {
@@ -495,36 +964,31 @@ fn projected_tensor_cell<P, const N: usize>(
                 [0.0; N]
             };
             let mut numerator = if partition {
-                Taylor::interval(coefficient(
-                    reference,
-                    projection.direction,
-                    projection.offset,
-                    projection.center,
-                )?)
+                coefficient(reference)?.map(Taylor::interval)
             } else {
-                Taylor::ZERO
+                [Taylor::ZERO; K]
             };
             let mut denominator = Taylor::constant(if partition { reference[N - 1] } else { 0.0 });
-            let mut numerator_hull: Option<I> = None;
+            let mut numerator_hull: [Option<I>; K] = [None; K];
             let mut denominator_hull: Option<I> = None;
             for (i, a) in bu[..lu].iter().enumerate() {
                 for (j, b) in bv[..lv].iter().enumerate() {
                     execution.budget.charge(1, execution.cancel)?;
                     let point = control(&controls[iu + i][iv + j]);
-                    let value = coefficient(
-                        point,
-                        projection.direction,
-                        projection.offset,
-                        projection.center,
-                    )?;
+                    let value = coefficient(point)?;
                     let residual = if partition {
-                        dot_difference(point, reference, projection.direction)?
+                        difference(point, reference)?
                     } else {
                         value
                     };
                     let basis = *a * *b;
-                    numerator = numerator + Taylor::interval(residual) * basis;
-                    numerator_hull = Some(numerator_hull.map_or(value, |hull| hull.hull(value)));
+                    for k in 0..K {
+                        if residual[k] != ZERO {
+                            numerator[k] = numerator[k] + Taylor::interval(residual[k]) * basis;
+                        }
+                        numerator_hull[k] =
+                            Some(numerator_hull[k].map_or(value[k], |hull| hull.hull(value[k])));
+                    }
                     if rational {
                         let weight = I::point(point[N - 1]);
                         let residual =
@@ -540,10 +1004,12 @@ fn projected_tensor_cell<P, const N: usize>(
                 && knots.1[sv] <= v.0[0][0].lower
                 && v.0[0][0].upper <= knots.1[sv + 1];
             if partition && nonnegative {
-                if let Some(hull) = numerator_hull {
-                    numerator.0[0][0] = numerator.0[0][0]
-                        .intersection(hull)
-                        .ok_or(E::ConditioningFailure)?;
+                for k in 0..K {
+                    if let Some(hull) = numerator_hull[k] {
+                        numerator[k].0[0][0] = numerator[k].0[0][0]
+                            .intersection(hull)
+                            .ok_or(E::ConditioningFailure)?;
+                    }
                 }
                 if let Some(hull) = denominator_hull {
                     denominator.0[0][0] = denominator.0[0][0]
@@ -552,11 +1018,14 @@ fn projected_tensor_cell<P, const N: usize>(
                 }
             }
             let value = if rational {
-                numerator * denominator.reciprocal()?
+                let reciprocal = denominator.reciprocal()?;
+                numerator.map(|value| value * reciprocal)
             } else {
                 numerator
             };
-            result = Some(result.map_or(value, |previous| previous.hull(value)));
+            result = Some(result.map_or(value, |previous| {
+                std::array::from_fn(|i| previous[i].hull(value[i]))
+            }));
         }
     }
     result.ok_or(E::ParameterOutOfRange)
@@ -1037,8 +1506,25 @@ pub(crate) fn projected_spline<const N: usize>(
         length -= 1;
         let (parameter, depth) = stack[length];
         let attempt = projected_spline_cell(
-            knots, count, parameter, &control, projection, rational, execution,
-        );
+            (knots, count),
+            parameter,
+            &control,
+            &|point| {
+                Ok([Taylor::interval(coefficient(
+                    point,
+                    projection.direction,
+                    projection.offset,
+                    projection.center,
+                )?)])
+            },
+            SplineProjectionPolicy {
+                rational,
+                allow_c0: false,
+            },
+            true,
+            execution,
+        )
+        .map(|[value]| value);
         match attempt {
             Ok(value) => {
                 result = Some(match result {
@@ -1070,29 +1556,25 @@ pub(crate) fn projected_spline<const N: usize>(
     result.ok_or(E::ParameterOutOfRange)
 }
 
-fn projected_spline_cell<const N: usize>(
-    knots: &KnotVector,
-    count: usize,
+fn projected_spline_cell<const N: usize, const K: usize>(
+    (knots, count): (&KnotVector, usize),
     parameter: Taylor,
     control: &impl Fn(usize) -> [f64; N],
-    projection: ScalarProjection<N>,
-    rational: bool,
+    coefficient: &impl Fn([f64; N]) -> Result<[Taylor; K], E>,
+    SplineProjectionPolicy { rational, allow_c0 }: SplineProjectionPolicy,
+    constant_coefficients: bool,
     execution: &mut ProjectionExecution<'_>,
-) -> Result<Taylor, E> {
-    let ScalarProjection {
-        direction,
-        offset,
-        center,
-    } = projection;
-    let degree = validate_knots(
+) -> Result<[Taylor; K], E> {
+    let degree = validate_knots_with_policy(
         knots,
         count,
         parameter.0[0][0],
         false,
+        allow_c0,
         execution.budget,
         execution.cancel,
     )?;
-    let mut result: Option<Taylor> = None;
+    let mut result: Option<[Taylor; K]> = None;
     for span in 0..knots.len() - 1 {
         execution.budget.charge(1, execution.cancel)?;
         if knots[span] == knots[span + 1] {
@@ -1110,20 +1592,24 @@ fn projected_spline_cell<const N: usize>(
             execution.budget,
             execution.cancel,
         )?;
-        let mut numerator = Taylor::ZERO;
+        let mut numerator = [Taylor::ZERO; K];
+        let mut numerator_hull: [Option<I>; K] = [None; K];
         let mut denominator = Taylor::ZERO;
-        let mut numerator_hull: Option<I> = None;
         let mut weight_hull: Option<I> = None;
         for (index, basis) in basis[..length].iter().enumerate() {
             execution.budget.charge(1, execution.cancel)?;
             let point = control(start + index);
-            let coefficient = match center {
-                Some(center) => dot_difference(point, center, direction)? + offset,
-                None => dot(point, direction, offset)?,
-            };
-            numerator = numerator + Taylor::interval(coefficient) * *basis;
-            numerator_hull =
-                Some(numerator_hull.map_or(coefficient, |previous| previous.hull(coefficient)));
+            let coefficients = coefficient(point)?;
+            for k in 0..K {
+                let coefficient = coefficients[k];
+                if coefficient.0 != Taylor::ZERO.0 {
+                    numerator[k] = numerator[k] + coefficient * *basis;
+                }
+                numerator_hull[k] =
+                    Some(numerator_hull[k].map_or(coefficient.0[0][0], |previous| {
+                        previous.hull(coefficient.0[0][0])
+                    }));
+            }
             if rational {
                 let weight = I::point(point[N - 1]);
                 denominator = denominator + Taylor::interval(weight) * *basis;
@@ -1131,13 +1617,15 @@ fn projected_spline_cell<const N: usize>(
             }
         }
         if span >= degree && span < count {
-            if let Some(hull) = numerator_hull {
-                if hull.lower == hull.upper {
-                    numerator = Taylor::interval(hull);
-                } else {
-                    numerator.0[0][0] = numerator.0[0][0]
-                        .intersection(hull)
-                        .ok_or(E::ConditioningFailure)?;
+            for k in 0..K {
+                if let Some(hull) = numerator_hull[k] {
+                    if constant_coefficients && hull.lower == hull.upper {
+                        numerator[k] = Taylor::interval(hull);
+                    } else {
+                        numerator[k].0[0][0] = numerator[k].0[0][0]
+                            .intersection(hull)
+                            .ok_or(E::ConditioningFailure)?;
+                    }
                 }
             }
             if let Some(hull) = weight_hull {
@@ -1151,14 +1639,14 @@ fn projected_spline_cell<const N: usize>(
             }
         }
         let value = if rational {
-            numerator * denominator.reciprocal()?
+            let reciprocal = denominator.reciprocal()?;
+            numerator.map(|value| value * reciprocal)
         } else {
             numerator
         };
-        result = Some(match result {
-            Some(previous) => previous.hull(value),
-            None => value,
-        });
+        result = Some(result.map_or(value, |previous| {
+            std::array::from_fn(|i| previous[i].hull(value[i]))
+        }));
     }
     result.ok_or(E::ParameterOutOfRange)
 }
@@ -1682,5 +2170,333 @@ mod scalar_surface_laws {
         assert_eq!(value.0[0][1], ZERO);
         assert_eq!(value.0[0][2], ZERO);
         assert_eq!(value.0[1][1], ZERO);
+    }
+}
+
+#[cfg(test)]
+mod paired_surface_laws {
+    use super::*;
+    use crate::{
+        BsplineCurve, BsplineSurface, Invertible, Line, NurbsCurve, NurbsSurface, Point3,
+        Processor, RevolutionSurface, Vector3, Vector4,
+    };
+
+    fn contains(bound: I, value: f64) {
+        assert!(
+            bound.lower <= value && value <= bound.upper,
+            "{bound:?} excludes {value}"
+        );
+    }
+
+    fn functional(direction: [f64; 3], origin: [I; 3]) -> SurfaceFunctional {
+        SurfaceFunctional {
+            direction: direction.map(I::point),
+            origin,
+            offset: ZERO,
+        }
+    }
+
+    fn evaluate(
+        surface: &Surface,
+        domain: [I; 2],
+        functionals: [SurfaceFunctional; 2],
+    ) -> Result<[SurfaceFunctionalJet; 2], E> {
+        projected_surface_functionals(
+            surface,
+            domain,
+            functionals,
+            &mut ProjectionExecution {
+                budget: &mut ValidatedGeometryBudget::new(1_000_000),
+                cancel: &AtomicBool::new(false),
+            },
+        )
+    }
+
+    #[test]
+    fn interval_leader_origin_cancels_translation_inside_tensor_coefficients() {
+        let large = 1_099_511_627_776.0;
+        let knots = KnotVector::bezier_knot(1);
+        let surface = Surface::BsplineSurface(BsplineSurface::new(
+            (knots.clone(), knots),
+            vec![
+                vec![
+                    Point3::new(large, large, 0.0),
+                    Point3::new(large, large, 1.0),
+                ],
+                vec![
+                    Point3::new(large + 1.0, large + 1.0, 0.0),
+                    Point3::new(large + 1.0, large + 1.0, 1.0),
+                ],
+            ],
+        ));
+        let origin = [
+            I::new(large - 1.0 / 1024.0, large + 1.0 / 1024.0).unwrap(),
+            I::point(large),
+            ZERO,
+        ];
+        let jets = evaluate(
+            &surface,
+            [I::new(0.0, 1.0).unwrap(); 2],
+            [
+                functional([1.0, -1.0, 0.0], origin),
+                functional([0.0, 0.0, 1.0], [ZERO, ZERO, I::point(0.25)]),
+            ],
+        )
+        .unwrap();
+        contains(jets[0].position, -1.0 / 1024.0);
+        contains(jets[0].position, 1.0 / 1024.0);
+        assert!(jets[0].position.width() < 0.003);
+        assert_eq!([jets[0].du, jets[0].dv], [ZERO; 2]);
+        contains(jets[1].position, -0.25);
+        contains(jets[1].position, 0.75);
+        contains(jets[1].du, 0.0);
+        contains(jets[1].dv, 1.0);
+    }
+
+    #[test]
+    fn paired_generic_revolutions_keep_original_profile_pose_and_inverted_chart() {
+        let profiles = [
+            Curve::Line(Line(
+                Point3::new(2.0, 0.0, 5.0),
+                Point3::new(3.0, 0.0, 12.0),
+            )),
+            Curve::BsplineCurve(BsplineCurve::new(
+                KnotVector::bezier_knot(2),
+                vec![
+                    Point3::new(2.0, 0.0, 5.0),
+                    Point3::new(2.5, 0.0, 8.5),
+                    Point3::new(4.0, 0.0, 12.0),
+                ],
+            )),
+            Curve::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
+                KnotVector::bezier_knot(1),
+                vec![
+                    Vector4::new(2.0, 0.0, 5.0, 1.0),
+                    Vector4::new(5.0, 0.0, 14.0, 2.0),
+                ],
+            ))),
+        ];
+        let large = 1_099_511_627_776.0;
+        for (kind, profile) in profiles.into_iter().enumerate() {
+            for inverted in [false, true] {
+                let mut processor = Processor::with_transform(
+                    RevolutionSurface::by_revolution(
+                        profile.clone(),
+                        Point3::new(0.0, 0.0, 0.0),
+                        Vector3::unit_z(),
+                    ),
+                    Matrix4::new(
+                        -2.0, 0.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, large, large,
+                        large, 1.0,
+                    ),
+                );
+                if inverted {
+                    processor.invert();
+                }
+                let surface = Surface::RevolutionSurface(processor);
+                let domain = if inverted {
+                    [I::new(0.3, 0.4).unwrap(), I::new(0.2, 0.25).unwrap()]
+                } else {
+                    [I::new(0.2, 0.25).unwrap(), I::new(0.3, 0.4).unwrap()]
+                };
+                let jets = evaluate(
+                    &surface,
+                    domain,
+                    [
+                        functional([2.0, -1.0, 3.0], [I::point(large); 3]),
+                        functional([1.0, 1.0, -1.0], [I::point(large); 3]),
+                    ],
+                )
+                .unwrap();
+                for u in [0.2_f64, 0.225, 0.25] {
+                    let (r, z, dr, dz) = match kind {
+                        0 => (2.0 + u, 5.0 + 7.0 * u, 1.0, 7.0),
+                        1 => (2.0 + u + u * u, 5.0 + 7.0 * u, 1.0 + 2.0 * u, 7.0),
+                        _ => (
+                            (2.0 + 3.0 * u) / (1.0 + u),
+                            (5.0 + 9.0 * u) / (1.0 + u),
+                            1.0 / (1.0 + u).powi(2),
+                            4.0 / (1.0 + u).powi(2),
+                        ),
+                    };
+                    for v in [0.3_f64, 0.35, 0.4] {
+                        let (s, c) = v.sin_cos();
+                        let values = [
+                            -4.0 * r * c - 4.0 * r * s + 15.0 * z,
+                            -2.0 * r * c + 4.0 * r * s - 5.0 * z,
+                        ];
+                        let du = [
+                            -4.0 * dr * c - 4.0 * dr * s + 15.0 * dz,
+                            -2.0 * dr * c + 4.0 * dr * s - 5.0 * dz,
+                        ];
+                        let dv = [4.0 * r * s - 4.0 * r * c, 2.0 * r * s + 4.0 * r * c];
+                        for k in 0..2 {
+                            contains(jets[k].position, values[k]);
+                            contains(jets[k].du, if inverted { dv[k] } else { du[k] });
+                            contains(jets[k].dv, if inverted { du[k] } else { dv[k] });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn original_projective_processor_denominator_is_not_an_affine_substitute() {
+        let surface = Surface::RevolutionSurface(Processor::with_transform(
+            RevolutionSurface::by_revolution(
+                Curve::Line(Line(
+                    Point3::new(2.0, 0.0, 5.0),
+                    Point3::new(3.0, 0.0, 12.0),
+                )),
+                Point3::new(0.0, 0.0, 0.0),
+                Vector3::unit_z(),
+            ),
+            Matrix4::new(
+                1.0, 0.0, 0.0, 0.125, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ),
+        ));
+        let jets = evaluate(
+            &surface,
+            [I::new(0.2, 0.3).unwrap(); 2],
+            [
+                functional([1.0, 0.0, 0.0], [ZERO; 3]),
+                functional([0.0, 1.0, 0.0], [ZERO; 3]),
+            ],
+        )
+        .unwrap();
+        for u in [0.2_f64, 0.25, 0.3] {
+            for v in [0.2_f64, 0.25, 0.3] {
+                let r = 2.0 + u;
+                let (s, c) = v.sin_cos();
+                let denominator = 1.0 + r * c / 8.0;
+                contains(jets[0].position, r * c / denominator);
+                contains(jets[0].du, c / denominator.powi(2));
+                contains(jets[0].dv, -r * s / denominator.powi(2));
+                contains(jets[1].position, r * s / denominator);
+                contains(jets[1].du, s / denominator.powi(2));
+                contains(jets[1].dv, (r * c + r * r / 8.0) / denominator.powi(2));
+            }
+        }
+    }
+
+    #[test]
+    fn zero_functionals_still_admit_original_poles_and_piecewise_continuity() {
+        let zero = [functional([0.0; 3], [ZERO; 3]); 2];
+        let profile = Curve::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
+            KnotVector::bezier_knot(1),
+            vec![
+                Vector4::new(1.0, 0.0, 0.0, -1.0),
+                Vector4::new(1.0, 0.0, 1.0, 1.0),
+            ],
+        )));
+        let pole = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+            profile,
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::unit_z(),
+        )));
+        assert!(matches!(
+            evaluate(
+                &pole,
+                [I::new(0.0, 1.0).unwrap(), I::new(0.2, 0.3).unwrap()],
+                zero
+            ),
+            Err(E::DenominatorContainsZero)
+        ));
+        let tensor = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+            (KnotVector::bezier_knot(1), KnotVector::bezier_knot(1)),
+            vec![
+                vec![
+                    Vector4::new(0.0, 0.0, 0.0, -1.0),
+                    Vector4::new(0.0, 1.0, 0.0, -1.0),
+                ],
+                vec![
+                    Vector4::new(1.0, 0.0, 0.0, 1.0),
+                    Vector4::new(1.0, 1.0, 0.0, 1.0),
+                ],
+            ],
+        )));
+        assert!(matches!(
+            evaluate(&tensor, [I::new(0.0, 1.0).unwrap(); 2], zero),
+            Err(E::DenominatorContainsZero)
+        ));
+        for discontinuous in [false, true] {
+            let (knots, controls) = if discontinuous {
+                (
+                    vec![0.0, 0.0, 0.5, 0.5, 1.0, 1.0],
+                    vec![
+                        Point3::new(2.0, 0.0, 0.0),
+                        Point3::new(3.0, 0.0, 1.0),
+                        Point3::new(4.0, 0.0, 2.0),
+                        Point3::new(5.0, 0.0, 3.0),
+                    ],
+                )
+            } else {
+                (
+                    vec![0.0, 0.0, 0.5, 1.0, 1.0],
+                    vec![
+                        Point3::new(2.0, 0.0, 0.0),
+                        Point3::new(3.0, 0.0, 1.0),
+                        Point3::new(4.0, 0.0, 3.0),
+                    ],
+                )
+            };
+            let surface =
+                Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+                    Curve::BsplineCurve(BsplineCurve::new(KnotVector::from(knots), controls)),
+                    Point3::new(0.0, 0.0, 0.0),
+                    Vector3::unit_z(),
+                )));
+            let domain = [I::new(0.25, 0.75).unwrap(), I::new(0.2, 0.3).unwrap()];
+            if discontinuous {
+                assert!(matches!(
+                    evaluate(&surface, domain, zero),
+                    Err(E::NonSmooth)
+                ));
+            } else {
+                assert!(evaluate(&surface, domain, zero).is_ok());
+                assert!(matches!(
+                    projected_surface_taylor(
+                        &surface,
+                        [
+                            Taylor::variable(domain[0], 0),
+                            Taylor::variable(domain[1], 1)
+                        ],
+                        ScalarProjection {
+                            direction: [ZERO; 3],
+                            offset: ZERO,
+                            center: None
+                        },
+                        0,
+                        &mut ProjectionExecution {
+                            budget: &mut ValidatedGeometryBudget::new(1_000_000),
+                            cancel: &AtomicBool::new(false)
+                        },
+                    ),
+                    Err(E::NonSmooth)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn paired_evaluation_obeys_cumulative_work_and_cancellation() {
+        let surface = Surface::Plane(Plane::xy());
+        let zero = [functional([0.0; 3], [ZERO; 3]); 2];
+        for cancelled in [false, true] {
+            let result = projected_surface_functionals(
+                &surface,
+                [ZERO; 2],
+                zero,
+                &mut ProjectionExecution {
+                    budget: &mut ValidatedGeometryBudget::new(0),
+                    cancel: &AtomicBool::new(cancelled),
+                },
+            );
+            assert!(matches!(result, Err(E::Cancelled)) == cancelled);
+            if !cancelled {
+                assert!(matches!(result, Err(E::ResourceLimit)));
+            }
+        }
     }
 }

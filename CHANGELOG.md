@@ -16,6 +16,11 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Affine-plane continuation contracts paired original source functionals before
+  unused spatial coordinates, sharing tensor/revolution profile bases and native
+  homogeneous denominators. Full whole-span rooted spatial reconstruction and
+  transversality, original convex-domain gradients and piecewise admission stay
+  mandatory; interval leader origins remain inside source coefficients.
 - Exact endpoint coordinates certify their original carrier point through a
   constant-plane constraint, without inventing a positive-width guide extension.
   Endpoint refinement reuses an identical certified domain instead of repeating

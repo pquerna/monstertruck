@@ -12,7 +12,17 @@
 //! Native coordinate jets retain the complete unchanged leader and evaluate
 //! its equation and partial time derivatives on the correlated displacement
 //! from that leader. Independent world-origin offsets are never constructed.
+//!
+//! Contraction evaluates the two original source-coefficient functionals, with
+//! shared native tensor/profile bases and unchanged piecewise/pole admission.
+//! Only the whole-span inclusion image supplies the mandatory reconstructed
+//! spatial jet and transversality proof. If its midpoint is outside that image,
+//! centered reconstruction additionally evaluates the full original convex-box
+//! spatial gradients; no root-image clipping substitutes for that path proof.
 
+use super::super::validated_interval::{
+    ProjectionExecution, SurfaceFunctional, projected_surface_functionals,
+};
 use super::*;
 
 pub(super) struct PlaneKrawczykReceipt {
@@ -32,7 +42,7 @@ struct Chart {
 
 #[derive(Clone, Copy)]
 struct PlaneSystem {
-    source: ValidatedSurfaceJet,
+    // Contraction needs only the original two scalar equations and gradients.
     value: [ValidatedInterval; 2],
     jacobian: [[ValidatedInterval; 2]; 2],
 }
@@ -42,13 +52,14 @@ struct CoordinateJet {
     jet: PlaneJet,
 }
 
-// Bound the new nested proof data, not just the enum payload. Include the
-// dispatcher's tube return slot and 512 bytes for its arguments/scalar locals.
-// Its alternative generic locals live in a separate function. Three reduced
-// source systems, chart, projection, reconstruction and both derivative solves
-// still fit below the old four-variable workspace. The shared source evaluator
-// is entered only once at a time, with the same bounded scratch for both paths.
-const PLANE_WORKSPACE_BYTES: usize = 3 * size_of::<PlaneSystem>()
+// Bound retained proof locals separately from the shared source evaluator's
+// bounded scratch. Two scalar systems replace three spatial systems; rooted
+// spatial reconstruction remains mandatory, with a second full convex-domain
+// jet when its center lies outside the root image.
+const PLANE_WORKSPACE_BYTES: usize = 2 * size_of::<PlaneSystem>()
+    + 2 * size_of::<ValidatedSurfaceJet>()
+    + 2 * size_of::<SurfaceFunctional>()
+    + 6 * size_of::<ValidatedInterval>()
     + size_of::<Chart>()
     + size_of::<CoordinateJet>()
     + size_of::<PlaneJet>()
@@ -136,14 +147,13 @@ impl Chart {
 
     fn mean_value_parameters(
         &self,
-        center_position: [ValidatedInterval; 3],
+        center: [ValidatedInterval; 2],
         source: &ValidatedSurfaceJet,
         delta: [ValidatedInterval; 2],
         budget: &mut ValidatedGeometryBudget,
         cancel: &AtomicBool,
     ) -> Result<[ValidatedInterval; 2], ValidatedGeometryError> {
         budget.charge(1, cancel)?;
-        let center = self.parameters(center_position);
         budget.charge(2, cancel)?;
         let du = self.vector_parameters(source.du);
         let dv = self.vector_parameters(source.dv);
@@ -170,6 +180,22 @@ impl Chart {
     }
 }
 
+impl Chart {
+    fn functionals(&self) -> [SurfaceFunctional; 2] {
+        std::array::from_fn(|i| {
+            let mut direction = [ZERO; 3];
+            for j in 0..2 {
+                direction[self.rows[j]] = self.inverse[i][j];
+            }
+            SurfaceFunctional {
+                direction,
+                origin: self.origin,
+                offset: ZERO,
+            }
+        })
+    }
+}
+
 fn system(
     source: &Surface,
     chart: &Chart,
@@ -179,23 +205,52 @@ fn system(
     cancel: &AtomicBool,
 ) -> Result<PlaneSystem, ValidatedGeometryError> {
     budget.charge(1, cancel)?;
-    let source = validated_surface_piecewise_jet(
-        source,
-        domain.map(|bound| [bound.lower, bound.upper]),
-        budget,
-        cancel,
-    )?;
-    let system = PlaneSystem {
-        source,
-        value: [
-            dot3(chart.normal, subtract3(source.position, chart.origin)),
-            coordinate
-                .jet
-                .residual(coordinate.parameter, source.position),
-        ],
-        jacobian: [chart.normal, coordinate.jet.normal()]
-            .map(|normal| [dot3(normal, source.du), dot3(normal, source.dv)]),
+    let (value, jacobian) = match &coordinate.jet {
+        PlaneJet::Native(guide) => {
+            let projected = projected_surface_functionals(
+                source,
+                domain,
+                [
+                    SurfaceFunctional {
+                        direction: chart.normal,
+                        origin: chart.origin,
+                        offset: ZERO,
+                    },
+                    SurfaceFunctional {
+                        direction: guide.first,
+                        origin: guide.position,
+                        offset: ZERO,
+                    },
+                ],
+                &mut ProjectionExecution { budget, cancel },
+            )?;
+            (
+                projected.map(|jet| jet.position),
+                projected.map(|jet| [jet.du, jet.dv]),
+            )
+        }
+        PlaneJet::BetweenPlanes { .. } => {
+            // Retain the exact raw-t affine coefficient law and endpoint
+            // branches; never distribute independent interval time factors.
+            let source = validated_surface_piecewise_jet(
+                source,
+                domain.map(|bound| [bound.lower, bound.upper]),
+                budget,
+                cancel,
+            )?;
+            (
+                [
+                    dot3(chart.normal, subtract3(source.position, chart.origin)),
+                    coordinate
+                        .jet
+                        .residual(coordinate.parameter, source.position),
+                ],
+                [chart.normal, coordinate.jet.normal()]
+                    .map(|normal| [dot3(normal, source.du), dot3(normal, source.dv)]),
+            )
+        }
     };
+    let system = PlaneSystem { value, jacobian };
     if !system
         .value
         .into_iter()
@@ -272,17 +327,6 @@ pub(super) fn certify(
     if !(0..2).all(|i| source_domain[i].strictly_contains(image[i])) {
         return Err(ValidatedGeometryError::Unresolved);
     }
-    let tangent = cross3(
-        cross3(enclosure.source.du, enclosure.source.dv),
-        chart.normal,
-    );
-    let transverse = tangent
-        .map(ValidatedInterval::square)
-        .into_iter()
-        .fold(ZERO, |a, b| a + b);
-    if transverse.lower <= 0.0 {
-        return Err(ValidatedGeometryError::NonTransverse);
-    }
     // Original-domain strict inclusion has already proved every parameter's
     // unique root. Each such root also satisfies this centered mean-value
     // equation with the SAME original Jacobian enclosure. Reapplying it to
@@ -303,10 +347,25 @@ pub(super) fn certify(
             break;
         }
     }
-    let rooted = system(source, &chart, &coordinate, image, budget, cancel)?;
+    // This full spatial jet covers every root for the unchanged whole t span.
+    // Scalar inclusion is not authority for a spatial derivative substitute.
+    let rooted = validated_surface_piecewise_jet(
+        source,
+        image.map(|bound| [bound.lower, bound.upper]),
+        budget,
+        cancel,
+    )?;
+    let tangent = cross3(cross3(rooted.du, rooted.dv), chart.normal);
+    let transverse = tangent
+        .map(ValidatedInterval::square)
+        .into_iter()
+        .fold(ZERO, |a, b| a + b);
+    if transverse.lower <= 0.0 {
+        return Err(ValidatedGeometryError::NonTransverse);
+    }
     budget.charge(1, cancel)?;
     let plane_index = 2 - source_index;
-    let direct_uv = chart.parameters(rooted.source.position);
+    let direct_uv = chart.parameters(rooted.position);
     // Differentiate the exact affine chart functional BEFORE multiplying
     // source-coordinate displacements. Use rooted gradients only when BOTH
     // center coordinates lie in that image, proving every segment to a root
@@ -316,19 +375,28 @@ pub(super) fn certify(
     budget.charge(1, cancel)?;
     let center_in_image =
         (0..2).all(|i| image[i].lower <= middle[i] && middle[i] <= image[i].upper);
+    let original_gradients;
     let gradients = if center_in_image {
-        &rooted.source
+        &rooted
     } else {
-        &enclosure.source
+        original_gradients = validated_surface_piecewise_jet(
+            source,
+            source_domain.map(|bound| [bound.lower, bound.upper]),
+            budget,
+            cancel,
+        )?;
+        &original_gradients
     };
     let image_delta = std::array::from_fn(|i| image[i] - ValidatedInterval::point(middle[i]));
-    let mean_uv = chart.mean_value_parameters(
-        center.source.position,
-        gradients,
-        image_delta,
-        budget,
-        cancel,
-    )?;
+    let center_chart = projected_surface_functionals(
+        source,
+        middle.map(ValidatedInterval::point),
+        chart.functionals(),
+        &mut ProjectionExecution { budget, cancel },
+    )?
+    .map(|jet| jet.position);
+    let mean_uv =
+        chart.mean_value_parameters(center_chart, gradients, image_delta, budget, cancel)?;
     let mut uv = direct_uv;
     for i in 0..2 {
         budget.charge(1, cancel)?;
@@ -346,25 +414,25 @@ pub(super) fn certify(
         return Err(ValidatedGeometryError::Unresolved);
     }
     let plane_position = chart.position(uv);
-    let position = intersect3(rooted.source.position, plane_position)?;
+    let position = intersect3(rooted.position, plane_position)?;
     let residual = if source_index == 0 {
-        subtract3(rooted.source.position, plane_position)
+        subtract3(rooted.position, plane_position)
     } else {
-        subtract3(plane_position, rooted.source.position)
+        subtract3(plane_position, rooted.position)
     };
     budget.charge(1, cancel)?;
     let guide = &coordinate.jet;
     let ft = guide.partial_first(position);
     let first_uv = solve(inverse, defect, rho, [ZERO, -ft], budget, cancel)?;
     let source_first = add3(
-        multiply3(rooted.source.du, first_uv[0]),
-        multiply3(rooted.source.dv, first_uv[1]),
+        multiply3(rooted.du, first_uv[0]),
+        multiply3(rooted.dv, first_uv[1]),
     );
     let first = intersect3(
         source_first,
         chart.vector(chart.vector_parameters(source_first)),
     )?;
-    let h = second_composition(rooted.source, first_uv[0], first_uv[1]);
+    let h = second_composition(rooted, first_uv[0], first_uv[1]);
     budget.charge(1, cancel)?;
     let last = dot3(guide.normal(), h)
         + dot3(guide.first(), first) * ValidatedInterval::point(2.0)
@@ -379,8 +447,8 @@ pub(super) fn certify(
     )?;
     let source_second = add3(
         add3(
-            multiply3(rooted.source.du, second_uv[0]),
-            multiply3(rooted.source.dv, second_uv[1]),
+            multiply3(rooted.du, second_uv[0]),
+            multiply3(rooted.dv, second_uv[1]),
         ),
         h,
     );
@@ -1171,7 +1239,7 @@ mod regressions {
         };
         let image_delta = [interval_range([0.5, 1.0]).unwrap(), span];
         let mean = chart
-            .mean_value_parameters([ZERO; 3], &curved, image_delta, &mut work, &cancel)
+            .mean_value_parameters([ZERO; 2], &curved, image_delta, &mut work, &cancel)
             .unwrap();
         contains(mean[0], 0.25);
         contains(mean[0], 1.0);
@@ -1256,5 +1324,66 @@ mod regressions {
             }
         }
         assert!(work.remaining() > 0);
+    }
+
+    #[test]
+    fn scalar_native_system_keeps_displaced_reparameterized_guide_equations_and_time_partials() {
+        let (curve, _, _) = parabola(false, false, false);
+        let (source, Surface::Plane(plane), _) = carriers(&curve).unwrap() else {
+            panic!("Actual original affine carrier")
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = ValidatedGeometryBudget::new(1_000_000);
+        let chart = Chart::new(plane, &mut work, &cancel).unwrap();
+        // The independent leader is L(t)=(s,s^3,0), s=a+b*t.
+        // It is deliberately NOT the intersection's native quadratic guide.
+        for (a, b) in [(0.0, 1.0), (0.125, 2.0), (0.75, -1.0)] {
+            let parameter = interval_range([0.25, 0.375]).unwrap();
+            let s = ValidatedInterval::point(a) + ValidatedInterval::point(b) * parameter;
+            let guide = ValidatedCurveJet {
+                position: [s, s * s * s, ZERO],
+                first: [
+                    ValidatedInterval::point(b),
+                    ValidatedInterval::point(3.0 * b) * s * s,
+                    ZERO,
+                ],
+                second: [ZERO, ValidatedInterval::point(6.0 * b * b) * s, ZERO],
+                third: [ZERO, ValidatedInterval::point(6.0 * b * b * b), ZERO],
+            };
+            let coordinate = CoordinateJet {
+                parameter,
+                jet: PlaneJet::Native(guide),
+            };
+            let domain = [
+                interval_range([0.2, 0.7]).unwrap(),
+                interval_range([0.4, 0.6]).unwrap(),
+            ];
+            let reduced = system(source, &chart, &coordinate, domain, &mut work, &cancel).unwrap();
+            for t in [0.25_f64, 0.3125, 0.375] {
+                let s = a + b * t;
+                for u in [0.2_f64, 0.45, 0.7] {
+                    for v in [0.4_f64, 0.5, 0.6] {
+                        let point = [u, u * u, v - 0.5].map(ValidatedInterval::point);
+                        contains(reduced.value[0], v - 0.5);
+                        contains(
+                            reduced.value[1],
+                            b * (u - s) + 3.0 * b * s * s * (u * u - s * s * s),
+                        );
+                        contains(reduced.jacobian[0][0], 0.0);
+                        contains(reduced.jacobian[0][1], 1.0);
+                        contains(reduced.jacobian[1][0], b + 6.0 * b * s * s * u);
+                        contains(reduced.jacobian[1][1], 0.0);
+                        contains(
+                            coordinate.jet.partial_first(point),
+                            6.0 * b * b * s * (u * u - s * s * s) - b * b * (1.0 + 9.0 * s.powi(4)),
+                        );
+                        contains(
+                            coordinate.jet.partial_second(point),
+                            6.0 * b * b * b * (u * u - s * s * s) - 54.0 * b * b * b * s * s * s,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
