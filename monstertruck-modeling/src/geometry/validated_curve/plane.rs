@@ -24,8 +24,8 @@
 //! spatial gradients; no root-image clipping substitutes for that path proof.
 
 use super::super::validated_interval::{
-    ProjectionExecution, SurfaceFunctional, SurfaceFunctionalJet, TENSOR_EVALUATOR_FIXED_BYTES,
-    projected_surface_functionals,
+    ProjectionExecution, TENSOR_EVALUATOR_FIXED_BYTES, ValidatedSurfaceFunctional,
+    ValidatedSurfaceFunctionalJet, validated_surface_functional_jets,
 };
 use super::*;
 
@@ -62,7 +62,7 @@ struct CoordinateJet {
 // jet when its center lies outside the root image.
 const PLANE_WORKSPACE_BYTES: usize = 2 * size_of::<PlaneSystem>()
     + 2 * size_of::<ValidatedSurfaceJet>()
-    + 2 * size_of::<SurfaceFunctional>()
+    + 2 * size_of::<ValidatedSurfaceFunctional>()
     + 6 * size_of::<ValidatedInterval>()
     + size_of::<Chart>()
     + size_of::<CoordinateJet>()
@@ -86,7 +86,7 @@ const _: () = assert!(size_of::<PlaneKrawczykReceipt>() <= size_of::<System>());
 // the original defect before the center residual, so its paired source result
 // can reuse the dead enclosure slot rather than grow the proof-frame allowance.
 const _: () = assert!(size_of::<ValidatedCurveJet>() <= size_of::<PlaneJet>());
-const _: () = assert!(size_of::<[SurfaceFunctionalJet; 2]>() <= size_of::<PlaneSystem>());
+const _: () = assert!(size_of::<[ValidatedSurfaceFunctionalJet; 2]>() <= size_of::<PlaneSystem>());
 
 // Both proof paths call the same fixed source evaluator. Track its concrete
 // tensor state (including original-coefficient partition scratch) on BOTH sides,
@@ -199,13 +199,13 @@ impl Chart {
 }
 
 impl Chart {
-    fn functionals(&self) -> [SurfaceFunctional; 2] {
+    fn functionals(&self) -> [ValidatedSurfaceFunctional; 2] {
         std::array::from_fn(|i| {
             let mut direction = [ZERO; 3];
             for j in 0..2 {
                 direction[self.rows[j]] = self.inverse[i][j];
             }
-            SurfaceFunctional {
+            ValidatedSurfaceFunctional {
                 direction,
                 origin: self.origin,
                 offset: ZERO,
@@ -225,22 +225,23 @@ fn system(
     budget.charge(1, cancel)?;
     let (value, jacobian) = match &coordinate.jet {
         PlaneJet::Native(guide) => {
-            let projected = projected_surface_functionals(
+            let projected = validated_surface_functional_jets(
                 source,
-                domain,
+                domain.map(|bound| [bound.lower, bound.upper]),
                 [
-                    SurfaceFunctional {
+                    ValidatedSurfaceFunctional {
                         direction: chart.normal,
                         origin: chart.origin,
                         offset: ZERO,
                     },
-                    SurfaceFunctional {
+                    ValidatedSurfaceFunctional {
                         direction: guide.first,
                         origin: guide.position,
                         offset: ZERO,
                     },
                 ],
-                &mut ProjectionExecution { budget, cancel },
+                budget,
+                cancel,
             )?;
             (
                 projected.map(|jet| jet.position),
@@ -306,22 +307,23 @@ fn native_center_residual(
         .into_iter()
         .map(ValidatedInterval::square)
         .fold(ZERO, |a, b| a + b);
-    let residuals = projected_surface_functionals(
+    let residuals = validated_surface_functional_jets(
         source,
-        center,
+        center.map(|bound| [bound.lower, bound.upper]),
         [
-            SurfaceFunctional {
+            ValidatedSurfaceFunctional {
                 direction: anchor.first,
                 origin: anchor.position,
                 offset: ZERO,
             },
-            SurfaceFunctional {
+            ValidatedSurfaceFunctional {
                 direction: guide.second,
                 origin: guide.position,
                 offset: -speed_squared,
             },
         ],
-        execution,
+        execution.budget,
+        execution.cancel,
     )?;
     execution.budget.charge(1, execution.cancel)?;
     Ok(Some(
@@ -474,11 +476,12 @@ pub(super) fn certify(
         let center_chart = match retained_center_chart {
             Some(center) => center,
             None => {
-                let center = projected_surface_functionals(
+                let center = validated_surface_functional_jets(
                     source,
-                    middle.map(ValidatedInterval::point),
+                    middle.map(|value| [value; 2]),
                     chart.functionals(),
-                    &mut ProjectionExecution { budget, cancel },
+                    budget,
+                    cancel,
                 )?
                 .map(|jet| jet.position);
                 retained_center_chart = Some(center);

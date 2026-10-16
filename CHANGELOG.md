@@ -16,6 +16,13 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Public const-generic surface functional first jets retain interval directions,
+  displacement origins and offsets inside original source coefficients. Scalar
+  and multirow callers share source basis and denominator admission without
+  dummy rows or allocation; original poles, continuous C0 first-derivative policy,
+  cumulative work and cancellation remain authoritative. These bounds grant no
+  new smoothness or Hessian certificate.
+
 - Trimmed mesh seeds retain their interior surface parameter subdivisions.
   Matching normals at four corners and the center no longer masquerade as a
   whole-surface planarity proof or flatten periodic rational tensors into

@@ -22,11 +22,13 @@ pub use explicit::{
     validated_surface_piecewise_jet,
 };
 pub use normal::validated_surface_geometric_normal;
-pub use projection::validated_curve_projected_jet;
 pub(crate) use projection::{
-    ProjectionExecution, ScalarProjection, SurfaceFunctional, SurfaceFunctionalJet,
-    projected_spline, projected_surface_curve_jet, projected_surface_functionals,
+    ProjectionExecution, ScalarProjection, projected_spline, projected_surface_curve_jet,
     projected_surface_taylor,
+};
+pub use projection::{
+    ValidatedSurfaceFunctional, ValidatedSurfaceFunctionalJet, validated_curve_projected_jet,
+    validated_surface_functional_jets,
 };
 pub(crate) use smoothness::{curve_span_smooth, surface_box_smooth};
 
