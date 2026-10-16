@@ -1,7 +1,12 @@
 use super::super::{CoordinatePlane, Projection, certify, implicit_jet};
 use super::*;
-use crate::{BoundedCurve, ValidatedScalarCurveJet, validated_curve2d_jet};
+use crate::ValidatedScalarCurveJet;
+use crate::geometry::validated_interval::{
+    ProjectionExecution, ScalarProjection, Taylor, projected_surface_curve_jet,
+    projected_surface_taylor,
+};
 use monstertruck_topology::EdgeId;
+use monstertruck_traits::BoundedCurve;
 use std::fmt;
 /// Original source geometry for one oriented trim occurrence, without a candidate.
 ///
@@ -448,15 +453,13 @@ fn isolate_trim_roots(
         [range.0, range.1],
         maximum_bytes,
         |range, budget| {
-            chart_jet(context, index, range, budget, cancel)
-                .map(|jet| jet.0)
-                .map_err(|error| {
-                    coverage_context(
-                        error,
-                        "original trim inventory / source-chart jet enclosure",
-                        None,
-                    )
-                })
+            chart_jet(context, index, range, budget, cancel).map_err(|error| {
+                coverage_context(
+                    error,
+                    "original trim inventory / source-chart jet enclosure",
+                    None,
+                )
+            })
         },
         budget,
         cancel,
@@ -916,9 +919,7 @@ fn prove_no_crossing(
             let uv = domain
                 .boundary_position_enclosure(coedge, span, budget, cancel)
                 .map_err(trim_error)?;
-            let jet =
-                validated_surface_jet(surface, uv.map(|x| [x.lower, x.upper]), budget, cancel)?;
-            if !dot3(normal, subtract3(jet.position, origin)).contains_zero() {
+            if !chart_height(surface, uv, normal, origin, budget, cancel)?.0[0][0].contains_zero() {
                 continue;
             }
             let midpoint = span[0] * 0.5 + span[1] * 0.5;
@@ -940,14 +941,7 @@ fn chart_jet(
     parameter: [f64; 2],
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<
-    (
-        ValidatedScalarCurveJet,
-        [ValidatedInterval; 2],
-        [ValidatedInterval; 3],
-    ),
-    ValidatedGeometryError,
-> {
+) -> Result<ValidatedScalarCurveJet, ValidatedGeometryError> {
     let &FacePlaneContext {
         domain,
         surface,
@@ -959,23 +953,46 @@ fn chart_jet(
         .coedges()
         .get(coedge)
         .ok_or(ValidatedGeometryError::InvalidInput)?;
-    let uv = validated_curve2d_jet(boundary.curve, parameter, budget, cancel)?;
-    let jet = validated_surface_jet(
+    projected_surface_curve_jet(
         surface,
-        uv.position.map(|x| [x.lower, x.upper]),
-        budget,
-        cancel,
-    )?;
-    let first = std::array::from_fn(|i| jet.du[i] * uv.first[0] + jet.dv[i] * uv.first[1]);
-    Ok((
-        ValidatedScalarCurveJet {
-            position: dot3(normal, subtract3(jet.position, origin)),
-            first: dot3(normal, first),
-            second: super::super::ZERO,
-        },
-        uv.position,
-        jet.position,
-    ))
+        boundary.curve,
+        parameter,
+        plane_projection(normal, origin),
+        &mut ProjectionExecution { budget, cancel },
+    )
+}
+
+// Keep the interval plane coefficients; the midpoint is only an algebraic center.
+fn plane_projection(
+    normal: [ValidatedInterval; 3],
+    origin: [ValidatedInterval; 3],
+) -> ScalarProjection<3> {
+    let center = origin.map(ValidatedInterval::midpoint);
+    ScalarProjection {
+        direction: normal,
+        offset: dot3(
+            normal,
+            subtract3(center.map(ValidatedInterval::point), origin),
+        ),
+        center: Some(center),
+    }
+}
+
+fn chart_height(
+    surface: &Surface,
+    uv: [ValidatedInterval; 2],
+    normal: [ValidatedInterval; 3],
+    origin: [ValidatedInterval; 3],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<Taylor, ValidatedGeometryError> {
+    projected_surface_taylor(
+        surface,
+        [Taylor::variable(uv[0], 0), Taylor::variable(uv[1], 1)],
+        plane_projection(normal, origin),
+        0,
+        &mut ProjectionExecution { budget, cancel },
+    )
 }
 
 fn root_chart_enclosure(
@@ -989,6 +1006,7 @@ fn root_chart_enclosure(
         domain,
         surface,
         normal,
+        origin,
         ..
     } = context;
     // Any actual source root belongs to the COMPLETE retained chart tube.
@@ -998,16 +1016,10 @@ fn root_chart_enclosure(
     let witness_uv = domain
         .boundary_position_enclosure(coedge, root.witness, budget, cancel)
         .map_err(trim_error)?;
-    let witness_jet = validated_surface_jet(
-        surface,
-        witness_uv.map(|x| [x.lower, x.upper]),
-        budget,
-        cancel,
-    )?;
+    let witness_height = chart_height(surface, witness_uv, normal, origin, budget, cancel)?;
     let margin = domain.uncertainty_uv();
-    let height_error = (dot3(normal, witness_jet.du)
-        * ValidatedInterval::new(-margin[0], margin[0])?
-        + dot3(normal, witness_jet.dv) * ValidatedInterval::new(-margin[1], margin[1])?)
+    let height_error = (witness_height.0[1][0] * ValidatedInterval::new(-margin[0], margin[0])?
+        + witness_height.0[0][1] * ValidatedInterval::new(-margin[1], margin[1])?)
     .magnitude();
     let derivative_lower = if root.derivative.lower > 0.0 {
         root.derivative.lower
@@ -1056,13 +1068,9 @@ fn complete_incidence(
         if disjoint2(joint.enclosure, cell) {
             continue;
         }
-        let jet = validated_surface_jet(
-            surface,
-            joint.enclosure.map(|x| [x.lower, x.upper]),
-            budget,
-            cancel,
-        )?;
-        if dot3(normal, subtract3(jet.position, origin)).contains_zero() {
+        if chart_height(surface, joint.enclosure, normal, origin, budget, cancel)?.0[0][0]
+            .contains_zero()
+        {
             return Ok(false);
         }
     }

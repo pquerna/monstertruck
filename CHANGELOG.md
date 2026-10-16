@@ -16,6 +16,12 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Surface-plane roots, witnesses and no-crossing proofs evaluate the original
+  scalar functional before unused world coordinates. Planes, tensor splines,
+  extrusion and generic revolution retain native UV composition, poses,
+  homogeneous denominators and source-knot admission, including constant
+  angular functionals. Curve projections also retain exact carrier-plane
+  constants without reconstructing a spatial continuation jet.
 - Original trim-plane root inventories evaluate correlated scalar native jets,
   preserving world units, interval plane coefficients, original parameter
   gauges and complete plural roots without constructing unused spatial jets.

@@ -543,7 +543,7 @@ pub(super) fn processed_parameter_with_extension(
     Ok(reflected)
 }
 
-fn surface_taylor_with_policy(
+pub(super) fn surface_taylor_with_policy(
     surface: &Surface,
     u: Taylor,
     v: Taylor,

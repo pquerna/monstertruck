@@ -1,13 +1,13 @@
 use super::explicit::{
-    basis, clipped_parameter, curve_taylor_with_extension, processed_parameter,
-    processed_parameter_with_extension, validate_knots,
+    basis, clipped_parameter, curve_taylor_with_extension, curve2d_taylor, processed_parameter,
+    processed_parameter_with_extension, surface_taylor_with_policy, validate_knots,
 };
 use super::{
     Taylor, ValidatedGeometryBudget, ValidatedGeometryError as E, ValidatedInterval as I,
     ValidatedScalarCurveJet, ZERO, curve_jet_from_taylor, interval_range,
 };
 use crate::{
-    Conic2D, Curve, Curve2D, KnotVector, ParametricCurve, Plane, Surface,
+    Conic2D, Curve, Curve2D, KnotVector, Matrix4, ParametricCurve, Plane, Surface,
     geometry::MAX_NATIVE_GEOMETRY_NESTING,
 };
 use std::sync::atomic::AtomicBool;
@@ -69,6 +69,497 @@ pub fn validated_curve_projected_jet(
         first,
         second,
     })
+}
+
+/// Projects the original native UV continuation, including its actual derivatives.
+pub(crate) fn projected_surface_curve_jet(
+    surface: &Surface,
+    curve: &Curve2D,
+    range: [f64; 2],
+    projection: ScalarProjection<3>,
+    execution: &mut ProjectionExecution<'_>,
+) -> Result<ValidatedScalarCurveJet, E> {
+    let uv = curve2d_taylor(
+        curve,
+        Taylor::variable(interval_range(range)?, 0),
+        0,
+        false,
+        execution.budget,
+        execution.cancel,
+    )?;
+    let value = projected_surface_taylor(surface, uv, projection, 0, execution)?;
+    let [[position], [first], [second], _] = curve_jet_from_taylor([value]);
+    Ok(ValidatedScalarCurveJet {
+        position,
+        first,
+        second,
+    })
+}
+
+/// Pulls one interval functional through native surface coefficients.
+///
+/// The UV Taylor pair belongs to the original chart, not a fitted spatial
+/// surrogate. Polynomial tensors use partition unity before basis expansion;
+/// rational tensors retain their original denominator even for a zero scalar.
+/// Unsupported scalar specializations retain the full certified evaluation.
+pub(crate) fn projected_surface_taylor(
+    surface: &Surface,
+    [u, v]: [Taylor; 2],
+    projection: ScalarProjection<3>,
+    nesting: usize,
+    execution: &mut ProjectionExecution<'_>,
+) -> Result<Taylor, E> {
+    execution.budget.charge(1, execution.cancel)?;
+    if nesting > MAX_NATIVE_GEOMETRY_NESTING {
+        return Err(E::ResourceLimit);
+    }
+    if !projection
+        .direction
+        .into_iter()
+        .chain([projection.offset])
+        .all(I::is_finite)
+    {
+        return Err(E::ConditioningFailure);
+    }
+    u.finite()?;
+    v.finite()?;
+    let value = match surface {
+        Surface::Plane(plane) => {
+            let [constant, a, b] = plane_coefficients(
+                plane,
+                projection.direction,
+                projection.offset,
+                projection.center,
+            )?;
+            Taylor::interval(constant) + u * Taylor::interval(a) + v * Taylor::interval(b)
+        }
+        Surface::ExtrusionSurface(surface) => {
+            let vector = surface.extruding_vector();
+            let slope = dot([vector.x, vector.y, vector.z], projection.direction, ZERO)?;
+            projected_curve3d(
+                surface.entity_curve(),
+                u,
+                projection,
+                nesting + 1,
+                false,
+                execution.budget,
+                execution.cancel,
+            )? + v * Taylor::interval(slope)
+        }
+        Surface::BsplineSurface(surface) => projected_tensor(
+            (surface.knot_vectors(), surface.control_points()),
+            [u, v],
+            |point| [point.x, point.y, point.z],
+            projection,
+            false,
+            execution,
+        )?,
+        Surface::NurbsSurface(surface) => {
+            let constant = projection_constant(projection)?;
+            projected_tensor(
+                (surface.knot_vectors(), surface.control_points()),
+                [u, v],
+                |point| [point.x, point.y, point.z, point.w],
+                ScalarProjection {
+                    direction: [
+                        projection.direction[0],
+                        projection.direction[1],
+                        projection.direction[2],
+                        constant,
+                    ],
+                    offset: ZERO,
+                    center: None,
+                },
+                true,
+                execution,
+            )?
+        }
+        Surface::RevolutionSurface(processor) => {
+            let (u, v) = if processor.orientation() {
+                (u, v)
+            } else {
+                (v, u)
+            };
+            let surface = processor.entity();
+            let origin = surface.origin();
+            let axis = surface.axis();
+            let origin = [origin.x, origin.y, origin.z];
+            let axis = [axis.x, axis.y, axis.z];
+            if !axis.into_iter().chain(origin).all(f64::is_finite) {
+                return Err(E::InvalidInput);
+            }
+            placed_projection(*processor.transform(), projection, |projection| {
+                let normal = projection.direction;
+                // Project the native rotation coefficients before separating the profile.
+                let axial = std::array::from_fn(|j| {
+                    (0..3)
+                        .map(|i| normal[i] * (I::point(axis[i]) * I::point(axis[j])))
+                        .fold(ZERO, |a, b| a + b)
+                });
+                let radial = std::array::from_fn(|j| {
+                    (0..3)
+                        .map(|i| {
+                            normal[i]
+                                * (I::point(if i == j { 1.0 } else { 0.0 })
+                                    - I::point(axis[i]) * I::point(axis[j]))
+                        })
+                        .fold(ZERO, |a, b| a + b)
+                });
+                let cross = [
+                    normal[1] * I::point(axis[2]) - normal[2] * I::point(axis[1]),
+                    normal[2] * I::point(axis[0]) - normal[0] * I::point(axis[2]),
+                    normal[0] * I::point(axis[1]) - normal[1] * I::point(axis[0]),
+                ];
+                let constant = coefficient(origin, normal, projection.offset, projection.center)?;
+                let mut profile = |direction: [I; 3], required: bool| {
+                    if !required && direction == [ZERO; 3] {
+                        Ok(Taylor::ZERO)
+                    } else {
+                        projected_curve3d(
+                            surface.entity_curve(),
+                            u,
+                            ScalarProjection {
+                                direction,
+                                offset: ZERO,
+                                center: Some(origin),
+                            },
+                            nesting + 1,
+                            false,
+                            execution.budget,
+                            execution.cancel,
+                        )
+                    }
+                };
+                // Even a constant functional must admit the original profile.
+                let axial_value = profile(axial, radial == [ZERO; 3] && cross == [ZERO; 3])?;
+                let radial_value = profile(radial, false)?;
+                let cross_value = profile(cross, false)?;
+                if radial == [ZERO; 3] && cross == [ZERO; 3] {
+                    Ok(Taylor::interval(constant) + axial_value)
+                } else {
+                    let (sine, cosine) = v.sin_cos();
+                    Ok(Taylor::interval(constant)
+                        + axial_value
+                        + radial_value * cosine
+                        + cross_value * sine)
+                }
+            })?
+        }
+        Surface::SphericalSurface(processor) => {
+            let (u, v) = if processor.orientation() {
+                (u, v)
+            } else {
+                (v, u)
+            };
+            let sphere = processor.entity();
+            let center = sphere.center();
+            let radius = sphere.radius();
+            if !radius.is_finite() {
+                return Err(E::InvalidInput);
+            }
+            let (su, cu) = u.sin_cos();
+            let (sv, cv) = v.sin_cos();
+            placed_projection(*processor.transform(), projection, |projection| {
+                Ok(Taylor::interval(coefficient(
+                    [center.x, center.y, center.z],
+                    projection.direction,
+                    projection.offset,
+                    projection.center,
+                )?) + Taylor::constant(radius)
+                    * project_taylor([su * cv, su * sv, cu], projection.direction, ZERO))
+            })?
+        }
+        Surface::ToroidalSurface(processor) => {
+            let (u, v) = if processor.orientation() {
+                (u, v)
+            } else {
+                (v, u)
+            };
+            let torus = processor.entity();
+            let center = torus.center();
+            if ![torus.small_radius(), torus.large_radius()]
+                .into_iter()
+                .all(f64::is_finite)
+            {
+                return Err(E::InvalidInput);
+            }
+            let (su, cu) = u.sin_cos();
+            let (sv, cv) = v.sin_cos();
+            let minor = Taylor::constant(torus.small_radius());
+            let radial = Taylor::constant(torus.large_radius()) + minor * cv;
+            placed_projection(*processor.transform(), projection, |projection| {
+                Ok(Taylor::interval(coefficient(
+                    [center.x, center.y, center.z],
+                    projection.direction,
+                    projection.offset,
+                    projection.center,
+                )?) + project_taylor(
+                    [radial * cu, radial * su, minor * sv],
+                    projection.direction,
+                    ZERO,
+                ))
+            })?
+        }
+        _ => project_taylor(
+            surface_taylor_with_policy(
+                surface,
+                u,
+                v,
+                nesting,
+                false,
+                execution.budget,
+                execution.cancel,
+            )?,
+            projection.direction,
+            projection_constant(projection)?,
+        ),
+    };
+    value.finite()
+}
+
+fn projection_constant<const N: usize>(projection: ScalarProjection<N>) -> Result<I, E> {
+    match projection.center {
+        Some(center) => Ok(projection.offset - dot(center, projection.direction, ZERO)?),
+        None => Ok(projection.offset),
+    }
+}
+
+fn placed_projection(
+    matrix: Matrix4,
+    projection: ScalarProjection<3>,
+    mut evaluate: impl FnMut(ScalarProjection<3>) -> Result<Taylor, E>,
+) -> Result<Taylor, E> {
+    if !(0..4).all(|i| (0..4).all(|j| matrix[i][j].is_finite())) {
+        return Err(E::InvalidInput);
+    }
+    if (0..4).all(|i| (0..4).all(|j| matrix[i][j] == if i == j { 1.0 } else { 0.0 })) {
+        return evaluate(projection);
+    }
+    let affine = (0..3).all(|i| matrix[i][3] == 0.0) && matrix[3][3] == 1.0;
+    let constant = projection_constant(projection)?;
+    let mut functional = [ZERO; 4];
+    for (j, value) in functional.iter_mut().enumerate() {
+        let column = [matrix[j][0], matrix[j][1], matrix[j][2]];
+        *value = if affine && j == 3 {
+            coefficient(
+                column,
+                projection.direction,
+                projection.offset,
+                projection.center,
+            )?
+        } else {
+            dot(
+                column,
+                projection.direction,
+                constant * I::point(matrix[j][3]),
+            )?
+        };
+    }
+    let numerator = evaluate(ScalarProjection {
+        direction: [functional[0], functional[1], functional[2]],
+        offset: functional[3],
+        center: None,
+    })?;
+    // `Matrix4`/`Point3` uses homogeneous division; `Matrix3`/`Point2` does not.
+    if affine {
+        Ok(numerator)
+    } else {
+        let denominator = evaluate(ScalarProjection {
+            direction: [matrix[0][3], matrix[1][3], matrix[2][3]].map(I::point),
+            offset: I::point(matrix[3][3]),
+            center: None,
+        })?;
+        Ok(numerator * denominator.reciprocal()?)
+    }
+}
+
+fn projected_tensor<P, const N: usize>(
+    source: (&(KnotVector, KnotVector), &[Vec<P>]),
+    uv: [Taylor; 2],
+    control: impl Fn(&P) -> [f64; N],
+    projection: ScalarProjection<N>,
+    rational: bool,
+    execution: &mut ProjectionExecution<'_>,
+) -> Result<Taylor, E> {
+    let mut pending = [(uv, 0usize); 49];
+    let mut length = 1;
+    let mut result: Option<Taylor> = None;
+    while length != 0 {
+        execution.budget.charge(1, execution.cancel)?;
+        length -= 1;
+        let (uv, depth) = pending[length];
+        match projected_tensor_cell(source, uv, &control, projection, rational, execution) {
+            Ok(value) => result = Some(result.map_or(value, |previous| previous.hull(value))),
+            Err(E::DenominatorContainsZero) => {
+                let axis = usize::from(uv[1].0[0][0].width() > uv[0].0[0][0].width());
+                let middle = uv[axis].0[0][0].midpoint();
+                if depth == 48
+                    || middle <= uv[axis].0[0][0].lower
+                    || middle >= uv[axis].0[0][0].upper
+                {
+                    return Err(E::DenominatorContainsZero);
+                }
+                let mut lower = uv;
+                let mut upper = uv;
+                lower[axis].0[0][0].upper = middle;
+                upper[axis].0[0][0].lower = middle;
+                execution.budget.charge(2, execution.cancel)?;
+                pending[length] = (upper, depth + 1);
+                pending[length + 1] = (lower, depth + 1);
+                length += 2;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    result.ok_or(E::ParameterOutOfRange)
+}
+
+fn projected_tensor_cell<P, const N: usize>(
+    (knots, controls): (&(KnotVector, KnotVector), &[Vec<P>]),
+    [u, v]: [Taylor; 2],
+    control: &impl Fn(&P) -> [f64; N],
+    projection: ScalarProjection<N>,
+    rational: bool,
+    execution: &mut ProjectionExecution<'_>,
+) -> Result<Taylor, E> {
+    if controls.is_empty() || controls[0].is_empty() {
+        return Err(E::InvalidInput);
+    }
+    let nu = controls.len();
+    let nv = controls[0].len();
+    for row in controls {
+        execution.budget.charge(1, execution.cancel)?;
+        if row.len() != nv {
+            return Err(E::InvalidInput);
+        }
+    }
+    let pu = validate_knots(
+        &knots.0,
+        nu,
+        u.0[0][0],
+        true,
+        execution.budget,
+        execution.cancel,
+    )?;
+    let pv = validate_knots(
+        &knots.1,
+        nv,
+        v.0[0][0],
+        true,
+        execution.budget,
+        execution.cancel,
+    )?;
+    let mut result: Option<Taylor> = None;
+    for su in 0..knots.0.len() - 1 {
+        execution.budget.charge(1, execution.cancel)?;
+        if knots.0[su] == knots.0[su + 1] {
+            continue;
+        }
+        let lower = if knots.0[su] == knots.0[0] {
+            u.0[0][0].lower.min(knots.0[su])
+        } else {
+            knots.0[su]
+        };
+        let upper = if knots.0[su + 1] == knots.0[knots.0.len() - 1] {
+            u.0[0][0].upper.max(knots.0[su + 1])
+        } else {
+            knots.0[su + 1]
+        };
+        let Some(u) = clipped_parameter(u, lower, upper) else {
+            continue;
+        };
+        let (iu, lu, bu) = basis(&knots.0, nu, pu, su, u, execution.budget, execution.cancel)?;
+        for sv in 0..knots.1.len() - 1 {
+            execution.budget.charge(1, execution.cancel)?;
+            if knots.1[sv] == knots.1[sv + 1] {
+                continue;
+            }
+            let lower = if knots.1[sv] == knots.1[0] {
+                v.0[0][0].lower.min(knots.1[sv])
+            } else {
+                knots.1[sv]
+            };
+            let upper = if knots.1[sv + 1] == knots.1[knots.1.len() - 1] {
+                v.0[0][0].upper.max(knots.1[sv + 1])
+            } else {
+                knots.1[sv + 1]
+            };
+            let Some(v) = clipped_parameter(v, lower, upper) else {
+                continue;
+            };
+            let (iv, lv, bv) = basis(&knots.1, nv, pv, sv, v, execution.budget, execution.cancel)?;
+            let partition = su >= pu && su < nu && sv >= pv && sv < nv;
+            let reference = if partition {
+                control(&controls[iu][iv])
+            } else {
+                [0.0; N]
+            };
+            let mut numerator = if partition {
+                Taylor::interval(coefficient(
+                    reference,
+                    projection.direction,
+                    projection.offset,
+                    projection.center,
+                )?)
+            } else {
+                Taylor::ZERO
+            };
+            let mut denominator = Taylor::constant(if partition { reference[N - 1] } else { 0.0 });
+            let mut numerator_hull: Option<I> = None;
+            let mut denominator_hull: Option<I> = None;
+            for (i, a) in bu[..lu].iter().enumerate() {
+                for (j, b) in bv[..lv].iter().enumerate() {
+                    execution.budget.charge(1, execution.cancel)?;
+                    let point = control(&controls[iu + i][iv + j]);
+                    let value = coefficient(
+                        point,
+                        projection.direction,
+                        projection.offset,
+                        projection.center,
+                    )?;
+                    let residual = if partition {
+                        dot_difference(point, reference, projection.direction)?
+                    } else {
+                        value
+                    };
+                    let basis = *a * *b;
+                    numerator = numerator + Taylor::interval(residual) * basis;
+                    numerator_hull = Some(numerator_hull.map_or(value, |hull| hull.hull(value)));
+                    if rational {
+                        let weight = I::point(point[N - 1]);
+                        let residual =
+                            weight - I::point(if partition { reference[N - 1] } else { 0.0 });
+                        denominator = denominator + Taylor::interval(residual) * basis;
+                        denominator_hull =
+                            Some(denominator_hull.map_or(weight, |hull| hull.hull(weight)));
+                    }
+                }
+            }
+            let nonnegative = knots.0[su] <= u.0[0][0].lower
+                && u.0[0][0].upper <= knots.0[su + 1]
+                && knots.1[sv] <= v.0[0][0].lower
+                && v.0[0][0].upper <= knots.1[sv + 1];
+            if partition && nonnegative {
+                if let Some(hull) = numerator_hull {
+                    numerator.0[0][0] = numerator.0[0][0]
+                        .intersection(hull)
+                        .ok_or(E::ConditioningFailure)?;
+                }
+                if let Some(hull) = denominator_hull {
+                    denominator.0[0][0] = denominator.0[0][0]
+                        .intersection(hull)
+                        .ok_or(E::ConditioningFailure)?;
+                }
+            }
+            let value = if rational {
+                numerator * denominator.reciprocal()?
+            } else {
+                numerator
+            };
+            result = Some(result.map_or(value, |previous| previous.hull(value)));
+        }
+    }
+    result.ok_or(E::ParameterOutOfRange)
 }
 
 fn projected_curve3d(
@@ -762,5 +1253,434 @@ mod scalar_projection_regressions {
             assert!(jet.position.lower <= -4.0 && -4.0 <= jet.position.upper);
             assert!(jet.position.upper - jet.position.lower < 1.0e-10);
         }
+    }
+}
+
+#[cfg(test)]
+mod scalar_surface_laws {
+    use super::*;
+    use crate::{
+        BsplineCurve, BsplineSurface, Invertible, Line, Matrix3, NurbsCurve, NurbsSurface, Point2,
+        Point3, Processor, RevolutionSurface, TrimmedCurve, Vector3, Vector4,
+        validated_surface_jet,
+    };
+
+    fn knots() -> KnotVector { KnotVector::from(vec![0.0, 0.0, 1.0, 1.0]) }
+
+    fn projection(direction: [f64; 3], center: [f64; 3]) -> ScalarProjection<3> {
+        ScalarProjection {
+            direction: direction.map(I::point),
+            offset: ZERO,
+            center: Some(center),
+        }
+    }
+
+    fn enclose(surface: &Surface, uv: &Curve2D, range: [f64; 2]) -> ValidatedScalarCurveJet {
+        projected_surface_curve_jet(
+            surface,
+            uv,
+            range,
+            projection([0.0, 0.0, 1.0], [0.0; 3]),
+            &mut ProjectionExecution {
+                budget: &mut ValidatedGeometryBudget::new(1_000_000),
+                cancel: &AtomicBool::new(false),
+            },
+        )
+        .unwrap()
+    }
+
+    fn contains(interval: I, value: f64) {
+        assert!(
+            interval.lower <= value && value <= interval.upper,
+            "{interval:?} misses {value}"
+        );
+    }
+
+    #[test]
+    fn posed_reversed_uv_composes_the_original_polynomial_world_law() {
+        let surface = Surface::BsplineSurface(BsplineSurface::new(
+            (knots(), knots()),
+            vec![
+                vec![Point3::new(0.0, 0.0, 5.0), Point3::new(0.0, 1.0, 8.0)],
+                vec![Point3::new(1.0, 0.0, 7.0), Point3::new(1.0, 1.0, 10.0)],
+            ],
+        ));
+        let basis = Curve2D::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+            vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(0.5, 0.0),
+                Point2::new(1.0, 1.0),
+            ],
+        ));
+        for reversed in [false, true] {
+            let mut wrapper = Processor::with_transform(
+                TrimmedCurve::new(Box::new(basis.clone()), (0.0, 1.0)),
+                Matrix3::new(2.0, 0.0, 0.5, 0.0, 3.0, 0.25, 1.0, -2.0, -4.0),
+            );
+            if reversed {
+                wrapper.invert();
+            }
+            let uv = Curve2D::TrimmedCurve(wrapper);
+            let jet = projected_surface_curve_jet(
+                &surface,
+                &uv,
+                [0.125, 0.375],
+                projection([2.0, -1.0, 4.0], [7.0, 11.0, 13.0]),
+                &mut ProjectionExecution {
+                    budget: &mut ValidatedGeometryBudget::new(1_000_000),
+                    cancel: &AtomicBool::new(false),
+                },
+            )
+            .unwrap();
+            for t in [0.125, 0.25, 0.375] {
+                let s = if reversed { 1.0 - t } else { t };
+                contains(jet.position, 33.0 * s * s + 20.0 * s - 47.0);
+                contains(
+                    jet.first,
+                    (66.0 * s + 20.0) * if reversed { -1.0 } else { 1.0 },
+                );
+                contains(jet.second, 66.0);
+            }
+        }
+    }
+
+    #[test]
+    fn rational_tensor_composes_an_independent_quotient_law_with_fewer_visits() {
+        let surface = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+            (knots(), knots()),
+            vec![
+                vec![
+                    Vector4::new(0.0, 0.0, 3.0, 1.0),
+                    Vector4::new(0.0, 1.0, 10.0, 1.0),
+                ],
+                vec![
+                    Vector4::new(2.0, 0.0, 8.0, 2.0),
+                    Vector4::new(2.0, 2.0, 26.0, 2.0),
+                ],
+            ],
+        )));
+        let uv = Curve2D::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+            vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(0.5, 0.0),
+                Point2::new(1.0, 1.0),
+            ],
+        ));
+        let jet = enclose(&surface, &uv, [0.125, 0.375]);
+        for t in [0.125_f64, 0.25, 0.375] {
+            contains(jet.position, 11.0 * t * t - 4.0 * t + 9.0 - 6.0 / (1.0 + t));
+            contains(jet.first, 22.0 * t - 4.0 + 6.0 / (1.0 + t).powi(2));
+            contains(jet.second, 22.0 - 12.0 / (1.0 + t).powi(3));
+        }
+        let cancel = AtomicBool::new(false);
+        let mut scalar = ValidatedGeometryBudget::new(1_000_000);
+        let mut full = ValidatedGeometryBudget::new(1_000_000);
+        projected_surface_taylor(
+            &surface,
+            [
+                Taylor::variable(I::new(0.125, 0.375).unwrap(), 0),
+                Taylor::variable(I::new(0.125, 0.375).unwrap(), 1),
+            ],
+            projection([0.0, 0.0, 1.0], [0.0; 3]),
+            0,
+            &mut ProjectionExecution {
+                budget: &mut scalar,
+                cancel: &cancel,
+            },
+        )
+        .unwrap();
+        validated_surface_jet(&surface, [[0.125, 0.375]; 2], &mut full, &cancel).unwrap();
+        assert!(scalar.consumed() < full.consumed());
+    }
+
+    #[test]
+    fn generic_posed_inverted_revolution_retains_scalar_rotation_derivatives() {
+        for inverted in [false, true] {
+            let mut processor = Processor::with_transform(
+                RevolutionSurface::by_revolution(
+                    Curve::Line(Line(
+                        Point3::new(2.0, 0.0, 5.0),
+                        Point3::new(3.0, 0.0, 12.0),
+                    )),
+                    Point3::new(0.0, 0.0, 0.0),
+                    Vector3::new(0.0, 0.0, 1.0),
+                ),
+                Matrix4::new(
+                    2.0, 0.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 3.0, -1.0, 7.0, 1.0,
+                ),
+            );
+            if inverted {
+                processor.invert();
+            }
+            let surface = Surface::RevolutionSurface(processor);
+            let end = if inverted {
+                Point2::new(2.0, 1.0)
+            } else {
+                Point2::new(1.0, 2.0)
+            };
+            let uv = Curve2D::Line(Line(Point2::new(0.0, 0.0), end));
+            let jet = projected_surface_curve_jet(
+                &surface,
+                &uv,
+                [0.125, 0.375],
+                projection([1.0, 2.0, 3.0], [11.0, 13.0, 17.0]),
+                &mut ProjectionExecution {
+                    budget: &mut ValidatedGeometryBudget::new(1_000_000),
+                    cancel: &AtomicBool::new(false),
+                },
+            )
+            .unwrap();
+            for t in [0.125_f64, 0.25, 0.375] {
+                let a = 2.0 * (2.0 * t).cos() + 8.0 * (2.0 * t).sin();
+                let b = -2.0 * (2.0 * t).sin() + 8.0 * (2.0 * t).cos();
+                contains(jet.position, (2.0 + t) * a + 9.0 + 105.0 * t);
+                contains(jet.first, a + 2.0 * (2.0 + t) * b + 105.0);
+                contains(jet.second, 4.0 * b - 4.0 * (2.0 + t) * a);
+            }
+        }
+    }
+
+    #[test]
+    fn interval_functional_retains_all_plane_coefficients() {
+        let surface = Surface::Plane(Plane::xy());
+        let direction = [I::new(1.0, 2.0).unwrap(), I::new(-3.0, -2.0).unwrap(), ZERO];
+        let value = projected_surface_taylor(
+            &surface,
+            [
+                Taylor::variable(I::new(2.0, 3.0).unwrap(), 0),
+                Taylor::variable(I::new(4.0, 5.0).unwrap(), 1),
+            ],
+            ScalarProjection {
+                direction,
+                offset: I::new(-7.0, -5.0).unwrap(),
+                center: Some([1.0, 2.0, 3.0]),
+            },
+            0,
+            &mut ProjectionExecution {
+                budget: &mut ValidatedGeometryBudget::new(1_000_000),
+                cancel: &AtomicBool::new(false),
+            },
+        )
+        .unwrap();
+        for a in [1.0, 2.0] {
+            for b in [-3.0, -2.0] {
+                for offset in [-7.0, -5.0] {
+                    for u in [2.0, 3.0] {
+                        for v in [4.0, 5.0] {
+                            contains(value.0[0][0], a * (u - 1.0) + b * (v - 2.0) + offset);
+                            contains(value.0[1][0], a);
+                            contains(value.0[0][1], b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_functionals_do_not_erase_surface_or_uv_poles_and_source_knots() {
+        let surface = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+            (knots(), knots()),
+            vec![
+                vec![Vector4::new(0.0, 0.0, 0.0, -1.0); 2],
+                vec![Vector4::new(1.0, 0.0, 0.0, 1.0); 2],
+            ],
+        )));
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(1_000_000);
+        let zero = projection([0.0; 3], [0.0; 3]);
+        assert!(matches!(
+            projected_surface_taylor(
+                &surface,
+                [
+                    Taylor::variable(I::point(0.5), 0),
+                    Taylor::variable(I::point(0.5), 1)
+                ],
+                zero,
+                0,
+                &mut ProjectionExecution {
+                    budget: &mut budget,
+                    cancel: &cancel
+                },
+            ),
+            Err(E::DenominatorContainsZero)
+        ));
+        assert!(budget.consumed() > 0);
+        let pole_profile = Curve::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
+            knots(),
+            vec![
+                Vector4::new(2.0, 0.0, 0.0, -1.0),
+                Vector4::new(3.0, 0.0, 1.0, 1.0),
+            ],
+        )));
+        let revolution =
+            Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+                pole_profile,
+                Point3::new(0.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            )));
+        assert!(matches!(
+            projected_surface_taylor(
+                &revolution,
+                [
+                    Taylor::variable(I::point(0.5), 0),
+                    Taylor::variable(I::point(0.25), 1)
+                ],
+                zero,
+                0,
+                &mut ProjectionExecution {
+                    budget: &mut budget,
+                    cancel: &cancel
+                },
+            ),
+            Err(E::DenominatorContainsZero)
+        ));
+        let uv = Curve2D::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
+            knots(),
+            vec![Vector3::new(0.0, 0.0, -1.0), Vector3::new(1.0, 0.0, 1.0)],
+        )));
+        assert!(matches!(
+            projected_surface_curve_jet(
+                &Surface::Plane(Plane::xy()),
+                &uv,
+                [0.5, 0.5],
+                zero,
+                &mut ProjectionExecution {
+                    budget: &mut budget,
+                    cancel: &cancel
+                },
+            ),
+            Err(E::DenominatorContainsZero)
+        ));
+        let crease = Surface::BsplineSurface(BsplineSurface::new(
+            (KnotVector::from(vec![0.0, 0.0, 1.0, 2.0, 2.0]), knots()),
+            (0..3)
+                .map(|u| {
+                    vec![
+                        Point3::new(u as f64, 0.0, 0.0),
+                        Point3::new(u as f64, 1.0, 0.0),
+                    ]
+                })
+                .collect(),
+        ));
+        assert!(matches!(
+            projected_surface_taylor(
+                &crease,
+                [
+                    Taylor::variable(I::new(0.5, 1.5).unwrap(), 0),
+                    Taylor::variable(I::new(0.0, 1.0).unwrap(), 1)
+                ],
+                zero,
+                0,
+                &mut ProjectionExecution {
+                    budget: &mut budget,
+                    cancel: &cancel
+                },
+            ),
+            Err(E::NonSmooth)
+        ));
+        for (limit, cancelled, expected) in
+            [(0, false, E::ResourceLimit), (100, true, E::Cancelled)]
+        {
+            let mut budget = ValidatedGeometryBudget::new(limit);
+            assert_eq!(
+                projected_surface_taylor(
+                    &Surface::Plane(Plane::xy()),
+                    [Taylor::constant(0.0); 2],
+                    zero,
+                    0,
+                    &mut ProjectionExecution {
+                        budget: &mut budget,
+                        cancel: &AtomicBool::new(cancelled)
+                    },
+                )
+                .unwrap_err(),
+                expected,
+            );
+            assert_eq!(budget.consumed(), if cancelled { 0 } else { limit });
+        }
+    }
+
+    #[test]
+    fn mixed_weights_certify_the_actual_nonzero_denominator_not_the_weight_hull() {
+        let surface = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+            (
+                KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+                knots(),
+            ),
+            [1.0, -0.125, 1.0]
+                .into_iter()
+                .enumerate()
+                .map(|(i, w)| {
+                    vec![
+                        Vector4::new(i as f64, 0.0, 0.0, w),
+                        Vector4::new(i as f64, 1.0, 0.0, w),
+                    ]
+                })
+                .collect(),
+        )));
+        let value = projected_surface_taylor(
+            &surface,
+            [
+                Taylor::variable(I::new(0.0, 1.0).unwrap(), 0),
+                Taylor::variable(I::new(0.0, 1.0).unwrap(), 1),
+            ],
+            projection([0.0, 0.0, 1.0], [0.0; 3]),
+            0,
+            &mut ProjectionExecution {
+                budget: &mut ValidatedGeometryBudget::new(1_000_000),
+                cancel: &AtomicBool::new(false),
+            },
+        )
+        .unwrap();
+        assert_eq!(value.0[0][0], ZERO);
+        assert_eq!(value.0[1][0], ZERO);
+        assert_eq!(value.0[0][1], ZERO);
+    }
+
+    #[test]
+    fn interval_axis_functional_retains_exact_angular_independence_and_origin_tube() {
+        let surface = Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+            Curve::Line(Line(
+                Point3::new(2.0, 0.0, 5.0),
+                Point3::new(3.0, 0.0, 12.0),
+            )),
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+        )));
+        let normal = [ZERO, ZERO, I::new(1.0, 2.0).unwrap()];
+        let origin_z = I::new(3.0, 4.0).unwrap();
+        let center_z = origin_z.midpoint();
+        let value = projected_surface_taylor(
+            &surface,
+            [
+                Taylor::variable(I::new(0.0, 1.0).unwrap(), 0),
+                Taylor::variable(I::new(-10.0, 10.0).unwrap(), 1),
+            ],
+            ScalarProjection {
+                direction: normal,
+                offset: normal[2] * (I::point(center_z) - origin_z),
+                center: Some([0.0, 0.0, center_z]),
+            },
+            0,
+            &mut ProjectionExecution {
+                budget: &mut ValidatedGeometryBudget::new(1_000_000),
+                cancel: &AtomicBool::new(false),
+            },
+        )
+        .unwrap();
+        for n in [1.0, 2.0] {
+            for origin in [3.0, 4.0] {
+                for u in [0.0, 0.5, 1.0] {
+                    contains(value.0[0][0], n * (5.0 + 7.0 * u - origin));
+                    contains(value.0[1][0], n * 7.0);
+                }
+            }
+        }
+        assert_eq!(value.0[0][1], ZERO);
+        assert_eq!(value.0[0][2], ZERO);
+        assert_eq!(value.0[1][1], ZERO);
     }
 }

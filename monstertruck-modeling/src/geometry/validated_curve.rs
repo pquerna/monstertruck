@@ -678,20 +678,9 @@ impl PreparedValidatedCurve<'_> {
                 Err(error) => return Err(error),
             }
         }
-        let jet = self.jet(range, budget, cancel)?;
-        let mut result = ValidatedScalarCurveJet {
-            position: ZERO,
-            first: ZERO,
-            second: ZERO,
-        };
-        for axis in 0..3 {
-            let factor = ValidatedInterval::point(direction[axis]);
-            result.position = result.position
-                + factor * (jet.position[axis] - ValidatedInterval::point(origin[axis]));
-            result.first = result.first + factor * jet.first[axis];
-            result.second = result.second + factor * jet.second[axis];
-        }
-        if self.mapped.is_none() && matches!(self.source.curve()?, Curve::IntersectionCurve(_)) {
+        let coefficients = if self.mapped.is_none()
+            && matches!(self.source.curve()?, Curve::IntersectionCurve(_))
+        {
             let (first, second, _) = carriers(self.source.curve()?)?;
             let direction = direction.map(ValidatedInterval::point);
             let origin = origin.map(ValidatedInterval::point);
@@ -708,6 +697,50 @@ impl PreparedValidatedCurve<'_> {
                     ]);
                 }
             }
+            Some(coefficients)
+        } else {
+            None
+        };
+        if let Some(coefficients) = &coefficients {
+            let mut constant: Option<ValidatedInterval> = None;
+            for &[offset, u, v] in coefficients.iter().flatten() {
+                budget.charge(1, cancel)?;
+                if u == ZERO && v == ZERO {
+                    constant = Some(match constant {
+                        None => offset,
+                        Some(previous) => previous
+                            .intersection(offset)
+                            .ok_or(ValidatedGeometryError::ConditioningFailure)?,
+                    });
+                }
+            }
+            if let Some(position) = constant {
+                if !position.is_finite() {
+                    return Err(ValidatedGeometryError::ConditioningFailure);
+                }
+                // An original carrier coefficient identity is constant over
+                // every retained root, independently of the guide coordinates.
+                return Ok(ValidatedScalarCurveJet {
+                    position,
+                    first: ZERO,
+                    second: ZERO,
+                });
+            }
+        }
+        let jet = self.jet(range, budget, cancel)?;
+        let mut result = ValidatedScalarCurveJet {
+            position: ZERO,
+            first: ZERO,
+            second: ZERO,
+        };
+        for axis in 0..3 {
+            let factor = ValidatedInterval::point(direction[axis]);
+            result.position = result.position
+                + factor * (jet.position[axis] - ValidatedInterval::point(origin[axis]));
+            result.first = result.first + factor * jet.first[axis];
+            result.second = result.second + factor * jet.second[axis];
+        }
+        if let Some(coefficients) = coefficients {
             let mut position: Option<ValidatedInterval> = None;
             for piece in &self.pieces {
                 budget.charge(1, cancel)?;
@@ -735,22 +768,6 @@ impl PreparedValidatedCurve<'_> {
                 position = Some(position.map_or(bound, |previous| previous.hull(bound)));
             }
             result.position = position.ok_or(ValidatedGeometryError::ParameterOutOfRange)?;
-            if coefficients
-                .into_iter()
-                .flatten()
-                .any(|[_, u, v]| u == ZERO && v == ZERO)
-            {
-                // This is a source-coefficient identity on an entire carrier,
-                // not a conclusion drawn from sampled residuals.
-                result.first = result
-                    .first
-                    .intersection(ZERO)
-                    .ok_or(ValidatedGeometryError::ConditioningFailure)?;
-                result.second = result
-                    .second
-                    .intersection(ZERO)
-                    .ok_or(ValidatedGeometryError::ConditioningFailure)?;
-            }
         }
         if ![result.position, result.first, result.second]
             .into_iter()
