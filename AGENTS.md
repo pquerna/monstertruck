@@ -21,6 +21,15 @@ empty selection cancels shared opposite pairs; callers explicitly select any
 shared chart connectors to retain. Do not infer original chart intent from edge
 order or retain hidden history. Face cutting returns only two regular separating
 boundaries; nonseparating or pinched cuts without that pair refuse mutation.
+Native edge IDs are allocation-pointer identities, not independently owned
+history keys. Any ancestry or subdivision cache retaining an ID beyond its
+edge's strong lifetime must also retain an `EdgeIdentityLease` for that actual
+allocation, or prove the key is removed before the edge drops. A lease keeps
+only allocation identity alive, never geometry buffers; charge its retained
+inline allocation and container capacity under the existing byte limits.
+Generated-use receipts grant lifetime/source-use authority, not a source-cut
+ancestor for an unrelated generated curve. Never infer ancestry from a reused
+pointer address or matching coordinates.
 Open and closed boolean intersections that cross paired chart coedges must attach to
 their distinct material corners, with shared native/polygon subdivision and
 the same ordered incidence rewrite. A spatially closed winding loop is not a

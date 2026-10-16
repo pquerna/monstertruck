@@ -70,6 +70,14 @@ pub trait TryIntoAnalyticSurfaceKind {
     /// Converted, fitted and processed surfaces refuse unless their original
     /// plane representation is directly retained without rounded construction.
     fn original_plane(&self) -> Option<&Plane> { None }
+
+    /// Borrows a literal original [`Sphere`] and its stored affine pose, if any.
+    ///
+    /// This is source data, not a containment or similarity certificate.
+    /// Fitted spherical revolutions and recomposed nontrivial nested poses
+    /// refuse. Parameter inversion does not change the carrier's point set;
+    /// callers still use the actual surface for oriented normals and domains.
+    fn original_sphere(&self) -> Option<(&Sphere, Option<&Matrix4>)> { None }
 }
 
 impl TryIntoAnalyticSurfaceKind for Plane {
@@ -304,6 +312,8 @@ impl TryIntoAnalyticSurfaceKind for Tmesh<Point3> {
 impl TryIntoAnalyticSurfaceKind for Sphere {
     #[inline]
     fn try_into_analytic_surface_kind(&self) -> Option<AnalyticSurfaceKind> { None }
+
+    fn original_sphere(&self) -> Option<(&Sphere, Option<&Matrix4>)> { Some((self, None)) }
 }
 
 /// `None`: no [`AnalyticSurfaceKind`] variant describes a torus, and its net
@@ -334,6 +344,17 @@ where C: TryIntoAnalyticSurfaceKind
     fn try_into_analytic_surface_kind(&self) -> Option<AnalyticSurfaceKind> {
         let kind = self.entity().try_into_analytic_surface_kind()?;
         transform_analytic_surface_kind(kind, *self.transform(), self.orientation())
+    }
+
+    fn original_sphere(&self) -> Option<(&Sphere, Option<&Matrix4>)> {
+        let (sphere, pose) = self.entity().original_sphere()?;
+        if *self.transform() == Matrix4::identity() {
+            Some((sphere, pose))
+        } else if pose.is_none() {
+            Some((sphere, Some(self.transform())))
+        } else {
+            None
+        }
     }
 }
 

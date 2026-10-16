@@ -5,6 +5,20 @@
 use super::periodic_loops::AttachmentFailure;
 use super::*;
 
+#[path = "chart_boundary.rs"]
+mod chart_boundary;
+#[path = "endpoint_root.rs"]
+mod endpoint_root;
+#[path = "original_face.rs"]
+mod original_face;
+#[path = "owned_endpoint.rs"]
+mod owned_endpoint;
+#[path = "sphere_boundary.rs"]
+mod sphere_boundary;
+pub(super) use chart_boundary::original_loop;
+pub(super) use endpoint_root::canonical_plane_endpoint;
+pub(super) use owned_endpoint::{OwnedEndpointBinding, early_owned_endpoints};
+
 fn exact_add(a: f64, b: f64) -> Option<f64> {
     if !a.is_finite() || !b.is_finite() {
         return None;
@@ -380,6 +394,7 @@ fn proves_overlap<C, S>(
 ) -> std::result::Result<bool, AttachmentFailure>
 where
     C: BoundedCurve<Point = Point3> + TryIntoHomogeneousBsplineCurve,
+    S: ParametricSurface3D + SearchNearestParameter<SurfaceParameter, Point = Point3>,
 {
     if let Some(work) = work {
         work.check()?;
@@ -416,30 +431,28 @@ where
     };
     let leader = intersection.leader();
     if leader.len() < 2
-        || leader.first() != Some(&directed_endpoints[0])
-        || leader.last() != Some(&directed_endpoints[1])
+        || !owned_endpoint::bounded_endpoints(intersection, directed_endpoints, work)?
     {
         return Ok(false);
     }
-    for point in leader.iter().copied() {
-        if let Some(work) = work {
-            work.check()?;
-        }
-        if ![point.x, point.y, point.z].into_iter().all(f64::is_finite)
-            || first.contains(point) != Some(true)
-            || second.contains(point) != Some(true)
-        {
+    let (native_front, _) = intersection.range_tuple();
+    let mut previous: Option<Point3> = None;
+    for index in 0..leader.len() {
+        let Some(point) =
+            owned_endpoint::projected_point(intersection, native_front + index as f64, work)?
+        else {
+            return Ok(false);
+        };
+        if first.contains(point) != Some(true) || second.contains(point) != Some(true) {
             return Ok(false);
         }
-    }
-    for pair in leader.windows(2) {
-        if let Some(work) = work {
-            work.check()?;
+        if let Some(old) = previous {
+            let step = projected_difference(direction, point.to_vec(), old.to_vec());
+            if !step.is_some_and(|step| step != 0.0 && (step > 0.0) == positive) {
+                return Ok(false);
+            }
         }
-        let step = projected_difference(direction, pair[1].to_vec(), pair[0].to_vec());
-        if !step.is_some_and(|step| step != 0.0 && (step > 0.0) == positive) {
-            return Ok(false);
-        }
+        previous = Some(point);
     }
     // Same-sign nonzero two-control weights prove one traversal of the complete source
     // segment. Whole original affine operands and their convex support prove a
@@ -453,24 +466,28 @@ type OriginalLoopPair<'a, C> = (&'a Loops<Point3, C>, &'a Loops<Point3, Polyline
 pub(super) fn original_overlap<C, S>(
     intersection: &IntersectionCurve<PolylineCurve, S, S>,
     stores: [OriginalLoopPair<'_, C>; 2],
+    original_boundaries: [&[Wire<Point3, C>]; 2],
     vertices: [&Vertex<Point3>; 2],
     polygon_vertices: [&Vertex<Point3>; 2],
     work: Option<&BooleanWork<'_>>,
 ) -> std::result::Result<Option<OriginalOverlap<C>>, AttachmentFailure>
 where
-    C: Clone + BoundedCurve<Point = Point3> + TryIntoHomogeneousBsplineCurve,
-    S: ParametricSurface3D + TryIntoAnalyticSurfaceKind + TryIntoHomogeneousBsplineSurface,
+    C: Clone
+        + ParametricCurve3D
+        + BoundedCurve
+        + SearchParameter<CurveParameter, Point = Point3>
+        + TryIntoHomogeneousBsplineCurve,
+    S: ParametricSurface3D
+        + SearchNearestParameter<SurfaceParameter, Point = Point3>
+        + TryIntoAnalyticSurfaceKind
+        + TryIntoHomogeneousBsplineSurface,
 {
     if vertices[0] == vertices[1] {
         return Ok(None);
     }
-    let Some(first) = OriginalPlane::from_surface(intersection.surface0()) else {
-        return Ok(None);
-    };
-    let Some(second) = OriginalPlane::from_surface(intersection.surface1()) else {
-        return Ok(None);
-    };
-    let planes = [first, second];
+    let planes = OriginalPlane::from_surface(intersection.surface0())
+        .zip(OriginalPlane::from_surface(intersection.surface1()))
+        .map(|(first, second)| [first, second]);
     let mut selected: Option<OriginalOverlap<C>> = None;
     for (side, (native, polygon)) in stores.into_iter().enumerate() {
         for (wire_index, wire) in native.iter().enumerate() {
@@ -513,14 +530,20 @@ where
                     continue;
                 }
                 if !edge.with_curve(|curve| {
-                    proves_overlap(
-                        curve,
-                        [edge.absolute_front().point(), edge.absolute_back().point()],
-                        vertices.map(Vertex::point),
-                        intersection,
-                        &planes,
-                        work,
-                    )
+                    let absolute = [edge.absolute_front().point(), edge.absolute_back().point()];
+                    let directed = vertices.map(Vertex::point);
+                    if let Some(planes) = &planes {
+                        proves_overlap(curve, absolute, directed, intersection, planes, work)
+                    } else {
+                        sphere_boundary::proves_overlap(
+                            curve,
+                            absolute,
+                            directed,
+                            intersection,
+                            (side, original_boundaries[1 - side]),
+                            work,
+                        )
+                    }
                 })? {
                     continue;
                 }
@@ -803,6 +826,7 @@ mod tests {
             let selected = original_overlap(
                 &branch,
                 [(&native, &polygon), (&empty_native, &empty_polygon)],
+                [face.absolute_boundaries(), &[]],
                 [edge.front(), edge.back()],
                 [polygon_edge.front(), polygon_edge.back()],
                 None,
@@ -925,6 +949,10 @@ mod tests {
         let result = original_overlap(
             &intersection(vec![a.point(), b.point()]),
             [(&native[0], &polygon[0]), (&native[1], &polygon[1])],
+            [
+                shell[0].absolute_boundaries(),
+                shell[1].absolute_boundaries(),
+            ],
             [&a, &b],
             [polygon_edge.front(), polygon_edge.back()],
             None,

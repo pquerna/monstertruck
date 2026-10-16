@@ -21,11 +21,8 @@ impl<T> As<T> for T {
     fn as_(self) -> T { self }
 }
 
-impl<'a, P, C, S> As<&'a Face<P, C, S>> for AdjacentFace<'a, P, C, S> {
-    fn as_(self) -> &'a Face<P, C, S> { self.face }
-}
-
-type FaceAdjacencyMap<'a, P, C, S> = HashMap<&'a Face<P, C, S>, Vec<AdjacentFace<'a, P, C, S>>>;
+type FaceAdjacencyMap<'a, P, C, S> =
+    HashMap<(FaceId<S>, bool), (&'a Face<P, C, S>, Vec<AdjacentFace<'a, P, C, S>>)>;
 impl<P, C, S> Shell<P, C, S> {
     /// Creates the empty shell.
     #[inline(always)]
@@ -240,8 +237,10 @@ impl<P, C, S> Shell<P, C, S> {
 
     /// Returns the adjacency matrix of faces in the shell.
     ///
-    /// For the returned hashmap `map` and each face `face`,
-    /// the vector `map[&face]` consists all faces adjacent to `face`.
+    /// Keys are `(face.id(), face.orientation())`, exactly the directed
+    /// identity used by [`Face`]'s equality and hashing, without mutable
+    /// geometry in the key. Each value retains the actual face reference and
+    /// its adjacent-face vector: `map[&(face.id(), face.orientation())].1`.
     /// # Examples
     /// ```
     /// use monstertruck_topology::*;
@@ -265,10 +264,10 @@ impl<P, C, S> Shell<P, C, S> {
     /// ];
     /// let shell: Shell<_, _, _> = wire.into_iter().map(|w| Face::new(vec![w], ())).collect();
     /// let face_adjacency = shell.face_adjacency();
-    /// assert_eq!(face_adjacency[&shell[0]].len(), 1);
-    /// assert_eq!(face_adjacency[&shell[1]].len(), 1);
-    /// assert_eq!(face_adjacency[&shell[2]].len(), 1);
-    /// assert_eq!(face_adjacency[&shell[3]].len(), 3);
+    /// assert_eq!(face_adjacency[&(shell[0].id(), shell[0].orientation())].1.len(), 1);
+    /// assert_eq!(face_adjacency[&(shell[1].id(), shell[1].orientation())].1.len(), 1);
+    /// assert_eq!(face_adjacency[&(shell[2].id(), shell[2].orientation())].1.len(), 1);
+    /// assert_eq!(face_adjacency[&(shell[3].id(), shell[3].orientation())].1.len(), 3);
     /// ```
     /// ```
     /// use monstertruck_topology::*;
@@ -314,7 +313,7 @@ impl<P, C, S> Shell<P, C, S> {
     ///         assert_eq!(common_edges, 1);
     ///     }
     /// };
-    /// face_adjacency.into_iter().for_each(|(face0, adjacents)| {
+    /// face_adjacency.into_iter().for_each(|(_, (face0, adjacents))| {
     ///     adjacents.into_iter().for_each(|AdjacentFace { face, common_edges }| {
     ///         determine(face, face0, common_edges.len());
     ///     })
@@ -327,7 +326,10 @@ impl<P, C, S> Shell<P, C, S> {
             face.absolute_boundaries().iter().flatten().for_each(insert)
         });
         let edge_face_map: HashMap<_, _> = edge_face_map.into();
-        let mut adjacency = EntryMap::new(|x| x, |_| Vec::new());
+        let mut adjacency = EntryMap::new(
+            |face: &Face<P, C, S>| (face.id(), face.orientation()),
+            |face| (face, Vec::new()),
+        );
         // Process edges in shell order: draining `edge_face_map` in its own
         // (pointer-derived) key order would make the adjacency-list order
         // depend on the address-space layout.
@@ -342,7 +344,7 @@ impl<P, C, S> Shell<P, C, S> {
                 // SAFETY: every shell edge was inserted into the map above.
                 let vec = edge_face_map.get(&edge_id).unwrap();
                 vec.iter().for_each(|face| {
-                    let adjacents = adjacency.entry_or_insert(*face);
+                    let (_, adjacents) = adjacency.entry_or_insert(*face);
                     vec.iter().for_each(|face0| {
                         if face == face0 {
                             return;
@@ -468,8 +470,23 @@ impl<P, C, S> Shell<P, C, S> {
         // and member order depend on the address-space layout.
         self.face_iter()
             .filter_map(|face| {
-                let component = create_one_component_from(&mut adjacency, &face);
-                (!component.is_empty()).then(|| component.into_iter().cloned().collect())
+                let seed = (face.id(), face.orientation());
+                if !adjacency.contains_key(&seed) {
+                    return None;
+                }
+                let mut stack = vec![seed];
+                let mut component = Shell::new();
+                while let Some(key) = stack.pop() {
+                    if let Some((face, adjacent)) = adjacency.remove(&key) {
+                        component.push(face.clone());
+                        stack.extend(
+                            adjacent
+                                .into_iter()
+                                .map(|neighbor| (neighbor.face.id(), neighbor.face.orientation())),
+                        );
+                    }
+                }
+                Some(component)
             })
             .collect()
     }
@@ -1207,24 +1224,6 @@ where T: Eq + Clone + Hash {
     adjacency.is_empty()
 }
 
-fn create_one_component_from<T, U>(adjacency: &mut HashMap<T, Vec<U>>, seed: &T) -> Vec<T>
-where
-    T: Eq + Hash + Clone,
-    U: As<T>, {
-    if !adjacency.contains_key(seed) {
-        return Vec::new();
-    }
-    let mut stack = vec![seed.clone()];
-    let mut res = Vec::new();
-    while let Some(i) = stack.pop() {
-        if let Some(vec) = adjacency.remove(&i) {
-            res.push(i);
-            stack.extend(vec.into_iter().map(|x| x.as_()));
-        }
-    }
-    res
-}
-
 fn create_one_component<T, U>(adjacency: &mut HashMap<T, Vec<U>>) -> Vec<T>
 where
     T: Eq + Hash + Clone,
@@ -1298,5 +1297,63 @@ impl<P: Send, C: Send, S: Send> ParallelExtend<Face<P, C, S>> for Shell<P, C, S>
     fn par_extend<I>(&mut self, par_iter: I)
     where I: IntoParallelIterator<Item = Face<P, C, S>> {
         self.face_list.par_extend(par_iter)
+    }
+}
+
+#[cfg(test)]
+mod adjacency_identity_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn directed_face_identity_preserves_inverse_uses_and_ignores_mutable_payloads() {
+        let vertices = Vertex::from_points([(); 3]);
+        let wire = (0..3)
+            .map(|index| {
+                Edge::new(
+                    &vertices[index],
+                    &vertices[(index + 1) % 3],
+                    Cell::new(0_u8),
+                )
+            })
+            .collect();
+        let face = Face::new(vec![wire], 0_u32);
+        let inverse = face.inverse();
+        assert_eq!(face.id(), inverse.id());
+        assert_ne!(face, inverse);
+        let shell: Shell<_, _, _> = vec![face.clone(), inverse.clone()].into();
+        let adjacency = shell.face_adjacency();
+        assert_eq!(adjacency.len(), 2);
+        for source in [&face, &inverse] {
+            let (retained, neighbors) = &adjacency[&(source.id(), source.orientation())];
+            assert_eq!(*retained, source);
+            assert_eq!(neighbors.len(), 1);
+            assert_eq!(neighbors[0].face.id(), source.id());
+            assert_ne!(neighbors[0].face.orientation(), source.orientation());
+            assert_eq!(neighbors[0].common_edges.len(), 3);
+        }
+        face.set_surface(42);
+        face.absolute_boundaries()[0][0].with_curve(|curve| curve.set(7));
+        assert_eq!(adjacency[&(face.id(), face.orientation())].0.surface(), 42);
+        assert_eq!(adjacency[&(face.id(), face.orientation())].1.len(), 1);
+        let components = shell.connected_components();
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].len(), 2);
+        assert_eq!(components[0][0], face);
+        assert_eq!(components[0][1], inverse);
+        let duplicated: Shell<_, _, _> = vec![face.clone(), face.clone(), inverse.clone()].into();
+        let duplicate_adjacency = duplicated.face_adjacency();
+        assert_eq!(duplicate_adjacency.len(), 2);
+        assert_eq!(
+            duplicate_adjacency[&(face.id(), face.orientation())].1[0]
+                .common_edges
+                .len(),
+            6,
+        );
+        let components = duplicated.connected_components();
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].len(), 2);
+        assert_eq!(components[0][0], face);
+        assert_eq!(components[0][1], inverse);
     }
 }

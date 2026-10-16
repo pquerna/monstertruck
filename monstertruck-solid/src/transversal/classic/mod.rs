@@ -11,9 +11,9 @@
 //! - The Alternative intersection-curve arm is a raw
 //!   `IntersectionCurve<PolylineCurve<Point3>, S, S>` (0.3.2 wrapped it with
 //!   parameter polylines the pipeline never consumed).
-//! - `altshell_to_shell` converts that arm back to `C` via
-//!   `SurfaceCurve::with_boundaries(..).into()` (the conversion the current
-//!   `ShapeOpsCurve` bound provides), not `IntersectionCurve::new(..).into()`.
+//! - `altcurve_to_curve` converts that arm back to `C` via
+//!   `SurfaceCurve::with_boundaries(..).into()`; the owning native topology map
+//!   bypasses this conversion for unchanged original edges.
 //! - Failures retain the stage-specific `ShapeOpsError` rather than treating
 //!   a failed intermediate operation as an empty geometric result.
 
@@ -67,45 +67,310 @@ fn oriented_shell_crossings(
     })
 }
 
-/// Convert an Alternative-curve shell back to a target-curve shell, approximating
-/// each intersection-curve arm with a polyline B-spline wrapped in a
-/// `SurfaceCurve` (uses the `From<SurfaceCurve<BsplineCurve<Point3>, ..>>`
-/// conversion the current `ShapeOpsCurve` bound guarantees).
-fn altshell_to_shell<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
-    altshell: &AltCurveShell<C, S>,
-) -> Option<Shell<Point3, C, S>> {
-    altshell.try_mapped(
-        |p| Some(*p),
-        |c| match c {
-            Alternative::FirstType(c) => Some(c.clone()),
-            Alternative::SecondType(ic) => {
-                let surface0 = ic.surface0().clone();
-                let surface1 = ic.surface1().clone();
-                let mut points = ic.leader().as_slice().to_vec();
-                points.dedup_by(|lhs, rhs| (*lhs).near(&*rhs));
-                if points.len() < 2 {
-                    return None;
-                }
-                let denominator = (points.len() - 1) as f64;
-                let knot_vec = KnotVector::from(
-                    iter::once(0.0)
-                        .chain((0..points.len()).map(|index| index as f64 / denominator))
-                        .chain(iter::once(1.0))
-                        .collect::<Vec<_>>(),
-                );
-                let bspline = BsplineCurve::new(knot_vec, points);
-                let boundary0: Option<ParameterCurve<BoundaryCurve2D, S>> = None;
-                let boundary1: Option<ParameterCurve<BoundaryCurve2D, S>> = None;
-                Some(
-                    SurfaceCurve::with_boundaries(
-                        surface0, surface1, bspline, boundary0, boundary1,
+/// Absolute curve identity together with both actual endpoint identities.
+type NativeEdgeTopologyKey<C, S> = (EdgeId<AltCurve<C, S>>, VertexId<Point3>, VertexId<Point3>);
+
+/// Own the identity evidence for the native -> Alternative -> native round trip.
+/// Geometry cloning is not topology identity: only the input mapping and the
+/// face-division source receipt authorize recovery of an original object.
+struct NativeTopologyMap<'a, C, S> {
+    vertices: HashMap<VertexId<Point3>, Vertex<Point3>>,
+    edges: HashMap<EdgeId<AltCurve<C, S>>, Edge<Point3, C>>,
+    faces: HashMap<FaceId<S>, usize>,
+    source_faces: Vec<&'a Face<Point3, C, S>>,
+    converted_edges: HashMap<NativeEdgeTopologyKey<C, S>, Edge<Point3, C>>,
+}
+
+impl<'a, C: ShapeOpsCurve<S>, S: ShapeOpsSurface> NativeTopologyMap<'a, C, S> {
+    fn new() -> Self {
+        Self {
+            vertices: HashMap::default(),
+            edges: HashMap::default(),
+            faces: HashMap::default(),
+            source_faces: Vec::new(),
+            converted_edges: HashMap::default(),
+        }
+    }
+
+    fn admit(&self, additional: usize, work: Option<&BooleanWork<'_>>) -> ClassicResult<()> {
+        if let Some(work) = work {
+            work.check()?;
+            let tables =
+                identity_table_bytes::<VertexId<Point3>, Vertex<Point3>>(self.vertices.len())
+                    .saturating_add(identity_table_bytes::<
+                        EdgeId<AltCurve<C, S>>,
+                        Edge<Point3, C>,
+                    >(self.edges.len()))
+                    .saturating_add(identity_table_bytes::<FaceId<S>, usize>(self.faces.len()))
+                    .saturating_add(identity_table_bytes::<
+                        NativeEdgeTopologyKey<C, S>,
+                        Edge<Point3, C>,
+                    >(self.converted_edges.len()));
+            work.limit(
+                "native_identity_map_bytes",
+                tables
+                    .saturating_add(
+                        self.source_faces
+                            .capacity()
+                            .saturating_mul(size_of::<&Face<Point3, C, S>>()),
                     )
-                    .into(),
-                )
+                    .saturating_add(additional),
+                work.limits.max_intermediate_prepared_bytes,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn map_input(
+        &mut self,
+        shell: &'a Shell<Point3, C, S>,
+        work: Option<&BooleanWork<'_>>,
+    ) -> ClassicResult<AltCurveShell<C, S>> {
+        if let Some(work) = work {
+            work.check()?;
+        }
+        let mapped = shell.mapped(|p| *p, |c| Alternative::FirstType(c.clone()), Clone::clone);
+        for (original, mapped) in shell.iter().zip(mapped.iter()) {
+            original.absolute_boundaries().iter().try_for_each(|wire| {
+                if let Some(work) = work {
+                    work.charge(wire.len())?;
+                }
+                Ok::<_, ShapeOpsError>(())
+            })?;
+            let old_capacity = self.source_faces.capacity();
+            let capacity = if self.source_faces.len() == old_capacity {
+                old_capacity.max(1).saturating_mul(2)
+            } else {
+                old_capacity
+            };
+            self.admit(
+                capacity
+                    .saturating_sub(old_capacity)
+                    .saturating_mul(size_of::<&Face<Point3, C, S>>())
+                    .saturating_add(identity_table_bytes::<FaceId<S>, usize>(1)),
+                work,
+            )?;
+            if capacity > old_capacity {
+                self.source_faces
+                    .reserve_exact(capacity - self.source_faces.len());
             }
-        },
-        |s| Some(s.clone()),
-    )
+            let index = self.source_faces.len();
+            self.source_faces.push(original);
+            self.faces.insert(mapped.id(), index);
+            self.admit(0, work)?;
+            for (original, mapped) in original
+                .absolute_boundaries()
+                .iter()
+                .zip(mapped.absolute_boundaries())
+            {
+                for (original, mapped) in original.iter().zip(mapped.iter()) {
+                    self.admit(
+                        identity_table_bytes::<EdgeId<AltCurve<C, S>>, Edge<Point3, C>>(1)
+                            .saturating_add(
+                                identity_table_bytes::<VertexId<Point3>, Vertex<Point3>>(2),
+                            ),
+                        work,
+                    )?;
+                    self.edges
+                        .entry(mapped.id())
+                        .or_insert_with(|| original.absolute_clone());
+                    for (original, mapped) in [
+                        (original.absolute_front(), mapped.absolute_front()),
+                        (original.absolute_back(), mapped.absolute_back()),
+                    ] {
+                        self.vertices
+                            .entry(mapped.id())
+                            .or_insert_with(|| original.clone());
+                    }
+                }
+            }
+        }
+        Ok(mapped)
+    }
+
+    /// Division copies the exact source surface, never a fitted replacement.
+    /// Keep that receipt even when provenance collection is not requested.
+    fn inherit_face(
+        &mut self,
+        face: FaceId<S>,
+        source: FaceId<S>,
+        work: Option<&BooleanWork<'_>>,
+    ) -> ClassicResult<()> {
+        self.admit(identity_table_bytes::<FaceId<S>, usize>(1), work)?;
+        let index = self.faces[&source];
+        self.faces.insert(face, index);
+        Ok(())
+    }
+
+    fn vertex(&self, vertex: &Vertex<Point3>) -> Vertex<Point3> {
+        self.vertices.get(&vertex.id()).unwrap_or(vertex).clone()
+    }
+
+    fn edge(
+        &mut self,
+        edge: &Edge<Point3, AltCurve<C, S>>,
+        operation: &'static str,
+        work: Option<&BooleanWork<'_>>,
+    ) -> ClassicResult<Edge<Point3, C>> {
+        if let Some(work) = work {
+            work.check()?;
+        }
+        let front = self.vertex(edge.absolute_front());
+        let back = self.vertex(edge.absolute_back());
+        // Include endpoint identities: a vertex rewrite must not inherit the
+        // original edge merely because its curve still has an original ID.
+        let key = (edge.id(), front.id(), back.id());
+        let mut converted = if let Some(converted) = self.converted_edges.get(&key) {
+            converted.clone()
+        } else {
+            self.admit(
+                identity_table_bytes::<NativeEdgeTopologyKey<C, S>, Edge<Point3, C>>(1),
+                work,
+            )?;
+            let original = self.edges.get(&edge.id()).filter(|original| {
+                original.absolute_front() == &front && original.absolute_back() == &back
+            });
+            let converted = if let Some(original) = original {
+                original.clone()
+            } else {
+                let curve = edge
+                    .with_curve(altcurve_to_curve)
+                    .ok_or(ShapeOpsError::AltShellConversionFailed { operation })?;
+                Edge::debug_new(&front, &back, curve)
+                    .map_err(|_| ShapeOpsError::AltShellConversionFailed { operation })?
+            };
+            self.converted_edges.insert(key, converted.clone());
+            converted
+        };
+        if !edge.orientation() {
+            converted.invert();
+        }
+        Ok(converted)
+    }
+
+    fn original_face(
+        &self,
+        face: &Face<Point3, AltCurve<C, S>, S>,
+        work: Option<&BooleanWork<'_>>,
+    ) -> ClassicResult<Option<&'a Face<Point3, C, S>>> {
+        let Some(&index) = self.faces.get(&face.id()) else {
+            return Ok(None);
+        };
+        let source = self.source_faces[index];
+        let original = source.absolute_boundaries();
+        let mapped = face.absolute_boundaries();
+        if original.len() != mapped.len() {
+            return Ok(None);
+        }
+        // Compare every directed occurrence, including wire order and repeated
+        // seam uses, under the exact source-surface receipt. No temporary
+        // output wires or curve copies are needed for an unchanged face.
+        for (original, mapped) in original.iter().zip(mapped) {
+            if original.len() != mapped.len() {
+                return Ok(None);
+            }
+            for (original, mapped) in original.iter().zip(mapped.iter()) {
+                if let Some(work) = work {
+                    work.check()?;
+                }
+                let Some(edge) = self.edges.get(&mapped.id()) else {
+                    return Ok(None);
+                };
+                if edge.id() != original.id()
+                    || mapped.orientation() != original.orientation()
+                    || self
+                        .vertices
+                        .get(&mapped.absolute_front().id())
+                        .unwrap_or(mapped.absolute_front())
+                        != original.absolute_front()
+                    || self
+                        .vertices
+                        .get(&mapped.absolute_back().id())
+                        .unwrap_or(mapped.absolute_back())
+                        != original.absolute_back()
+                {
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(Some(source))
+    }
+
+    fn shell(
+        &mut self,
+        shell: &AltCurveShell<C, S>,
+        operation: &'static str,
+        work: Option<&BooleanWork<'_>>,
+    ) -> ClassicResult<Shell<Point3, C, S>> {
+        self.admit(0, work)?;
+        shell
+            .iter()
+            .map(|face| {
+                if let Some(work) = work {
+                    work.check()?;
+                }
+                let mut converted = if let Some(original) = self.original_face(face, work)? {
+                    original.absolute_clone()
+                } else {
+                    let boundaries = face
+                        .absolute_boundaries()
+                        .iter()
+                        .map(|wire| {
+                            wire.iter()
+                                .map(|edge| self.edge(edge, operation, work))
+                                .collect()
+                        })
+                        .collect::<ClassicResult<Vec<Wire<Point3, C>>>>()?;
+                    Face::debug_new(boundaries, face.surface())
+                        .map_err(|_| ShapeOpsError::AltShellConversionFailed { operation })?
+                };
+                if !face.orientation() {
+                    converted.invert();
+                }
+                Ok(converted)
+            })
+            .collect()
+    }
+}
+
+/// Conservative hash-table growth bound; source boundaries remain borrowed.
+fn identity_table_bytes<K, V>(count: usize) -> usize {
+    count
+        .saturating_add(1)
+        .saturating_mul(4)
+        .saturating_mul(size_of::<(K, V)>().saturating_add(1))
+        .saturating_add(16)
+}
+
+/// Convert only genuinely new edges. Original edges are recovered above
+/// without cloning their native curve or allocating another topology Arc.
+fn altcurve_to_curve<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(curve: &AltCurve<C, S>) -> Option<C> {
+    match curve {
+        Alternative::FirstType(curve) => Some(curve.clone()),
+        Alternative::SecondType(ic) => {
+            let surface0 = ic.surface0().clone();
+            let surface1 = ic.surface1().clone();
+            let mut points = ic.leader().as_slice().to_vec();
+            points.dedup_by(|lhs, rhs| (*lhs).near(&*rhs));
+            if points.len() < 2 {
+                return None;
+            }
+            let denominator = (points.len() - 1) as f64;
+            let knot_vec = KnotVector::from(
+                iter::once(0.0)
+                    .chain((0..points.len()).map(|index| index as f64 / denominator))
+                    .chain(iter::once(1.0))
+                    .collect::<Vec<_>>(),
+            );
+            let bspline = BsplineCurve::new(knot_vec, points);
+            let boundary0: Option<ParameterCurve<BoundaryCurve2D, S>> = None;
+            let boundary1: Option<ParameterCurve<BoundaryCurve2D, S>> = None;
+            Some(
+                SurfaceCurve::with_boundaries(surface0, surface1, bspline, boundary0, boundary1)
+                    .into(),
+            )
+        }
+    }
 }
 
 /// Split one pair of shells into `[and_shell, or_shell]`: build intersection
@@ -193,10 +458,9 @@ fn process_shell_pair_with_origins<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     if let Some(work) = work {
         work.check()?;
     }
-    let altshell0: AltCurveShell<C, S> =
-        shell0.mapped(|x| *x, |c| Alternative::FirstType(c.clone()), Clone::clone);
-    let altshell1: AltCurveShell<C, S> =
-        shell1.mapped(|x| *x, |c| Alternative::FirstType(c.clone()), Clone::clone);
+    let mut native_topology = NativeTopologyMap::new();
+    let altshell0 = native_topology.map_input(shell0, work)?;
+    let altshell1 = native_topology.map_input(shell1, work)?;
     let mut pair_edges = PairEdgeTrace::new();
     if let (Some(trace), Some(work)) = (edge_trace.as_deref_mut(), work) {
         for (native, mapped) in [(shell0, &altshell0), (shell1, &altshell1)] {
@@ -258,6 +522,7 @@ fn process_shell_pair_with_origins<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
     let loops_store::LoopsStoreQuadruple {
         geom_loops_store0: loops_store0,
         geom_loops_store1: loops_store1,
+        native_roots,
         ..
     } = loop_result?;
     if let Some(work) = work {
@@ -269,8 +534,10 @@ fn process_shell_pair_with_origins<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
         &loops_store0,
         0,
         &mut curve_divisions,
+        &native_roots,
         work,
         &mut |index, face| {
+            native_topology.inherit_face(face, altshell0[index].id(), work)?;
             if let (Some(origins), Some(lineage), Some(work)) =
                 (input_origins, lineage.as_mut(), work)
             {
@@ -287,8 +554,10 @@ fn process_shell_pair_with_origins<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
         &loops_store1,
         1,
         &mut curve_divisions,
+        &native_roots,
         work,
         &mut |index, face| {
+            native_topology.inherit_face(face, altshell1[index].id(), work)?;
             if let (Some(origins), Some(lineage), Some(work)) =
                 (input_origins, lineage.as_mut(), work)
             {
@@ -344,11 +613,9 @@ fn process_shell_pair_with_origins<C: ShapeOpsCurve<S>, S: ShapeOpsSurface>(
         work.output(&and0)?;
     }
     let converted = [
-        altshell_to_shell(&and0)
-            .ok_or(ShapeOpsError::AltShellConversionFailed { operation: "and" })?,
+        native_topology.shell(&and0, "and", work)?,
         if retain_or {
-            altshell_to_shell(&or0)
-                .ok_or(ShapeOpsError::AltShellConversionFailed { operation: "or" })?
+            native_topology.shell(&or0, "or", work)?
         } else {
             Shell::default()
         },
@@ -828,6 +1095,256 @@ mod oriented_ray_tests {
                 oriented_shell_crossings(&alternative, point, direction),
                 Some(expected)
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_identity_tests {
+    use monstertruck_modeling as modeling;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+    use crate::transversal::prepared::BooleanWorkLimits;
+
+    fn work_limits(intermediate_bytes: usize) -> BooleanWorkLimits {
+        BooleanWorkLimits {
+            max_faces: 64,
+            max_edges: 512,
+            max_mesh_vertices: 50_000,
+            max_mesh_triangles: 50_000,
+            max_triangle_pairs: 100_000,
+            max_interference_segments: 10_000,
+            max_output_faces: 64,
+            max_output_edges: 512,
+            max_prepared_bytes: 4 * 1024 * 1024,
+            max_source_prepared_bytes: 4 * 1024 * 1024,
+            max_other_prepared_bytes: 4 * 1024 * 1024,
+            max_intermediate_prepared_bytes: intermediate_bytes,
+        }
+    }
+
+    fn cuboid_shell() -> modeling::Shell {
+        let solid: modeling::Solid = modeling::primitive::cuboid(BoundingBox::from_iter([
+            Point3::origin(),
+            Point3::new(1.0, 1.0, 1.0),
+        ]));
+        solid.boundaries()[0].clone()
+    }
+
+    #[test]
+    fn identity_maps_observe_retained_byte_admission_and_cancellation() {
+        let original = cuboid_shell();
+        let cancel = AtomicBool::new(false);
+        let work = BooleanWork::new(work_limits(0), &cancel);
+        let mut identities = NativeTopologyMap::new();
+        assert!(matches!(
+            identities.map_input(&original, Some(&work)),
+            Err(ShapeOpsError::WorkLimitExceeded {
+                resource: "native_identity_map_bytes",
+                ..
+            })
+        ));
+        let work = BooleanWork::new(work_limits(4 * 1024 * 1024), &cancel);
+        let mut identities = NativeTopologyMap::new();
+        let mapped = identities.map_input(&original, Some(&work)).unwrap();
+        // A later output pass must still consult the current admission limit.
+        let restricted = BooleanWork::new(work_limits(0), &cancel);
+        assert!(matches!(
+            identities.inherit_face(mapped[0].id(), mapped[0].id(), Some(&restricted)),
+            Err(ShapeOpsError::WorkLimitExceeded { .. })
+        ));
+        cancel.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            identities.shell(&mapped, "and", Some(&work)),
+            Err(ShapeOpsError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn original_topology_round_trip_recovers_native_ids_and_stable_face_identity() {
+        let mut original = cuboid_shell();
+        for (index, face) in original.iter_mut().enumerate() {
+            face.set_stable_id(StableId::new(index as u64 + 1));
+        }
+        let mut identities = NativeTopologyMap::new();
+        let mut mapped = identities.map_input(&original, None).unwrap();
+        for (original, mapped) in original.iter().zip(mapped.iter()) {
+            assert_ne!(original.id(), mapped.id());
+            for (original, mapped) in original.edge_iter().zip(mapped.edge_iter()) {
+                assert_ne!(original.front().id(), mapped.front().id());
+            }
+        }
+        // Output orientation may change without changing the underlying face.
+        mapped[0].invert();
+        let output = identities.shell(&mapped, "and", None).unwrap();
+        assert_eq!(output.len(), original.len());
+        for (index, (original, output)) in original.iter().zip(output.iter()).enumerate() {
+            assert_eq!(output.id(), original.id());
+            assert_eq!(output.stable_id(), original.stable_id());
+            assert_eq!(output.orientation(), original.orientation() ^ (index == 0));
+            for (original, output) in original
+                .absolute_boundaries()
+                .iter()
+                .zip(output.absolute_boundaries())
+            {
+                assert_eq!(original.len(), output.len());
+                for (original, output) in original.iter().zip(output.iter()) {
+                    assert_eq!(output.id(), original.id());
+                    assert_eq!(output.orientation(), original.orientation());
+                    assert_eq!(output.front().id(), original.front().id());
+                    assert_eq!(output.back().id(), original.back().id());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_use_shares_original_boundary_without_impersonating_original_face() {
+        let original = cuboid_shell();
+        let source: modeling::Shell = vec![original[0].clone()].into();
+        let mut identities = NativeTopologyMap::new();
+        let mapped = identities.map_input(&source, None).unwrap();
+        // Deliberately use equal source coefficients: geometry equality alone
+        // must never authorize recovering the source face's topology ID.
+        let generated = Face::new(
+            mapped[0]
+                .absolute_boundaries()
+                .iter()
+                .map(Wire::inverse)
+                .collect(),
+            mapped[0].surface(),
+        );
+        let shell = vec![mapped[0].clone(), generated].into();
+        let output = identities.shell(&shell, "and", None).unwrap();
+        assert_eq!(output[0].id(), source[0].id());
+        assert_ne!(output[1].id(), source[0].id());
+        let retained = &output[0].absolute_boundaries()[0];
+        let cap = &output[1].absolute_boundaries()[0];
+        for (retained, cap) in retained.iter().zip(cap.iter().rev()) {
+            assert_eq!(cap.id(), retained.id());
+            assert_ne!(cap.orientation(), retained.orientation());
+            assert_eq!(cap.front().id(), retained.back().id());
+            assert_eq!(cap.back().id(), retained.front().id());
+        }
+    }
+
+    #[test]
+    fn split_edges_keep_cut_vertex_identity_and_do_not_recover_original_edge_or_face() {
+        let original = cuboid_shell();
+        let source: modeling::Shell = vec![original[0].clone()].into();
+        let mut identities = NativeTopologyMap::new();
+        let mapped = identities.map_input(&source, None).unwrap();
+        let wire = &mapped[0].absolute_boundaries()[0];
+        let edge = &wire[0];
+        let mut first = edge.oriented_curve();
+        let (start, end) = first.range_tuple();
+        let middle = (start + end) * 0.5;
+        let cut = Vertex::new(first.evaluate(middle));
+        let second = first.cut(middle);
+        let first = Edge::new(edge.front(), &cut, first);
+        let second = Edge::new(&cut, edge.back(), second);
+        let divided: Wire<_, _> = [first, second]
+            .into_iter()
+            .chain(wire.iter().skip(1).cloned())
+            .collect();
+        let face = Face::new(vec![divided], mapped[0].surface());
+        identities
+            .inherit_face(face.id(), mapped[0].id(), None)
+            .unwrap();
+        let output = identities.shell(&vec![face].into(), "and", None).unwrap();
+        assert_ne!(output[0].id(), source[0].id());
+        let output = &output[0].absolute_boundaries()[0];
+        let original = &source[0].absolute_boundaries()[0];
+        assert_eq!(output.len(), original.len() + 1);
+        assert_ne!(output[0].id(), original[0].id());
+        assert_ne!(output[1].id(), original[0].id());
+        assert_ne!(output[0].id(), output[1].id());
+        assert_eq!(output[0].front().id(), original[0].front().id());
+        assert_eq!(output[0].back().id(), cut.id());
+        assert_eq!(output[1].front().id(), cut.id());
+        assert_eq!(output[1].back().id(), original[0].back().id());
+        for (original, output) in original.iter().skip(1).zip(output.iter().skip(2)) {
+            assert_eq!(output.id(), original.id());
+        }
+    }
+
+    #[test]
+    fn equal_coordinate_rewritten_vertex_stays_distinct_from_original() {
+        let original = cuboid_shell();
+        let source: modeling::Shell = vec![original[0].clone()].into();
+        let mut identities = NativeTopologyMap::new();
+        let mapped = identities.map_input(&source, None).unwrap();
+        let wire = &mapped[0].absolute_boundaries()[0];
+        let replaced = wire[0].front();
+        let replacement = Vertex::new(replaced.point());
+        let rewritten = wire
+            .iter()
+            .map(|edge| {
+                let front = if edge.front() == replaced {
+                    &replacement
+                } else {
+                    edge.front()
+                };
+                let back = if edge.back() == replaced {
+                    &replacement
+                } else {
+                    edge.back()
+                };
+                if edge.front() == replaced || edge.back() == replaced {
+                    Edge::new(front, back, edge.oriented_curve())
+                } else {
+                    edge.clone()
+                }
+            })
+            .collect();
+        let face = Face::new(vec![rewritten], mapped[0].surface());
+        identities
+            .inherit_face(face.id(), mapped[0].id(), None)
+            .unwrap();
+        let output = identities.shell(&vec![face].into(), "and", None).unwrap();
+        assert_ne!(output[0].id(), source[0].id());
+        let output = &output[0].absolute_boundaries()[0];
+        let original = &source[0].absolute_boundaries()[0];
+        assert_ne!(output[0].id(), original[0].id());
+        assert_eq!(output[0].front().id(), replacement.id());
+        assert_ne!(output[0].front().id(), original[0].front().id());
+        assert_eq!(output[0].back().id(), original[0].back().id());
+    }
+
+    #[test]
+    fn source_surface_receipt_recovers_only_the_complete_directed_boundary_list() {
+        let original = cuboid_shell();
+        let source: modeling::Shell = vec![original[0].clone()].into();
+        let mut identities = NativeTopologyMap::new();
+        let mapped = identities.map_input(&source, None).unwrap();
+        let recreated = Face::new(mapped[0].absolute_boundaries().clone(), mapped[0].surface());
+        identities
+            .inherit_face(recreated.id(), mapped[0].id(), None)
+            .unwrap();
+        let wire = &mapped[0].absolute_boundaries()[0];
+        let rotated = wire
+            .iter()
+            .cycle()
+            .skip(1)
+            .take(wire.len())
+            .cloned()
+            .collect();
+        let reordered = Face::new(vec![rotated], mapped[0].surface());
+        identities
+            .inherit_face(reordered.id(), mapped[0].id(), None)
+            .unwrap();
+        let shell = vec![recreated, reordered].into();
+        let output = identities.shell(&shell, "and", None).unwrap();
+        assert_eq!(output[0].id(), source[0].id());
+        assert_ne!(output[1].id(), source[0].id());
+        for (original, output) in source[0].absolute_boundaries()[0]
+            .iter()
+            .cycle()
+            .skip(1)
+            .zip(output[1].absolute_boundaries()[0].iter())
+        {
+            assert_eq!(output.id(), original.id());
         }
     }
 }

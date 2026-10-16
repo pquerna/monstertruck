@@ -60,10 +60,13 @@ fn opposite_native_coedges_share_subdivision_but_preserve_both_face_parameter_co
     let cancel = AtomicBool::new(false);
     let work = BooleanWork::new(policy(), &cancel);
     let mut cache = CurveDivisionCache::new(1.0e-5);
+    let roots = HashMap::default();
     let first = create_parameter_boundary(
         &face0,
         &face0.absolute_boundaries()[0],
         &mut cache,
+        None,
+        &roots,
         Some(&work),
     )
     .unwrap_or_else(|_| panic!("XY native parameter boundary"));
@@ -71,6 +74,8 @@ fn opposite_native_coedges_share_subdivision_but_preserve_both_face_parameter_co
         &face1,
         &face1.absolute_boundaries()[0],
         &mut cache,
+        None,
+        &roots,
         Some(&work),
     )
     .unwrap_or_else(|_| panic!("XZ native parameter boundary"));

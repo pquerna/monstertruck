@@ -3,6 +3,145 @@
 //! Native and polygon stores replay the same occurrence-level partition.
 
 use super::*;
+use std::mem::size_of;
+
+pub(super) fn intersection_parameter<S>(
+    curve: &IntersectionCurve<PolylineCurve, S, S>,
+    point: Point3,
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<f64, AttachmentFailure>
+where
+    S: ParametricSurface3D + SearchNearestParameter<SurfaceParameter, Point = Point3>,
+{
+    if let Some(work) = work {
+        work.charge(curve.leader().len())?;
+    }
+    let mut parameter = curve
+        .leader()
+        .search_nearest_parameter(point, None, 100)
+        .ok_or("intersection_chart_native_parameter")?;
+    let (front, back) = curve.range_tuple();
+    for _ in 0..100 {
+        if let Some(work) = work {
+            work.check()?;
+        }
+        let (actual, uv0, uv1) = curve
+            .search_triple(parameter, 100)
+            .ok_or("intersection_chart_native_projection")?;
+        if !actual.near(&curve.surface0().evaluate(uv0.x, uv0.y))
+            || !actual.near(&curve.surface1().evaluate(uv1.x, uv1.y))
+        {
+            return Err("intersection_chart_native_projection_residual".into());
+        }
+        let evaluated = if parameter.near(&front) {
+            curve.leader().front()
+        } else if parameter.near(&back) {
+            curve.leader().back()
+        } else {
+            actual
+        };
+        if actual.near(&point) && evaluated.near(&point) {
+            return Ok(parameter);
+        }
+        // A guide's nearest chord parameter is only a proposal. Invert the
+        // projected native curve with its actual transverse carrier tangent.
+        let direction = curve
+            .surface0()
+            .normal(uv0.x, uv0.y)
+            .cross(curve.surface1().normal(uv1.x, uv1.y));
+        let guide = curve.leader().derivative(parameter);
+        let denominator = direction.dot(guide);
+        if !denominator.is_finite() || denominator == 0.0 {
+            return Err("intersection_chart_native_parameter_tangent".into());
+        }
+        let derivative = direction * (guide.magnitude2() / denominator);
+        let correction = (actual - point).dot(derivative) / derivative.magnitude2();
+        if !correction.is_finite() {
+            return Err("intersection_chart_native_parameter_step".into());
+        }
+        let next = (parameter - correction).clamp(front, back);
+        if next == parameter {
+            return Err("intersection_chart_native_parameter_residual".into());
+        }
+        parameter = next;
+    }
+    Err("intersection_chart_native_parameter_trials".into())
+}
+
+fn rooted_boundary_attachment<C, S>(
+    stores: (&LoopsStore<Point3, C>, &LoopsStore<Point3, PolylineCurve>),
+    face_index: usize,
+    (root, hint): (EdgeId<C>, f64),
+    ancestry: &[(EdgeId<C>, EdgeId<C>)],
+    vertices: [&Vertex<Point3>; 2],
+    carriers: [&S; 2],
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<BoundaryAttachment, AttachmentFailure>
+where
+    C: ParametricCurve3D + BoundedCurve,
+    S: ParametricSurface3D + SearchParameter<SurfaceParameter, Point = Point3>,
+{
+    let (native, polygon) = stores;
+    let [polygon_vertex, native_vertex] = vertices;
+    let point = native_vertex.point();
+    let mut selected = None;
+    let mut selected_edge = None;
+    for (wire_index, wire) in native[face_index].iter().enumerate() {
+        for (edge_index, edge) in wire.iter().enumerate() {
+            if let Some(work) = work {
+                work.check()?;
+            }
+            let ancestor = ancestry
+                .iter()
+                .rev()
+                .find_map(|&(child, parent)| (child == edge.id()).then_some(parent))
+                .unwrap_or_else(|| edge.id());
+            if ancestor != root || selected_edge == Some(edge.id()) {
+                continue;
+            }
+            let kind = edge.with_curve(|curve| {
+                let (front, back) = curve.range_tuple();
+                let mut parameter = hint.clamp(front, back);
+                for _ in 0..100 {
+                    if let Some(work) = work {
+                        work.check()?;
+                    }
+                    let actual = curve.evaluate(parameter);
+                    if actual.near(&point) {
+                        return Ok(native_parameter_kind(edge, curve, point, parameter));
+                    }
+                    let derivative = curve.derivative(parameter);
+                    let correction = (actual - point).dot(derivative) / derivative.magnitude2();
+                    if !correction.is_finite() {
+                        break;
+                    }
+                    let next = (parameter - correction).clamp(front, back);
+                    if next == parameter {
+                        break;
+                    }
+                    parameter = next;
+                }
+                Ok::<_, AttachmentFailure>(None)
+            })?;
+            if let Some(kind) = kind {
+                if selected.replace((wire_index, edge_index, kind)).is_some() {
+                    return Err("intersection_chart_ambiguous_root_descendant".into());
+                }
+                selected_edge = Some(edge.id());
+            }
+        }
+    }
+    let selected = selected.ok_or("intersection_chart_missing_root_descendant")?;
+    boundary_attachment_at(
+        native,
+        polygon,
+        (face_index, selected),
+        polygon_vertex,
+        native_vertex,
+        carriers,
+    )
+    .map_err(Into::into)
+}
 
 fn paired_chart_edges<C>(loops: &Loops<Point3, C>) -> Vec<(usize, usize)> {
     let mut result = Vec::new();
@@ -308,7 +447,8 @@ fn contact_index<C>(
         let previous = &contacts[index];
         if !previous.native.point().near(&point)
             || !previous.polygon.point().near(&polygon_point)
-            || previous.roots[side].is_some_and(|previous| previous != root)
+            || (previous.roots[side].is_some_and(|previous| previous != root)
+                && shared_vertex != Some(&previous.native))
         {
             return Err("intersection_chart_ambiguous_contact");
         }
@@ -452,7 +592,110 @@ fn record_inserted_overlaps<C>(
 pub(super) struct IntersectionStores<'a, C, S> {
     pub(super) native: [&'a mut LoopsStore<Point3, C>; 2],
     pub(super) polygon: [&'a mut LoopsStore<Point3, PolylineCurve>; 2],
+    pub(super) original_boundaries: [&'a [Wire<Point3, C>]; 2],
     pub(super) sides: [(usize, &'a S, ShapesOpStatus); 2],
+}
+
+pub(super) fn install_owned_intersection<C, S>(
+    binding: native_overlap::OwnedEndpointBinding<C>,
+    stores: IntersectionStores<'_, C, S>,
+    orientation: ShapesOpStatus,
+    work: Option<&BooleanWork<'_>>,
+    record: &mut Option<&mut RewriteObserver<'_, Point3, C>>,
+) -> std::result::Result<(), AttachmentFailure>
+where
+    C: Clone + ParametricCurve3D + BoundedCurve,
+    S: ParametricSurface3D + SearchParameter<SurfaceParameter, Point = Point3>,
+{
+    // Only the whole-original-curve proof constructs this receipt. Preserve
+    // its actual directed topology before isolated point proposals can replace
+    // an already-owned shared endpoint with a new projected vertex.
+    install_original_path(
+        stores,
+        (
+            [binding.native_edge].into_iter().collect(),
+            [binding.polygon_edge].into_iter().collect(),
+        ),
+        false,
+        orientation,
+        work,
+        record,
+    )
+}
+
+fn install_original_path<C, S>(
+    stores: IntersectionStores<'_, C, S>,
+    (native_path, polygon_path): (Wire<Point3, C>, Wire<Point3, PolylineCurve>),
+    closed: bool,
+    orientation: ShapesOpStatus,
+    work: Option<&BooleanWork<'_>>,
+    record: &mut Option<&mut RewriteObserver<'_, Point3, C>>,
+) -> std::result::Result<(), AttachmentFailure>
+where
+    C: Clone + ParametricCurve3D + BoundedCurve,
+    S: ParametricSurface3D + SearchParameter<SurfaceParameter, Point = Point3>,
+{
+    let IntersectionStores {
+        native,
+        polygon,
+        sides,
+        ..
+    } = stores;
+    let surfaces = [sides[0].1, sides[1].1];
+    for (side, &(face, surface, status)) in sides.iter().enumerate() {
+        if bind_existing_path(
+            &mut native[side][face],
+            &mut polygon[side][face],
+            &native_path,
+            &polygon_path,
+            status,
+            work,
+        )? {
+            continue;
+        }
+        let corners = if closed {
+            [None; 2]
+        } else {
+            let front = native_path
+                .front_vertex()
+                .ok_or("intersection_chart_empty_path")?;
+            let back = native_path
+                .back_vertex()
+                .ok_or("intersection_chart_empty_path")?;
+            let departing = [
+                -intersection_direction(surfaces, back.point(), orientation)?,
+                intersection_direction(surfaces, front.point(), orientation)?,
+            ];
+            let corners = endpoint_corners(&native[side][face], surface, [back, front], departing)?;
+            if corners[0].is_some() && corners[0] == corners[1] {
+                return Err("intersection_chart_nonseparating_attachment".into());
+            }
+            corners
+        };
+        for edge in &native_path {
+            if let Some(record) = record.as_mut()
+                && !(**record)(
+                    edge.id(),
+                    edge,
+                    EdgeRewrite::GeneratedUse {
+                        input: side,
+                        face_index: face,
+                    },
+                )
+            {
+                return Err("edge_lineage_work".into());
+            }
+        }
+        if closed {
+            native[side][face].add_independent_loop(BoundaryWire::new(native_path.clone(), status));
+            polygon[side][face]
+                .add_independent_loop(BoundaryWire::new(polygon_path.clone(), status));
+        } else {
+            native[side][face].add_path(native_path.clone(), status, corners);
+            polygon[side][face].add_path(polygon_path.clone(), status, corners);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn add_intersection<C, S>(
@@ -480,6 +723,7 @@ where
     let IntersectionStores {
         native,
         polygon,
+        original_boundaries,
         sides,
     } = stores;
     let [(face0, surface0, status0), (face1, surface1, status1)] = sides;
@@ -491,6 +735,74 @@ where
         paired_chart_edges(&native[1][faces[1]]),
     ];
     let closed = endpoints.is_none();
+    if closed {
+        let mut original = None;
+        for side in 0..2 {
+            if let Some(candidate) = native_overlap::original_loop(
+                &native[side][faces[side]],
+                &polygon[side][faces[side]],
+                surfaces[side],
+                (surfaces[1 - side], original_boundaries[1 - side]),
+                &curve,
+                &chart_edges[side],
+                work,
+            )? {
+                if original.is_some() {
+                    return Err("intersection_original_chart_boundary_ambiguous".into());
+                }
+                original = Some(candidate);
+            }
+        }
+        if let Some(path) = original {
+            return install_original_path(
+                IntersectionStores {
+                    native,
+                    polygon,
+                    original_boundaries,
+                    sides,
+                },
+                path,
+                true,
+                orientation,
+                work,
+                record,
+            );
+        }
+    }
+    if let Some(endpoints) = &endpoints {
+        // A whole qualified original boundary owns this component before
+        // isolated seam proposals are considered. Existing temporary slits on
+        // the other face must not turn unrelated contained-arc midpoints into
+        // contacts on this bounded original branch.
+        if let Some((edge, polygon_edge, _)) = native_overlap::original_overlap(
+            &curve,
+            [
+                (&native[0][faces[0]], &polygon[0][faces[0]]),
+                (&native[1][faces[1]], &polygon[1][faces[1]]),
+            ],
+            original_boundaries,
+            [&endpoints[0].1, &endpoints[1].1],
+            [&endpoints[0].0, &endpoints[1].0],
+            work,
+        )? {
+            return install_original_path(
+                IntersectionStores {
+                    native,
+                    polygon,
+                    original_boundaries,
+                    sides,
+                },
+                (
+                    std::iter::once(edge).collect(),
+                    std::iter::once(polygon_edge).collect(),
+                ),
+                false,
+                orientation,
+                work,
+                record,
+            );
+        }
+    }
     let mut contacts: Vec<LoopPoint<C>> = endpoints
         .into_iter()
         .flatten()
@@ -535,8 +847,8 @@ where
                         // Repeated proposals from one original seam segment
                         // solve from the same seed, not from leader proximity.
                         let seed = seam[0].midpoint(seam[1]);
-                        let (point, boundary_parameter, _) = native[side][faces[side]][wire][edge]
-                            .with_curve(|boundary| {
+                        let (point, mut boundary_parameter, _) =
+                            native[side][faces[side]][wire][edge].with_curve(|boundary| {
                                 curve_surface_projection(
                                     boundary,
                                     None,
@@ -546,15 +858,22 @@ where
                                     100,
                                 )
                             })?;
+                        if let Some(parameter) = native_overlap::canonical_plane_endpoint(
+                            &native[side][faces[side]][wire][edge],
+                            surfaces[1 - side],
+                            boundary_parameter,
+                            point,
+                            work,
+                        )? {
+                            boundary_parameter = parameter;
+                        }
                         let polygon_point = boundary.evaluate(
                             boundary
                                 .search_nearest_parameter(point, None, 100)
                                 .ok_or("intersection_chart_polygon_parameter")?,
                         );
                         let mut polygon_parameter = index as f64 + fraction;
-                        let mut native_parameter = curve
-                            .search_parameter(point, Some(polygon_parameter), 100)
-                            .ok_or("intersection_chart_native_contact")?;
+                        let mut native_parameter = intersection_parameter(&curve, point, work)?;
                         let boundary = &native[side][faces[side]][wire][edge];
                         let (boundary_start, boundary_end) =
                             boundary.with_curve(BoundedCurve::range_tuple);
@@ -562,6 +881,14 @@ where
                             Some(boundary.absolute_front())
                         } else if boundary_parameter == boundary_end {
                             Some(boundary.absolute_back())
+                        } else {
+                            None
+                        };
+                        let polygon_boundary = &polygon[side][faces[side]][wire][edge];
+                        let shared_polygon = if boundary_parameter == boundary_start {
+                            Some(polygon_boundary.absolute_front())
+                        } else if boundary_parameter == boundary_end {
+                            Some(polygon_boundary.absolute_back())
                         } else {
                             None
                         };
@@ -590,8 +917,12 @@ where
                             contacts.push(LoopPoint {
                                 polygon_parameter,
                                 native_parameter,
-                                polygon: Vertex::new(polygon_point),
-                                native: Vertex::new(point),
+                                polygon: shared_polygon
+                                    .cloned()
+                                    .unwrap_or_else(|| Vertex::new(polygon_point)),
+                                native: shared_vertex
+                                    .cloned()
+                                    .unwrap_or_else(|| Vertex::new(point)),
                                 on_boundary,
                                 roots,
                                 direction: None,
@@ -600,7 +931,7 @@ where
                         }
                     }
                 }
-                Ok::<(), &'static str>(())
+                Ok::<(), AttachmentFailure>(())
             })?;
         }
     }
@@ -654,6 +985,7 @@ where
     }
     let mut polygon_maps = [HashMap::default(), HashMap::default()];
     let mut native_maps = [HashMap::default(), HashMap::default()];
+    let mut ancestry: [Vec<(EdgeId<C>, EdgeId<C>)>; 2] = Default::default();
     for point in &mut points {
         for side in 0..2 {
             if !point.on_boundary[side]
@@ -668,15 +1000,27 @@ where
                 edge_index,
                 native_kind,
                 polygon_kind,
-            } = boundary_attachment(
-                native[side],
-                polygon[side],
-                faces[side],
-                &point.polygon,
-                &point.native,
-                [surfaces[side], surfaces[1 - side]],
-            )?
-            .ok_or("intersection_chart_native_contact")?;
+            } = if let Some(root) = point.roots[side] {
+                rooted_boundary_attachment(
+                    (native[side], polygon[side]),
+                    faces[side],
+                    root,
+                    &ancestry[side],
+                    [&point.polygon, &point.native],
+                    [surfaces[side], surfaces[1 - side]],
+                    work,
+                )?
+            } else {
+                boundary_attachment(
+                    native[side],
+                    polygon[side],
+                    faces[side],
+                    &point.polygon,
+                    &point.native,
+                    [surfaces[side], surfaces[1 - side]],
+                )?
+                .ok_or("intersection_chart_native_contact")?
+            };
             polygon[side]
                 .add_polygon_vertex_at(
                     faces[side],
@@ -685,13 +1029,62 @@ where
                     &mut polygon_maps[side],
                 )
                 .ok_or("intersection_chart_polygon_contact")?;
-            native[side].add_geom_vertex(
-                (faces[side], wire_index, edge_index),
-                &point.native,
-                native_kind,
-                &mut native_maps[side],
-                record,
-            )?;
+            let other_capacity = ancestry[1 - side].capacity();
+            let ancestry = &mut ancestry[side];
+            let mut ancestry_failure = None;
+            let result = {
+                let mut observe = |parent, child: &Edge<Point3, C>, rewrite| {
+                    let root = ancestry
+                        .iter()
+                        .rev()
+                        .find_map(|&(previous, root)| (previous == parent).then_some(root))
+                        .unwrap_or(parent);
+                    if ancestry.len() == ancestry.capacity() {
+                        let capacity = ancestry.capacity().saturating_mul(2).max(4);
+                        if let Some(work) = work
+                            && let Err(error) = work.limit(
+                                "intermediate_prepared_bytes",
+                                capacity
+                                    .saturating_add(other_capacity)
+                                    .saturating_mul(size_of::<(EdgeId<C>, EdgeId<C>)>()),
+                                work.limits.max_intermediate_prepared_bytes,
+                            )
+                        {
+                            ancestry_failure = Some(error);
+                            return false;
+                        }
+                        ancestry.reserve_exact(capacity - ancestry.len());
+                        if let Some(work) = work
+                            && let Err(error) = work.limit(
+                                "intermediate_prepared_bytes",
+                                ancestry
+                                    .capacity()
+                                    .saturating_add(other_capacity)
+                                    .saturating_mul(size_of::<(EdgeId<C>, EdgeId<C>)>()),
+                                work.limits.max_intermediate_prepared_bytes,
+                            )
+                        {
+                            ancestry_failure = Some(error);
+                            return false;
+                        }
+                    }
+                    ancestry.push((child.id(), root));
+                    record
+                        .as_mut()
+                        .is_none_or(|record| (**record)(parent, child, rewrite))
+                };
+                native[side].add_geom_vertex(
+                    (faces[side], wire_index, edge_index),
+                    &point.native,
+                    native_kind,
+                    &mut native_maps[side],
+                    &mut Some(&mut observe),
+                )
+            };
+            if let Some(error) = ancestry_failure {
+                return Err(error.into());
+            }
+            result?;
         }
         if point.on_boundary.iter().any(|&contact| contact) {
             point.direction = Some(intersection_direction(
@@ -727,9 +1120,7 @@ where
         let parameter = polygon_head_parameter(point.polygon_parameter, previous_polygon_cut);
         polygon_parts.push(cut_polygon(&mut polyline, parameter));
         previous_polygon_cut = point.polygon_parameter;
-        let parameter = curve
-            .search_parameter(point.native.point(), Some(point.native_parameter), 100)
-            .ok_or("intersection_chart_native_cut_parameter")?;
+        let parameter = intersection_parameter(&curve, point.native.point(), work)?;
         native_parts.push(curve.cut(parameter));
     }
     polygon_parts.push(polyline);
@@ -754,6 +1145,7 @@ where
                 (&native[0][faces[0]], &polygon[0][faces[0]]),
                 (&native[1][faces[1]], &polygon[1][faces[1]]),
             ],
+            original_boundaries,
             [&points[index].native, &points[next].native],
             [&points[index].polygon, &points[next].polygon],
             work,
@@ -1297,5 +1689,79 @@ mod tests {
             assert!(head.len() >= 2 && middle.len() >= 2 && tail.len() >= 2);
             assert!(head.back().x < middle.back().x);
         }
+    }
+
+    #[test]
+    fn rooted_attachment_requires_the_actual_current_cut_ancestry() {
+        let (wire, polygon_wire) = overlap_square();
+        let root = wire[0].id();
+        let mut native = LoopsStore(vec![
+            std::iter::once(BoundaryWire::new(wire, ShapesOpStatus::Unknown)).collect(),
+        ]);
+        let mut polygon = LoopsStore(vec![
+            std::iter::once(BoundaryWire::new(polygon_wire, ShapesOpStatus::Unknown)).collect(),
+        ]);
+        let midpoint = Vertex::new(Point3::new(0.5, 0.0, 0.0));
+        let polygon_midpoint = Vertex::new(midpoint.point());
+        polygon
+            .add_polygon_vertex_at(
+                0,
+                &polygon_midpoint,
+                (0, 0, ParameterKind::Inner(0.5)),
+                &mut HashMap::default(),
+            )
+            .unwrap();
+        let mut ancestry = Vec::new();
+        native
+            .add_geom_vertex(
+                (0, 0, 0),
+                &midpoint,
+                ParameterKind::Inner(0.5),
+                &mut HashMap::default(),
+                &mut Some(&mut |parent, child: &modeling::Edge, _| {
+                    ancestry.push((child.id(), parent));
+                    true
+                }),
+            )
+            .unwrap();
+        let point = Vertex::new(Point3::new(0.25, 0.0, 0.0));
+        let polygon_point = Vertex::new(point.point());
+        let first = modeling::Surface::Plane(Plane::xy());
+        let second = modeling::Surface::Plane(Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+        ));
+        assert!(matches!(
+            rooted_boundary_attachment(
+                (&native, &polygon),
+                0,
+                (root, 0.25),
+                &[],
+                [&polygon_point, &point],
+                [&first, &second],
+                None,
+            ),
+            Err(AttachmentFailure::Geometry(
+                "intersection_chart_missing_root_descendant"
+            ))
+        ));
+        let attachment = rooted_boundary_attachment(
+            (&native, &polygon),
+            0,
+            (root, 0.25),
+            &ancestry,
+            [&polygon_point, &point],
+            [&first, &second],
+            None,
+        )
+        .unwrap();
+        // This child's literal `Line` has its own unit gauge after the cut.
+        assert_eq!(attachment.native_kind, ParameterKind::Inner(0.5));
+        assert_eq!(
+            native[0][attachment.wire_index][attachment.edge_index].id(),
+            ancestry[0].0
+        );
+        assert_eq!(point.point(), Point3::new(0.25, 0.0, 0.0));
     }
 }

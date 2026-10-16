@@ -65,8 +65,9 @@
 //! regularity (e.g. connectivity, closedness, and so on) before creating these elements.
 //! ## Features
 //! * `nightly` -- Use features available only in a `nightly` toolchain.
-//! * `rclite` -- Use of `rclite::Arc` instead of `std::syn::Arc`. The latter
-//!   uses more memory and is potentially slower than the former. On by default.
+//! * `rclite` -- Use `rclite::Arc` instead of `std::sync::Arc` for vertex points
+//!   and face surfaces. Edge curves always use `std::sync::Arc` so their native
+//!   identity can be leased without retaining geometry. On by default.
 
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 #![deny(clippy::all, rust_2018_idioms)]
@@ -88,6 +89,7 @@ use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc as CurveArc;
 
 #[cfg(feature = "rclite")]
 use rclite::Arc;
@@ -128,7 +130,7 @@ pub struct Vertex<P> {
 pub struct Edge<P, C> {
     vertices: (Vertex<P>, Vertex<P>),
     orientation: bool,
-    curve: Arc<Mutex<C>>,
+    curve: CurveArc<Mutex<C>>,
     stable_id: StableId,
 }
 
@@ -218,6 +220,10 @@ pub type Result<T> = std::result::Result<T, errors::Error>;
 pub type VertexId<P> = Id<Mutex<P>>;
 
 /// The id that does not depend on the direction of the edge.
+///
+/// This is a non-owning pointer identity: retaining the ID alone does not prevent
+/// its allocation address from being reused after the edge is dropped. Retain an
+/// [`EdgeIdentityLease`] when the identity must outlive all edge uses.
 /// # Examples
 /// ```
 /// use monstertruck_topology::*;
@@ -400,6 +406,7 @@ pub use attributes::{AttributeValue, ElementAttributes, SolidAttributes};
 pub mod compress;
 pub use compress::SolidHashOptions;
 mod edge;
+pub use edge::EdgeIdentityLease;
 /// classifies the errors that can occur in this crate.
 pub mod errors;
 /// Defines the boundary iterator.

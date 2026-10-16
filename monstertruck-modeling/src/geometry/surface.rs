@@ -630,6 +630,13 @@ impl TryIntoAnalyticSurfaceKind for Surface {
             _ => None,
         }
     }
+
+    fn original_sphere(&self) -> Option<(&Sphere, Option<&Matrix4>)> {
+        match self {
+            Self::SphericalSurface(sphere) => sphere.original_sphere(),
+            _ => None,
+        }
+    }
 }
 
 impl ToSameGeometry<Surface> for HomotopySurface<Curve, Curve> {

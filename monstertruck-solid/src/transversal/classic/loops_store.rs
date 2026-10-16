@@ -18,6 +18,7 @@ use monstertruck_geometry::prelude::*;
 use monstertruck_meshing::prelude::*;
 use monstertruck_topology::{Vertex, *};
 use rustc_hash::FxHashMap as HashMap;
+use std::mem::size_of;
 
 mod native_component;
 mod native_interval;
@@ -296,6 +297,9 @@ impl<P: Copy + Tolerance, C: Clone> LoopsStore<P, C> {
         emap: &mut HashMap<EdgeId<C>, Edge<P, C>>,
         record: &mut Option<&mut RewriteObserver<'_, P, C>>,
     ) -> std::result::Result<(), &'static str> {
+        if old_vertex == new_vertex {
+            return Ok(());
+        }
         self.iter_mut()
             .try_for_each(|loops| loops.change_vertex(old_vertex, new_vertex, emap, record))
     }
@@ -418,6 +422,62 @@ impl<C> OriginalTrimContact<'_, C> {
             && self.edge.id() == other.edge.id()
             && self.point.near(&other.point)
     }
+}
+
+/// Native/polygon boundary stores and the queried current face slot.
+type ContactFaceStores<'a, C> = (
+    &'a LoopsStore<Point3, C>,
+    &'a LoopsStore<Point3, PolylineCurve>,
+    usize,
+);
+
+/// The shared polygon vertex followed by its actual native vertex.
+type PolygonNativeEndpoint = (Vertex<Point3>, Vertex<Point3>);
+
+fn shared_contact_vertices<C>(
+    origin: &OriginalTrimContact<'_, C>,
+    stores: [ContactFaceStores<'_, C>; 2],
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<Option<PolygonNativeEndpoint>, periodic_loops::AttachmentFailure>
+where
+    C: ParametricCurve3D + BoundedCurve,
+{
+    let (front, back) = origin.edge.with_curve(BoundedCurve::range_tuple);
+    let vertex = if origin.parameter == front {
+        origin.edge.absolute_front()
+    } else if origin.parameter == back {
+        origin.edge.absolute_back()
+    } else {
+        return Ok(None);
+    };
+    if !origin.point.near(&vertex.point()) {
+        return Err("boundary_contact_shared_endpoint_residual".into());
+    }
+    let mut selected = None;
+    for (native, polygon, face) in stores {
+        for (wire_index, wire) in native[face].iter().enumerate() {
+            for (edge_index, edge) in wire.iter().enumerate() {
+                if let Some(work) = work {
+                    work.check()?;
+                }
+                let polygon_edge = &polygon[face][wire_index][edge_index];
+                let candidate = if edge.absolute_front() == vertex {
+                    Some(polygon_edge.absolute_front())
+                } else if edge.absolute_back() == vertex {
+                    Some(polygon_edge.absolute_back())
+                } else {
+                    None
+                };
+                if let Some(candidate) = candidate {
+                    if selected.is_some_and(|previous| previous != candidate) {
+                        return Err("boundary_contact_shared_polygon_identity".into());
+                    }
+                    selected = Some(candidate);
+                }
+            }
+        }
+    }
+    Ok(selected.map(|polygon| (polygon.clone(), vertex.clone())))
 }
 
 struct NativeBranch<'a, C, S> {
@@ -613,9 +673,45 @@ where
                 })
         })
         .next();
-    let Some((wire_index, edge_index, native_kind)) = candidate else {
+    let Some(candidate) = candidate else {
         return Ok(None);
     };
+    boundary_attachment_at(
+        geom,
+        poly,
+        (face_index, candidate),
+        polygon_vertex,
+        native_vertex,
+        carriers,
+    )
+    .map(Some)
+}
+
+fn boundary_attachment_at<C, S>(
+    geom: &LoopsStore<Point3, C>,
+    poly: &LoopsStore<Point3, PolylineCurve>,
+    (face_index, (wire_index, edge_index, native_kind)): (usize, (usize, usize, ParameterKind)),
+    polygon_vertex: &Vertex<Point3>,
+    native_vertex: &Vertex<Point3>,
+    carriers: [&S; 2],
+) -> std::result::Result<BoundaryAttachment, &'static str>
+where
+    C: ParametricCurve3D + BoundedCurve,
+    S: ParametricSurface3D + SearchParameter<SurfaceParameter, Point = Point3>,
+{
+    let point = native_vertex.point();
+    let edge = &geom[face_index][wire_index][edge_index];
+    let parameter = match native_kind {
+        ParameterKind::Front => edge.with_curve(BoundedCurve::range_tuple).0,
+        ParameterKind::Back => edge.with_curve(BoundedCurve::range_tuple).1,
+        ParameterKind::Inner(parameter) => parameter,
+    };
+    if !edge.with_curve(|curve| {
+        curve.evaluate(parameter).near(&point)
+            && native_parameter_kind(edge, curve, point, parameter) == Some(native_kind)
+    }) {
+        return Err("boundary_contact_native_root");
+    }
     for carrier in carriers {
         let parameter = carrier
             .search_parameter(point, None, 100)
@@ -664,12 +760,12 @@ where
             }
         })?;
     polygon_vertex.set_point(polygon_point);
-    Ok(Some(BoundaryAttachment {
+    Ok(BoundaryAttachment {
         wire_index,
         edge_index,
         native_kind,
         polygon_kind,
-    }))
+    })
 }
 
 fn curve_surface_projection<C, S>(
@@ -749,12 +845,17 @@ where
     wire![edge0, edge1]
 }
 
+// The lease is part of the ancestry receipt: a naked pointer ID could otherwise
+// be recycled for an unrelated generated curve after an intermediate cut drops.
+pub(super) type NativeChartRoots<C> = HashMap<EdgeId<C>, (EdgeId<C>, EdgeIdentityLease<C>)>;
+
 #[allow(dead_code)]
 pub(super) struct LoopsStoreQuadruple<C> {
     pub(super) geom_loops_store0: LoopsStore<Point3, C>,
     pub(super) poly_loops_store0: LoopsStore<Point3, PolylineCurve>,
     pub(super) geom_loops_store1: LoopsStore<Point3, C>,
     pub(super) poly_loops_store1: LoopsStore<Point3, PolylineCurve>,
+    pub(super) native_roots: NativeChartRoots<C>,
 }
 
 pub(super) fn create_loops_stores<C, S>(
@@ -784,509 +885,687 @@ where
     let mut poly_loops_store0: LoopsStore<_, _> = poly_shell0.face_iter().collect();
     let mut geom_loops_store1: LoopsStore<_, _> = geom_shell1.face_iter().collect();
     let mut poly_loops_store1: LoopsStore<_, _> = poly_shell1.face_iter().collect();
-    let store0_len = geom_loops_store0.len();
-    let store1_len = geom_loops_store1.len();
-    (0..store0_len)
-        .flat_map(move |i| (0..store1_len).map(move |j| (i, j)))
-        .try_for_each(|(face_index0, face_index1)| {
-            if seed_bounds.disjoint(face_index0, face_index1, work)? {
-                return Ok(());
+    let mut native_roots: NativeChartRoots<C> = HashMap::default();
+    let mut ancestry_allocation_bytes = 0usize;
+    let mut ancestry_failure = None;
+    let result = {
+        // Preserve topology-rewrite authority beyond contact attachment so face
+        // division can transport an original coedge's parameter chart to its
+        // actual cut/vertex-replacement descendants.
+        let mut observe = |parent, child: &Edge<Point3, C>, event| {
+            let generated_use = matches!(event, EdgeRewrite::GeneratedUse { .. });
+            if generated_use || parent != child.id() {
+                // A GeneratedUse adds lifetime authority only. It is never a
+                // source-cut derivation from an unrelated supplied parent ID.
+                let root = if generated_use {
+                    native_roots
+                        .get(&child.id())
+                        .map(|(root, _)| *root)
+                        .unwrap_or_else(|| child.id())
+                } else {
+                    native_roots
+                        .get(&parent)
+                        .map(|(root, _)| *root)
+                        .unwrap_or(parent)
+                };
+                if let Some((previous, _)) = native_roots.get(&child.id()) {
+                    if *previous != root {
+                        ancestry_failure = Some(ShapeOpsError::MissingFaceLineage);
+                        return false;
+                    }
+                    if let Some(work) = work
+                        && let Err(error) = work.check()
+                    {
+                        ancestry_failure = Some(error);
+                        return false;
+                    }
+                } else {
+                    let lease = child.identity_lease();
+                    let allocations =
+                        ancestry_allocation_bytes.saturating_add(lease.retained_allocation_bytes());
+                    if let Some(work) = work {
+                        let count = native_roots.len().saturating_add(1);
+                        let table = count
+                            .saturating_add(1)
+                            .saturating_mul(4)
+                            .saturating_mul(
+                                size_of::<(EdgeId<C>, (EdgeId<C>, EdgeIdentityLease<C>))>()
+                                    .saturating_add(1),
+                            )
+                            .saturating_add(16);
+                        if let Err(error) = work.check().and_then(|_| {
+                            work.limit(
+                                "native_chart_ancestry_bytes",
+                                table.saturating_add(allocations),
+                                work.limits.max_intermediate_prepared_bytes,
+                            )
+                        }) {
+                            ancestry_failure = Some(error);
+                            return false;
+                        }
+                    }
+                    native_roots.insert(child.id(), (root, lease));
+                    ancestry_allocation_bytes = allocations;
+                }
             }
-            let failure = |stage, detail| ShapeOpsError::IntersectionLoopsFailed {
-                face_index0,
-                face_index1,
-                stage,
-                detail,
-            };
-            let ori0 = geom_shell0[face_index0].orientation();
-            let ori1 = geom_shell1[face_index1].orientation();
-            let surface0 = geom_shell0[face_index0].surface();
-            let surface1 = geom_shell1[face_index1].surface();
-            let intersections = poly_shell0[face_index0].with_surface(|polygon0| {
-                let polygon0 = polygon0
-                    .as_ref()
-                    .ok_or(ShapeOpsError::InputTessellationFailed {
-                        shell_index: 0,
-                        face_index: face_index0,
-                    })?;
-                poly_shell1[face_index1].with_surface(|polygon1| {
-                    let polygon1 =
-                        polygon1
+            record
+                .as_mut()
+                .is_none_or(|record| (**record)(parent, child, event))
+        };
+        let mut record: Option<&mut RewriteObserver<'_, Point3, C>> = Some(&mut observe);
+        let store0_len = geom_loops_store0.len();
+        let store1_len = geom_loops_store1.len();
+        (0..store0_len)
+            .flat_map(move |i| (0..store1_len).map(move |j| (i, j)))
+            .try_for_each(|(face_index0, face_index1)| {
+                if seed_bounds.disjoint(face_index0, face_index1, work)? {
+                    return Ok(());
+                }
+                let failure = |stage, detail| ShapeOpsError::IntersectionLoopsFailed {
+                    face_index0,
+                    face_index1,
+                    stage,
+                    detail,
+                };
+                let ori0 = geom_shell0[face_index0].orientation();
+                let ori1 = geom_shell1[face_index1].orientation();
+                let surface0 = geom_shell0[face_index0].surface();
+                let surface1 = geom_shell1[face_index1].surface();
+                let intersections = poly_shell0[face_index0].with_surface(|polygon0| {
+                    let polygon0 =
+                        polygon0
                             .as_ref()
                             .ok_or(ShapeOpsError::InputTessellationFailed {
-                                shell_index: 1,
-                                face_index: face_index1,
+                                shell_index: 0,
+                                face_index: face_index0,
                             })?;
-                    intersection_curve::intersection_curves(
-                        surface0.clone(),
-                        polygon0,
-                        surface1.clone(),
-                        polygon1,
-                        work,
-                    )
-                })
-            })?;
-            let intersections = intersections
-                .ok_or_else(|| failure("intersection_curve_projection", "native_projection"))?;
-            let component = {
-                if intersections.len() > 1 {
-                    native_component::NativeComponent::new([&surface0, &surface1], work)?
-                } else {
-                    None
-                }
-            };
-            let recover_original = |curve: &IntersectionCurve<PolylineCurve, S, S>| {
-                let front = native_endpoint_contact(
-                    [&geom_shell0[face_index0], &geom_shell1[face_index1]].map(|face| {
-                        face.absolute_boundaries()
-                            .iter()
-                            .flat_map(|wire| wire.iter())
-                    }),
-                    [&surface0, &surface1],
-                    curve.front(),
-                    work,
-                );
-                if let Some(work) = work {
-                    work.check()?;
-                }
-                let front = front.map_err(|detail| failure("boundary_contact_front", detail))?;
-                let back = native_endpoint_contact(
-                    [&geom_shell0[face_index0], &geom_shell1[face_index1]].map(|face| {
-                        face.absolute_boundaries()
-                            .iter()
-                            .flat_map(|wire| wire.iter())
-                    }),
-                    [&surface0, &surface1],
-                    curve.back(),
-                    work,
-                );
-                if let Some(work) = work {
-                    work.check()?;
-                }
-                let back = back.map_err(|detail| failure("boundary_contact_back", detail))?;
-                Ok::<_, ShapeOpsError>([front, back])
-            };
-            let mut planned = Vec::new();
-            let intersections = if let Some(component) = &component {
-                if let Some(work) = work {
-                    work.limit(
-                        "native_interval_candidates_bytes",
-                        intersections
-                            .len()
-                            .saturating_mul(size_of::<NativeBranch<'_, C, S>>()),
-                        work.limits.max_intermediate_prepared_bytes,
-                    )?;
-                }
-                planned.reserve_exact(intersections.len());
-                for (original_index, (polyline, intersection_curve)) in
-                    intersections.into_iter().enumerate()
-                {
-                    let coordinates =
-                        { native_interval::coordinates(component, &intersection_curve, work)? };
-                    let origins = if polyline.front().near(&polyline.back()) {
-                        None
+                    poly_shell1[face_index1].with_surface(|polygon1| {
+                        let polygon1 =
+                            polygon1
+                                .as_ref()
+                                .ok_or(ShapeOpsError::InputTessellationFailed {
+                                    shell_index: 1,
+                                    face_index: face_index1,
+                                })?;
+                        intersection_curve::intersection_curves(
+                            surface0.clone(),
+                            polygon0,
+                            surface1.clone(),
+                            polygon1,
+                            work,
+                        )
+                    })
+                })?;
+                let intersections = intersections
+                    .ok_or_else(|| failure("intersection_curve_projection", "native_projection"))?;
+                let component = {
+                    if intersections.len() > 1 {
+                        native_component::NativeComponent::new([&surface0, &surface1], work)?
                     } else {
-                        Some(recover_original(&intersection_curve))
-                    };
-                    let endpoint_coordinates = {
-                        match (&coordinates, &origins) {
-                            (Some(coordinates), Some(Ok(origins))) => {
-                                native_interval::endpoint_coordinates(
-                                    component,
-                                    coordinates,
-                                    origins,
-                                    work,
-                                )
-                            }
-                            _ => None,
-                        }
-                    };
+                        None
+                    }
+                };
+                let recover_original = |curve: &IntersectionCurve<PolylineCurve, S, S>| {
+                    let front = native_endpoint_contact(
+                        [&geom_shell0[face_index0], &geom_shell1[face_index1]].map(|face| {
+                            face.absolute_boundaries()
+                                .iter()
+                                .flat_map(|wire| wire.iter())
+                        }),
+                        [&surface0, &surface1],
+                        curve.front(),
+                        work,
+                    );
                     if let Some(work) = work {
                         work.check()?;
                     }
-                    planned.push(NativeBranch {
-                        original_index,
-                        polyline,
-                        intersection_curve,
-                        coordinates,
-                        origins,
-                        endpoint_coordinates,
-                    });
-                }
-                // Material-supported native spans precede collapsed or
-                // uncertain chains; raw graph encounter order is not authority.
-                planned.sort_unstable_by(|first, second| {
-                    second
-                        .priority()
-                        .total_cmp(&first.priority())
-                        .then_with(|| first.original_index.cmp(&second.original_index))
-                });
-                Vec::new()
-            } else {
-                intersections
-            };
-            let mut intervals = Vec::new();
-            planned
-                .into_iter()
-                .chain(intersections.into_iter().enumerate().map(
-                    |(original_index, (polyline, intersection_curve))| NativeBranch {
-                        original_index,
-                        polyline,
-                        intersection_curve,
-                        coordinates: None,
-                        origins: None,
-                        endpoint_coordinates: None,
-                    },
-                ))
-                .try_for_each(
-                    |NativeBranch {
-                         original_index: _,
-                         polyline,
-                         mut intersection_curve,
-                         coordinates,
-                         origins,
-                         endpoint_coordinates,
-                     }| {
-                        let status = ShapesOpStatus::from_is_curve(&intersection_curve)
-                            .ok_or_else(|| {
-                                failure("intersection_curve_status", "native_projection")
-                            })?;
-                        let (status0, status1) = match (ori0, ori1) {
-                            (true, true) => (status, status.not()),
-                            (true, false) => (status.not(), status.not()),
-                            (false, true) => (status, status),
-                            (false, false) => (status.not(), status),
-                        };
-                        if polyline.front().near(&polyline.back()) {
-                            if let (Some(component), Some(coordinates)) = (&component, &coordinates)
-                                && native_interval::covered(
-                                    component,
-                                    coordinates,
-                                    None,
-                                    &intervals,
-                                    [&surface0, &surface1],
-                                    work,
-                                )?
-                            {
-                                return Ok(());
-                            }
-                            let interval = coordinates.map(native_interval::closed_interval);
-                            periodic_loops::add_intersection(
-                                (polyline, intersection_curve),
-                                None,
-                                periodic_loops::IntersectionStores {
-                                    native: [&mut geom_loops_store0, &mut geom_loops_store1],
-                                    polygon: [&mut poly_loops_store0, &mut poly_loops_store1],
-                                    sides: [
-                                        (face_index0, &surface0, status0),
-                                        (face_index1, &surface1, status1),
-                                    ],
-                                },
-                                status,
-                                tolerance,
-                                work,
-                                &mut record,
-                            )
-                            .map_err(|error| match error {
-                                periodic_loops::AttachmentFailure::Geometry(detail) => {
-                                    failure("closed_intersection_chart", detail)
-                                }
-                                periodic_loops::AttachmentFailure::Work(error) => error,
-                            })?;
-                            if let Some(interval) = interval {
-                                intervals.push(interval);
-                            }
+                    let front =
+                        front.map_err(|detail| failure("boundary_contact_front", detail))?;
+                    let back = native_endpoint_contact(
+                        [&geom_shell0[face_index0], &geom_shell1[face_index1]].map(|face| {
+                            face.absolute_boundaries()
+                                .iter()
+                                .flat_map(|wire| wire.iter())
+                        }),
+                        [&surface0, &surface1],
+                        curve.back(),
+                        work,
+                    );
+                    if let Some(work) = work {
+                        work.check()?;
+                    }
+                    let back = back.map_err(|detail| failure("boundary_contact_back", detail))?;
+                    Ok::<_, ShapeOpsError>([front, back])
+                };
+                let mut planned = Vec::new();
+                let intersections = if let Some(component) = &component {
+                    if let Some(work) = work {
+                        work.limit(
+                            "native_interval_candidates_bytes",
+                            intersections
+                                .len()
+                                .saturating_mul(size_of::<NativeBranch<'_, C, S>>()),
+                            work.limits.max_intermediate_prepared_bytes,
+                        )?;
+                    }
+                    planned.reserve_exact(intersections.len());
+                    for (original_index, (polyline, intersection_curve)) in
+                        intersections.into_iter().enumerate()
+                    {
+                        let coordinates =
+                            { native_interval::coordinates(component, &intersection_curve, work)? };
+                        let origins = if polyline.front().near(&polyline.back()) {
+                            None
                         } else {
-                            let pv0 = Vertex::new(polyline.front());
-                            let pv1 = Vertex::new(polyline.back());
-                            let origins = match origins {
-                                Some(origins) => origins?,
-                                None => recover_original(&intersection_curve)?,
+                            Some(recover_original(&intersection_curve))
+                        };
+                        let endpoint_coordinates = {
+                            match (&coordinates, &origins) {
+                                (Some(coordinates), Some(Ok(origins))) => {
+                                    native_interval::endpoint_coordinates(
+                                        component,
+                                        coordinates,
+                                        origins,
+                                        work,
+                                    )
+                                }
+                                _ => None,
+                            }
+                        };
+                        if let Some(work) = work {
+                            work.check()?;
+                        }
+                        planned.push(NativeBranch {
+                            original_index,
+                            polyline,
+                            intersection_curve,
+                            coordinates,
+                            origins,
+                            endpoint_coordinates,
+                        });
+                    }
+                    // Material-supported native spans precede collapsed or
+                    // uncertain chains; raw graph encounter order is not authority.
+                    planned.sort_unstable_by(|first, second| {
+                        second
+                            .priority()
+                            .total_cmp(&first.priority())
+                            .then_with(|| first.original_index.cmp(&second.original_index))
+                    });
+                    Vec::new()
+                } else {
+                    intersections
+                };
+                let mut intervals = Vec::new();
+                planned
+                    .into_iter()
+                    .chain(intersections.into_iter().enumerate().map(
+                        |(original_index, (polyline, intersection_curve))| NativeBranch {
+                            original_index,
+                            polyline,
+                            intersection_curve,
+                            coordinates: None,
+                            origins: None,
+                            endpoint_coordinates: None,
+                        },
+                    ))
+                    .try_for_each(
+                        |NativeBranch {
+                             original_index: _,
+                             polyline,
+                             mut intersection_curve,
+                             coordinates,
+                             origins,
+                             endpoint_coordinates,
+                         }| {
+                            let status = ShapesOpStatus::from_is_curve(&intersection_curve)
+                                .ok_or_else(|| {
+                                    failure("intersection_curve_status", "native_projection")
+                                })?;
+                            let (status0, status1) = match (ori0, ori1) {
+                                (true, true) => (status, status.not()),
+                                (true, false) => (status.not(), status.not()),
+                                (false, true) => (status, status),
+                                (false, false) => (status.not(), status),
                             };
-                            if let (Some(component), Some(coordinates)) = (&component, &coordinates)
-                                && native_interval::covered(
-                                    component,
-                                    coordinates,
-                                    Some(&origins),
-                                    &intervals,
-                                    [&surface0, &surface1],
+                            if polyline.front().near(&polyline.back()) {
+                                if let (Some(component), Some(coordinates)) =
+                                    (&component, &coordinates)
+                                    && native_interval::covered(
+                                        component,
+                                        coordinates,
+                                        None,
+                                        &intervals,
+                                        [&surface0, &surface1],
+                                        work,
+                                    )?
+                                {
+                                    return Ok(());
+                                }
+                                let interval = coordinates.map(native_interval::closed_interval);
+                                periodic_loops::add_intersection(
+                                    (polyline, intersection_curve),
+                                    None,
+                                    periodic_loops::IntersectionStores {
+                                        native: [&mut geom_loops_store0, &mut geom_loops_store1],
+                                        polygon: [&mut poly_loops_store0, &mut poly_loops_store1],
+                                        original_boundaries: [
+                                            geom_shell0[face_index0].absolute_boundaries(),
+                                            geom_shell1[face_index1].absolute_boundaries(),
+                                        ],
+                                        sides: [
+                                            (face_index0, &surface0, status0),
+                                            (face_index1, &surface1, status1),
+                                        ],
+                                    },
+                                    status,
+                                    tolerance,
                                     work,
-                                )?
-                            {
-                                return Ok(());
-                            }
-                            let front_contact = origins[0].point;
-                            let back_contact = origins[1].point;
-                            if front_contact.near(&back_contact) {
-                                return Err(failure(
-                                    "native_boundary_interval",
-                                    "collapsed_original_trim_contacts",
-                                ));
-                            }
-                            let interval = endpoint_coordinates.map(|coordinates| {
-                                native_interval::open_interval(coordinates, origins)
-                            });
-                            if let Some(work) = work {
-                                work.check()?;
-                            }
-                            let gv0 = Vertex::new(front_contact);
-                            let gv1 = Vertex::new(back_contact);
-                            let mut pemap0 = HashMap::default();
-                            let mut pemap1 = HashMap::default();
-                            let mut gemap0 = HashMap::default();
-                            let mut gemap1 = HashMap::default();
-                            let idx00 = boundary_attachment(
-                                &geom_loops_store0,
-                                &poly_loops_store0,
-                                face_index0,
-                                &pv0,
-                                &gv0,
-                                [&surface0, &surface1],
-                            )
-                            .map_err(|detail| failure("boundary_attachment0_front", detail))?;
-                            if let Some(BoundaryAttachment {
-                                wire_index,
-                                edge_index,
-                                native_kind,
-                                polygon_kind,
-                            }) = idx00
-                            {
-                                poly_loops_store0
-                                    .add_polygon_vertex_at(
-                                        face_index0,
-                                        &pv0,
-                                        (wire_index, edge_index, polygon_kind),
-                                        &mut pemap0,
-                                    )
-                                    .ok_or_else(|| {
-                                        failure(
-                                            "boundary_polygon0_front",
-                                            "certified_contact_subdivision",
-                                        )
-                                    })?;
-                                geom_loops_store0
-                                    .add_geom_vertex(
-                                        (face_index0, wire_index, edge_index),
-                                        &gv0,
-                                        native_kind,
-                                        &mut gemap0,
+                                    &mut record,
+                                )
+                                .map_err(|error| match error {
+                                    periodic_loops::AttachmentFailure::Geometry(detail) => {
+                                        failure("closed_intersection_chart", detail)
+                                    }
+                                    periodic_loops::AttachmentFailure::Work(error) => error,
+                                })?;
+                                if let Some(interval) = interval {
+                                    intervals.push(interval);
+                                }
+                            } else {
+                                let origins = match origins {
+                                    Some(origins) => origins?,
+                                    None => recover_original(&intersection_curve)?,
+                                };
+                                if let (Some(component), Some(coordinates)) =
+                                    (&component, &coordinates)
+                                    && native_interval::covered(
+                                        component,
+                                        coordinates,
+                                        Some(&origins),
+                                        &intervals,
+                                        [&surface0, &surface1],
+                                        work,
+                                    )?
+                                {
+                                    return Ok(());
+                                }
+                                let original_boundaries: [&[Wire<Point3, C>]; 2] = [
+                                    geom_shell0[face_index0].absolute_boundaries(),
+                                    geom_shell1[face_index1].absolute_boundaries(),
+                                ];
+                                if let Some(binding) = native_overlap::early_owned_endpoints(
+                                    &intersection_curve,
+                                    [
+                                        (
+                                            &geom_loops_store0[face_index0],
+                                            &poly_loops_store0[face_index0],
+                                        ),
+                                        (
+                                            &geom_loops_store1[face_index1],
+                                            &poly_loops_store1[face_index1],
+                                        ),
+                                    ],
+                                    original_boundaries,
+                                    work,
+                                )
+                                .map_err(|error| match error {
+                                    periodic_loops::AttachmentFailure::Geometry(detail) => {
+                                        failure("original_owned_endpoint_proof", detail)
+                                    }
+                                    periodic_loops::AttachmentFailure::Work(error) => error,
+                                })? {
+                                    let interval = endpoint_coordinates.map(|coordinates| {
+                                        native_interval::open_interval(coordinates, origins)
+                                    });
+                                    periodic_loops::install_owned_intersection(
+                                        binding,
+                                        periodic_loops::IntersectionStores {
+                                            native: [
+                                                &mut geom_loops_store0,
+                                                &mut geom_loops_store1,
+                                            ],
+                                            polygon: [
+                                                &mut poly_loops_store0,
+                                                &mut poly_loops_store1,
+                                            ],
+                                            original_boundaries,
+                                            sides: [
+                                                (face_index0, &surface0, status0),
+                                                (face_index1, &surface1, status1),
+                                            ],
+                                        },
+                                        status,
+                                        work,
                                         &mut record,
                                     )
-                                    .map_err(|detail| failure("boundary_vertex0_front", detail))?;
-                                let polyline = intersection_curve.leader_mut();
-                                *polyline.first_mut().unwrap() = gv0.point();
-                            }
-                            let idx01 = boundary_attachment(
-                                &geom_loops_store0,
-                                &poly_loops_store0,
-                                face_index0,
-                                &pv1,
-                                &gv1,
-                                [&surface0, &surface1],
-                            )
-                            .map_err(|detail| failure("boundary_attachment0_back", detail))?;
-                            if let Some(BoundaryAttachment {
-                                wire_index,
-                                edge_index,
-                                native_kind,
-                                polygon_kind,
-                            }) = idx01
-                            {
-                                poly_loops_store0
-                                    .add_polygon_vertex_at(
-                                        face_index0,
-                                        &pv1,
-                                        (wire_index, edge_index, polygon_kind),
-                                        &mut pemap1,
-                                    )
-                                    .ok_or_else(|| {
-                                        failure(
-                                            "boundary_polygon0_back",
-                                            "certified_contact_subdivision",
-                                        )
+                                    .map_err(|error| {
+                                        match error {
+                                            periodic_loops::AttachmentFailure::Geometry(detail) => {
+                                                failure("original_owned_endpoint_install", detail)
+                                            }
+                                            periodic_loops::AttachmentFailure::Work(error) => error,
+                                        }
                                     })?;
-                                geom_loops_store0
-                                    .add_geom_vertex(
-                                        (face_index0, wire_index, edge_index),
-                                        &gv1,
-                                        native_kind,
-                                        &mut gemap1,
-                                        &mut record,
+                                    if let Some(interval) = interval {
+                                        intervals.push(interval);
+                                    }
+                                    return Ok(());
+                                }
+                                let front_contact = origins[0].point;
+                                let back_contact = origins[1].point;
+                                if front_contact.near(&back_contact) {
+                                    return Err(failure(
+                                        "native_boundary_interval",
+                                        "collapsed_original_trim_contacts",
+                                    ));
+                                }
+                                let shared = |origin| {
+                                    shared_contact_vertices(
+                                        origin,
+                                        [
+                                            (&geom_loops_store0, &poly_loops_store0, face_index0),
+                                            (&geom_loops_store1, &poly_loops_store1, face_index1),
+                                        ],
+                                        work,
                                     )
-                                    .map_err(|detail| failure("boundary_vertex0_back", detail))?;
-                                let polyline = intersection_curve.leader_mut();
-                                *polyline.last_mut().unwrap() = gv1.point();
-                            }
-                            let contact0_front = idx00.map(|_| gv0.point());
-                            let contact0_back = idx01.map(|_| gv1.point());
-                            let idx10 = boundary_attachment(
-                                &geom_loops_store1,
-                                &poly_loops_store1,
-                                face_index1,
-                                &pv0,
-                                &gv0,
-                                [&surface1, &surface0],
-                            )
-                            .map_err(|detail| failure("boundary_attachment1_front", detail))?;
-                            if let Some(BoundaryAttachment {
-                                wire_index,
-                                edge_index,
-                                native_kind,
-                                polygon_kind,
-                            }) = idx10
-                            {
-                                poly_loops_store1
-                                    .add_polygon_vertex_at(
-                                        face_index1,
-                                        &pv0,
-                                        (wire_index, edge_index, polygon_kind),
-                                        &mut pemap0,
-                                    )
-                                    .ok_or_else(|| {
-                                        failure(
-                                            "boundary_polygon1_front",
-                                            "certified_contact_subdivision",
+                                    .map_err(|error| {
+                                        match error {
+                                            periodic_loops::AttachmentFailure::Geometry(detail) => {
+                                                failure("boundary_contact_shared_vertex", detail)
+                                            }
+                                            periodic_loops::AttachmentFailure::Work(error) => error,
+                                        }
+                                    })
+                                };
+                                let (pv0, gv0) = shared(&origins[0])?.unwrap_or_else(|| {
+                                    (Vertex::new(polyline.front()), Vertex::new(front_contact))
+                                });
+                                let (pv1, gv1) = shared(&origins[1])?.unwrap_or_else(|| {
+                                    (Vertex::new(polyline.back()), Vertex::new(back_contact))
+                                });
+                                let interval = endpoint_coordinates.map(|coordinates| {
+                                    native_interval::open_interval(coordinates, origins)
+                                });
+                                if let Some(work) = work {
+                                    work.check()?;
+                                }
+                                let mut pemap0 = HashMap::default();
+                                let mut pemap1 = HashMap::default();
+                                let mut gemap0 = HashMap::default();
+                                let mut gemap1 = HashMap::default();
+                                let idx00 = boundary_attachment(
+                                    &geom_loops_store0,
+                                    &poly_loops_store0,
+                                    face_index0,
+                                    &pv0,
+                                    &gv0,
+                                    [&surface0, &surface1],
+                                )
+                                .map_err(|detail| failure("boundary_attachment0_front", detail))?;
+                                if let Some(BoundaryAttachment {
+                                    wire_index,
+                                    edge_index,
+                                    native_kind,
+                                    polygon_kind,
+                                }) = idx00
+                                {
+                                    poly_loops_store0
+                                        .add_polygon_vertex_at(
+                                            face_index0,
+                                            &pv0,
+                                            (wire_index, edge_index, polygon_kind),
+                                            &mut pemap0,
                                         )
-                                    })?;
-                                geom_loops_store1
-                                    .add_geom_vertex(
-                                        (face_index1, wire_index, edge_index),
-                                        &gv0,
-                                        native_kind,
-                                        &mut gemap0,
-                                        &mut record,
-                                    )
-                                    .map_err(|detail| failure("boundary_vertex1_front", detail))?;
-                                let polyline = intersection_curve.leader_mut();
-                                *polyline.first_mut().unwrap() = gv0.point();
-                            }
-                            if contact0_front.is_some_and(|point| !point.near(&gv0.point())) {
-                                return Err(failure(
-                                    "boundary_contact_front",
-                                    "inconsistent_native_contacts",
-                                ));
-                            }
-                            let idx11 = boundary_attachment(
-                                &geom_loops_store1,
-                                &poly_loops_store1,
-                                face_index1,
-                                &pv1,
-                                &gv1,
-                                [&surface1, &surface0],
-                            )
-                            .map_err(|detail| failure("boundary_attachment1_back", detail))?;
-                            if let Some(BoundaryAttachment {
-                                wire_index,
-                                edge_index,
-                                native_kind,
-                                polygon_kind,
-                            }) = idx11
-                            {
-                                poly_loops_store1
-                                    .add_polygon_vertex_at(
-                                        face_index1,
-                                        &pv1,
-                                        (wire_index, edge_index, polygon_kind),
-                                        &mut pemap1,
-                                    )
-                                    .ok_or_else(|| {
-                                        failure(
-                                            "boundary_polygon1_back",
-                                            "certified_contact_subdivision",
-                                        )
-                                    })?;
-                                geom_loops_store1
-                                    .add_geom_vertex(
-                                        (face_index1, wire_index, edge_index),
-                                        &gv1,
-                                        native_kind,
-                                        &mut gemap1,
-                                        &mut record,
-                                    )
-                                    .map_err(|detail| failure("boundary_vertex1_back", detail))?;
-                                let polyline = intersection_curve.leader_mut();
-                                *polyline.last_mut().unwrap() = gv1.point();
-                            }
-                            if contact0_back.is_some_and(|point| !point.near(&gv1.point())) {
-                                return Err(failure(
-                                    "boundary_contact_back",
-                                    "inconsistent_native_contacts",
-                                ));
-                            }
-                            if (idx00.is_none() && idx10.is_none())
-                                || (idx01.is_none() && idx11.is_none())
-                            {
-                                return Err(failure(
-                                    "boundary_contact",
-                                    "unattached_native_endpoint",
-                                ));
-                            }
-                            if !front_contact.near(&gv0.point()) || !back_contact.near(&gv1.point())
-                            {
-                                return Err(failure(
-                                    "boundary_contact",
-                                    "original_trim_contact_changed",
-                                ));
-                            }
-                            for point in [gv0.point(), gv1.point()] {
-                                for carrier in [&surface0, &surface1] {
-                                    let parameter = carrier
-                                        .search_parameter(point, None, 100)
                                         .ok_or_else(|| {
                                             failure(
-                                                "boundary_contact",
-                                                "original_carrier_parameter",
+                                                "boundary_polygon0_front",
+                                                "certified_contact_subdivision",
                                             )
                                         })?;
-                                    if !carrier.evaluate(parameter.0, parameter.1).near(&point) {
-                                        return Err(failure(
-                                            "boundary_contact",
-                                            "original_carrier_residual",
-                                        ));
+                                    geom_loops_store0
+                                        .add_geom_vertex(
+                                            (face_index0, wire_index, edge_index),
+                                            &gv0,
+                                            native_kind,
+                                            &mut gemap0,
+                                            &mut record,
+                                        )
+                                        .map_err(|detail| {
+                                            failure("boundary_vertex0_front", detail)
+                                        })?;
+                                    let polyline = intersection_curve.leader_mut();
+                                    *polyline.first_mut().unwrap() = gv0.point();
+                                }
+                                let idx01 = boundary_attachment(
+                                    &geom_loops_store0,
+                                    &poly_loops_store0,
+                                    face_index0,
+                                    &pv1,
+                                    &gv1,
+                                    [&surface0, &surface1],
+                                )
+                                .map_err(|detail| failure("boundary_attachment0_back", detail))?;
+                                if let Some(BoundaryAttachment {
+                                    wire_index,
+                                    edge_index,
+                                    native_kind,
+                                    polygon_kind,
+                                }) = idx01
+                                {
+                                    poly_loops_store0
+                                        .add_polygon_vertex_at(
+                                            face_index0,
+                                            &pv1,
+                                            (wire_index, edge_index, polygon_kind),
+                                            &mut pemap1,
+                                        )
+                                        .ok_or_else(|| {
+                                            failure(
+                                                "boundary_polygon0_back",
+                                                "certified_contact_subdivision",
+                                            )
+                                        })?;
+                                    geom_loops_store0
+                                        .add_geom_vertex(
+                                            (face_index0, wire_index, edge_index),
+                                            &gv1,
+                                            native_kind,
+                                            &mut gemap1,
+                                            &mut record,
+                                        )
+                                        .map_err(|detail| {
+                                            failure("boundary_vertex0_back", detail)
+                                        })?;
+                                    let polyline = intersection_curve.leader_mut();
+                                    *polyline.last_mut().unwrap() = gv1.point();
+                                }
+                                let contact0_front = idx00.map(|_| gv0.point());
+                                let contact0_back = idx01.map(|_| gv1.point());
+                                let idx10 = boundary_attachment(
+                                    &geom_loops_store1,
+                                    &poly_loops_store1,
+                                    face_index1,
+                                    &pv0,
+                                    &gv0,
+                                    [&surface1, &surface0],
+                                )
+                                .map_err(|detail| failure("boundary_attachment1_front", detail))?;
+                                if let Some(BoundaryAttachment {
+                                    wire_index,
+                                    edge_index,
+                                    native_kind,
+                                    polygon_kind,
+                                }) = idx10
+                                {
+                                    poly_loops_store1
+                                        .add_polygon_vertex_at(
+                                            face_index1,
+                                            &pv0,
+                                            (wire_index, edge_index, polygon_kind),
+                                            &mut pemap0,
+                                        )
+                                        .ok_or_else(|| {
+                                            failure(
+                                                "boundary_polygon1_front",
+                                                "certified_contact_subdivision",
+                                            )
+                                        })?;
+                                    geom_loops_store1
+                                        .add_geom_vertex(
+                                            (face_index1, wire_index, edge_index),
+                                            &gv0,
+                                            native_kind,
+                                            &mut gemap0,
+                                            &mut record,
+                                        )
+                                        .map_err(|detail| {
+                                            failure("boundary_vertex1_front", detail)
+                                        })?;
+                                    let polyline = intersection_curve.leader_mut();
+                                    *polyline.first_mut().unwrap() = gv0.point();
+                                }
+                                if contact0_front.is_some_and(|point| !point.near(&gv0.point())) {
+                                    return Err(failure(
+                                        "boundary_contact_front",
+                                        "inconsistent_native_contacts",
+                                    ));
+                                }
+                                let idx11 = boundary_attachment(
+                                    &geom_loops_store1,
+                                    &poly_loops_store1,
+                                    face_index1,
+                                    &pv1,
+                                    &gv1,
+                                    [&surface1, &surface0],
+                                )
+                                .map_err(|detail| failure("boundary_attachment1_back", detail))?;
+                                if let Some(BoundaryAttachment {
+                                    wire_index,
+                                    edge_index,
+                                    native_kind,
+                                    polygon_kind,
+                                }) = idx11
+                                {
+                                    poly_loops_store1
+                                        .add_polygon_vertex_at(
+                                            face_index1,
+                                            &pv1,
+                                            (wire_index, edge_index, polygon_kind),
+                                            &mut pemap1,
+                                        )
+                                        .ok_or_else(|| {
+                                            failure(
+                                                "boundary_polygon1_back",
+                                                "certified_contact_subdivision",
+                                            )
+                                        })?;
+                                    geom_loops_store1
+                                        .add_geom_vertex(
+                                            (face_index1, wire_index, edge_index),
+                                            &gv1,
+                                            native_kind,
+                                            &mut gemap1,
+                                            &mut record,
+                                        )
+                                        .map_err(|detail| {
+                                            failure("boundary_vertex1_back", detail)
+                                        })?;
+                                    let polyline = intersection_curve.leader_mut();
+                                    *polyline.last_mut().unwrap() = gv1.point();
+                                }
+                                if contact0_back.is_some_and(|point| !point.near(&gv1.point())) {
+                                    return Err(failure(
+                                        "boundary_contact_back",
+                                        "inconsistent_native_contacts",
+                                    ));
+                                }
+                                if (idx00.is_none() && idx10.is_none())
+                                    || (idx01.is_none() && idx11.is_none())
+                                {
+                                    return Err(failure(
+                                        "boundary_contact",
+                                        "unattached_native_endpoint",
+                                    ));
+                                }
+                                if !front_contact.near(&gv0.point())
+                                    || !back_contact.near(&gv1.point())
+                                {
+                                    return Err(failure(
+                                        "boundary_contact",
+                                        "original_trim_contact_changed",
+                                    ));
+                                }
+                                for point in [gv0.point(), gv1.point()] {
+                                    for carrier in [&surface0, &surface1] {
+                                        let parameter = carrier
+                                            .search_parameter(point, None, 100)
+                                            .ok_or_else(|| {
+                                                failure(
+                                                    "boundary_contact",
+                                                    "original_carrier_parameter",
+                                                )
+                                            })?;
+                                        if !carrier.evaluate(parameter.0, parameter.1).near(&point)
+                                        {
+                                            return Err(failure(
+                                                "boundary_contact",
+                                                "original_carrier_residual",
+                                            ));
+                                        }
                                     }
                                 }
-                            }
-                            let mut polyline = polyline;
-                            *polyline.first_mut().unwrap() = pv0.point();
-                            *polyline.last_mut().unwrap() = pv1.point();
-                            let leader = intersection_curve.leader_mut();
-                            *leader.first_mut().unwrap() = gv0.point();
-                            *leader.last_mut().unwrap() = gv1.point();
-                            periodic_loops::add_intersection(
-                                (polyline, intersection_curve),
-                                Some([(pv0, gv0), (pv1, gv1)]),
-                                periodic_loops::IntersectionStores {
-                                    native: [&mut geom_loops_store0, &mut geom_loops_store1],
-                                    polygon: [&mut poly_loops_store0, &mut poly_loops_store1],
-                                    sides: [
-                                        (face_index0, &surface0, status0),
-                                        (face_index1, &surface1, status1),
-                                    ],
-                                },
-                                status,
-                                tolerance,
-                                work,
-                                &mut record,
-                            )
-                            .map_err(|error| match error {
-                                periodic_loops::AttachmentFailure::Geometry(detail) => {
-                                    failure("open_intersection_chart", detail)
+                                let mut polyline = polyline;
+                                *polyline.first_mut().unwrap() = pv0.point();
+                                *polyline.last_mut().unwrap() = pv1.point();
+                                let leader = intersection_curve.leader_mut();
+                                *leader.first_mut().unwrap() = gv0.point();
+                                *leader.last_mut().unwrap() = gv1.point();
+                                periodic_loops::add_intersection(
+                                    (polyline, intersection_curve),
+                                    Some([(pv0, gv0), (pv1, gv1)]),
+                                    periodic_loops::IntersectionStores {
+                                        native: [&mut geom_loops_store0, &mut geom_loops_store1],
+                                        polygon: [&mut poly_loops_store0, &mut poly_loops_store1],
+                                        original_boundaries: [
+                                            geom_shell0[face_index0].absolute_boundaries(),
+                                            geom_shell1[face_index1].absolute_boundaries(),
+                                        ],
+                                        sides: [
+                                            (face_index0, &surface0, status0),
+                                            (face_index1, &surface1, status1),
+                                        ],
+                                    },
+                                    status,
+                                    tolerance,
+                                    work,
+                                    &mut record,
+                                )
+                                .map_err(|error| match error {
+                                    periodic_loops::AttachmentFailure::Geometry(detail) => {
+                                        failure("open_intersection_chart", detail)
+                                    }
+                                    periodic_loops::AttachmentFailure::Work(error) => error,
+                                })?;
+                                if let Some(interval) = interval {
+                                    intervals.push(interval);
                                 }
-                                periodic_loops::AttachmentFailure::Work(error) => error,
-                            })?;
-                            if let Some(interval) = interval {
-                                intervals.push(interval);
                             }
-                        }
-                        Ok::<(), ShapeOpsError>(())
-                    },
-                )
-        })?;
+                            Ok::<(), ShapeOpsError>(())
+                        },
+                    )
+            })
+    };
+    if let Some(error) = ancestry_failure {
+        return Err(error);
+    }
+    result?;
     Ok(LoopsStoreQuadruple {
         geom_loops_store0,
         poly_loops_store0,
         geom_loops_store1,
         poly_loops_store1,
+        native_roots,
     })
 }
 

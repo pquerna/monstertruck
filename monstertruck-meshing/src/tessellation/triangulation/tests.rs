@@ -11,6 +11,7 @@ use super::{
     *,
 };
 use monstertruck_geometry::prelude::{Line, Matrix4, Plane, Processor, RevolutionSurface};
+use monstertruck_topology::Vertex as TopologyVertex;
 
 #[derive(Clone, Debug)]
 struct SampledTrim {
@@ -1003,7 +1004,7 @@ fn matching_corner_and_center_normals_do_not_flatten_an_original_periodic_tensor
 #[test]
 fn declared_shared_vertices_remain_authoritative_mesh_seed_junctions() {
     let delta = 3.0e-16;
-    let vertices = monstertruck_topology::Vertex::from_points([
+    let vertices = TopologyVertex::from_points([
         Point3::new(0.0, 0.0, 0.0),
         Point3::new(1.0, 0.0, 0.0),
         Point3::new(1.0, 1.0, 0.0),

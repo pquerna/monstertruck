@@ -1,5 +1,68 @@
 use crate::{errors::Error, *};
+use std::{
+    mem::size_of,
+    sync::{Arc, Weak, atomic::AtomicUsize},
+};
 use thiserror::Error;
+
+/// Keeps an edge's native pointer identity reserved without keeping its geometry alive.
+///
+/// Created by [`Edge::identity_lease`]. The lease holds only a weak reference to
+/// the curve allocation: after the last edge use is dropped, the curve and its
+/// owned buffers are dropped normally, but the allocation cannot be reused for
+/// another identity until the last lease is dropped. It retains no vertices.
+///
+/// Cloning a lease does not allocate or clone geometry. The identity is
+/// independent of edge orientation and remains available after the curve drops.
+/// A lease cannot be used to access or resurrect the curve and is not serialized.
+#[must_use = "Keep the lease alive for as long as its edge identity is retained"]
+pub struct EdgeIdentityLease<C> {
+    curve: Weak<Mutex<C>>,
+}
+
+impl<C> EdgeIdentityLease<C> {
+    /// Returns the exact native edge identity, even after the curve has dropped.
+    #[inline(always)]
+    pub fn id(&self) -> EdgeId<C> { Id::new(self.curve.as_ptr()) }
+
+    /// Returns the retained inline allocation charge for this identity.
+    ///
+    /// This models the standard `Arc` allocation's two atomic reference counts,
+    /// inline `Mutex<C>` storage, and alignment padding. The inline curve storage
+    /// remains reserved even after its destructor runs; any buffers owned by the
+    /// curve do not. Allocator bookkeeping/size-class overhead and the lease's
+    /// own inline storage are not included.
+    ///
+    /// Charge this once per distinct identity, not once per cloned lease. The
+    /// charge is a layout model for the standard `Arc` backend, not allocator
+    /// introspection or a stable guarantee about that backend's private layout.
+    #[inline(always)]
+    pub const fn retained_allocation_bytes(&self) -> usize {
+        #[repr(C)]
+        struct Allocation<T> {
+            _counts: [AtomicUsize; 2],
+            _value: T,
+        }
+        size_of::<Allocation<Mutex<C>>>()
+    }
+}
+
+impl<C> Clone for EdgeIdentityLease<C> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        Self {
+            curve: self.curve.clone(),
+        }
+    }
+}
+
+impl<C> Debug for EdgeIdentityLease<C> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EdgeIdentityLease")
+            .field("id", &self.id())
+            .finish()
+    }
+}
 
 impl<P, C> Edge<P, C> {
     /// Generates the edge from `front` to `back`.  
@@ -312,6 +375,18 @@ impl<P, C> Edge<P, C> {
     /// ```
     #[inline(always)]
     pub fn id(&self) -> EdgeId<C> { Id::new(Arc::as_ptr(&self.curve)) }
+
+    /// Reserves this edge's native identity without retaining its geometry.
+    ///
+    /// The returned weak lease prevents allocation-address reuse even after all
+    /// edge clones and opposed uses are dropped. Creating it does not allocate,
+    /// clone the curve, or increase [`Edge::count`].
+    #[inline(always)]
+    pub fn identity_lease(&self) -> EdgeIdentityLease<C> {
+        EdgeIdentityLease {
+            curve: Arc::downgrade(&self.curve),
+        }
+    }
 
     /// Returns how many same edges.
     ///
@@ -696,3 +771,6 @@ impl<P: Debug, C: Debug> Debug for DebugDisplay<'_, Edge<P, C>, EdgeDisplayForma
 /// available outcomes, selected by build profile.
 #[cfg(test)]
 mod debug_new_tests;
+
+#[cfg(test)]
+mod identity_lease_tests;

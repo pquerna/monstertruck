@@ -23,6 +23,39 @@ monstertruck 0.4.0.
   cumulative work and cancellation remain authoritative. These bounds grant no
   new smoothness or Hessian certificate.
 
+- Periodic Boolean contacts invert the actual projected native intersection,
+  rather than treating a guide chord's nearest parameter as an exact inverse.
+  Certified seam roots bind only to their actual current cut descendants, with
+  shared endpoint identities and native/polygon occurrence replay retained.
+  Exact original plane-functional endpoint laws, strict active-span coefficient
+  signs and original homogeneous endpoint bindings identify declared shared
+  vertices without parameter tolerances or spatial root deduplication.
+- Face division retains original tensor-boundary parameter charts through actual
+  native cut ancestry and cached native subdivision parameters. Exact restricted
+  basis identity and complete directed source-wire continuity distinguish the
+  two occurrences of a shared seam without inventing a periodic raw gauge or
+  accepting rational extrapolation outside the original source domain.
+  Whole unchanged native faces with coherent known classification retain their
+  original carrier, directed trim, face identity and orientation without
+  unnecessary polygonization at singular carrier parameters; opposed hole-wire
+  classifications keep the existing containment path.
+- Boolean alternate-curve conversion retains explicit original topology
+  identities. Unchanged original vertices, edges and complete directed faces
+  recover their actual native objects, including an owned edge reused by a
+  generated cap. Real cut or vertex-replacement descendants keep distinct
+  identities and their existing derivation receipts; equal coordinates do not
+  recover unrelated original objects.
+  Historical edge ancestry and subdivision caches retain weak native identity
+  leases, preventing retired pointer IDs from aliasing unrelated generated
+  curves without retaining curve/control-point buffers. Edge curve ownership
+  uses standard weak-capable `Arc`; vertex and surface ownership is unchanged.
+  Lease/container capacity and retained inline allocation bytes are admitted
+  under the unchanged intermediate resource limits.
+- Shell face adjacency keys contain only directed native identity
+  `(FaceId, orientation)`, with the actual face reference and ordered common-edge
+  neighbors retained as values. Inverse face uses remain distinct; connected
+  components retain shell-order traversal without hashing mutable geometry or
+  scanning faces to recover an identity.
 - Trimmed mesh seeds retain their interior surface parameter subdivisions.
   Matching normals at four corners and the center no longer masquerade as a
   whole-surface planarity proof or flatten periodic rational tensors into
@@ -33,6 +66,34 @@ monstertruck 0.4.0.
   Original boundary world samples and declared shared-vertex seed endpoints
   survive UV-only periodic normalization and connector construction; carrier
   re-evaluation no longer overwrites their topology-bound positions.
+- Whole curved tensor-chart boundaries already contained in an original clipping
+  plane reuse their owned native edges instead of inventing isolated midpoint
+  contacts. Literal coefficient rows, independent native knot gauges, same-sign
+  homogeneous support, monotone regular source spans and strict whole-boundary
+  transverse derivatives prove carrier membership and plane containment.
+  Copied tensor subrows require the exact original endpoint multiplicities and
+  restricted source basis, not just matching control points.
+  Immutable convex planar operand trims enclose the complete source control
+  hull, not merely guide points or endpoints. Ordered branch selection,
+  shared-vertex closed incidence, generated-use genealogy and ambiguous,
+  tangent and zero-loop refusals remain mandatory.
+- Ordinary original spherical boundary arcs use the same owned-edge binding.
+  A borrowed literal sphere and stored pose, never fitted recognition, support
+  a complete homogeneous Bernstein radial-residual certificate at unchanged
+  kernel world accuracy and strict sphere/plane transversality.
+  Outward de Boor/Bernstein analysis covers every original quadratic knot span;
+  simple-knot C1 joins and independently proved C0/G1 joins are distinct, and
+  genuine corners still refuse. Plane functionals contract only their nonzero
+  original coordinate axes, without changing the plane frame or bypassing
+  finite-data, same-sign denominator and pole admission.
+  Existing shared source endpoints retain their native and polygon identities
+  without no-op edge rewrites; unrelated equal-coordinate vertices still do not bind.
+  Complete immutable owned-branch proofs now precede projected endpoint vertex
+  allocation: both original carriers, opposing original material support and
+  actual bounded native endpoint consistency authorize the original topology,
+  without requiring a nearest-point solver to return an exact endpoint scalar.
+  Tiny interior numerical proposals no longer replace already-owned shared
+  endpoints; nearness alone, truncated branches and lookalike curves do not bind.
 - Full and scalar/paired tensor Taylor evaluation separates original row and
   column differences before mixed basis products when both original bases prove
   partition unity. Additive coefficients retain their derivative independence

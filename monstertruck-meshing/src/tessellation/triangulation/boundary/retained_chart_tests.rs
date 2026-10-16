@@ -188,7 +188,7 @@ fn carrier_connectors_retain_existing_boundary_endpoint_positions() {
         ))
     });
     let mut cache = HashMap::default();
-    let curve = polyline_on_surface(&surface, ends[0], ends[1], 0.005, &mut cache);
+    let curve = polyline_on_surface(surface, ends[0], ends[1], 0.005, &mut cache);
     assert_eq!(curve.first().unwrap().point, ends[0].point);
     assert_eq!(curve.last().unwrap().point, ends[1].point);
 }

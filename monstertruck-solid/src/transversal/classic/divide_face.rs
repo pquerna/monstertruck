@@ -12,6 +12,9 @@ use super::super::integrate::DivideFaceBoundaryData;
 use super::faces_classification::FacesClassification;
 use super::loops_store::*;
 use super::{ClassicResult, ShapeOpsError};
+use monstertruck_geometry::prelude::{
+    OriginalSurfaceCoefficients, TryIntoHomogeneousBsplineCurve, TryIntoHomogeneousBsplineSurface,
+};
 use monstertruck_meshing::prelude::*;
 use monstertruck_topology::{errors::Error as TopologyError, *};
 use rustc_hash::FxHashMap as HashMap;
@@ -19,7 +22,9 @@ use std::{mem::size_of, ops::Deref};
 
 use crate::transversal::prepared::BooleanWork;
 mod curve_divisions;
+mod source_chart;
 pub(super) use curve_divisions::CurveDivisionCache;
+use source_chart::{SourceChartMap, original_boundary_charts};
 
 type DivisionResult<T> = std::result::Result<T, DivisionFailure>;
 
@@ -46,51 +51,193 @@ impl From<ShapeOpsError> for DivisionFailure {
     fn from(work: ShapeOpsError) -> Self { Self::Work(work) }
 }
 
-fn create_parameter_boundary<P, C, S>(
-    face: &Face<P, C, S>,
-    wire: &Wire<P, C>,
-    polys: &mut CurveDivisionCache<P, C>,
+fn current_source_chart<C>(
+    edge: &Edge<Point3, C>,
+    charts: Option<&[Vec<SourceChartMap<C>>]>,
+    roots: &NativeChartRoots<C>,
+    work: Option<&BooleanWork<'_>>,
+) -> DivisionResult<Option<SourceChartMap<C>>>
+where
+    C: BoundedCurve<Point = Point3>,
+{
+    let Some(charts) = charts else {
+        return Ok(None);
+    };
+    let root = roots
+        .get(&edge.id())
+        .map(|(root, _)| *root)
+        .unwrap_or_else(|| edge.id());
+    let mut selected = None;
+    for chart in charts.iter().flatten() {
+        if let Some(work) = work {
+            work.check()?;
+        }
+        if chart.edge() == root && chart.orientation() == edge.orientation() {
+            if selected.is_some() {
+                return Err("boundary_ambiguous_source_occurrence".into());
+            }
+            let (front, back) = edge.with_curve(BoundedCurve::range_tuple);
+            let (low, high) = chart.parameter_range();
+            if front < low || back > high || front > back {
+                return Err("boundary_source_parameter_domain".into());
+            }
+            selected = Some(*chart);
+        }
+    }
+    Ok(selected)
+}
+
+fn native_parameter_in_domain<S>(surface: &S, point: Point2) -> bool
+where S: ParametricSurface + TryIntoHomogeneousBsplineSurface {
+    if !point.x.is_finite() || !point.y.is_finite() {
+        return false;
+    }
+    // Only a borrowed ORIGINAL tensor has this bounded knot-domain authority.
+    // Plane and literal Line-extrusion unit rectangles are display gauges, not
+    // material trims; neither conversion nor try_range_tuple promotes them.
+    let (range, domain) = match surface.original_surface_coefficients() {
+        Some(OriginalSurfaceCoefficients::Polynomial(source)) => {
+            (source.range_tuple(), source.parameter_range())
+        }
+        Some(OriginalSurfaceCoefficients::Rational(source)) => {
+            (source.range_tuple(), source.parameter_range())
+        }
+        _ => return true,
+    };
+    surface.parameter_range() == domain
+        && range.0.0 <= point.x
+        && point.x <= range.0.1
+        && range.1.0 <= point.y
+        && point.y <= range.1.1
+}
+
+fn create_parameter_boundary<C, S>(
+    face: &Face<Point3, C, S>,
+    wire: &Wire<Point3, C>,
+    polys: &mut CurveDivisionCache<Point3, C>,
+    charts: Option<&[Vec<SourceChartMap<C>>]>,
+    roots: &NativeChartRoots<C>,
     work: Option<&BooleanWork<'_>>,
 ) -> DivisionResult<PolylineCurve<Point2>>
 where
-    P: Copy,
-    C: BoundedCurve<Point = P> + ParameterDivision1D<Point = P>,
-    S: Clone + ParametricSurface + SearchParameter<SurfaceParameter, Point = P>,
+    C: ParametricCurve3D
+        + BoundedCurve
+        + ParameterDivision1D<Point = Point3>
+        + TryIntoHomogeneousBsplineCurve,
+    S: Clone
+        + ParametricSurface3D
+        + SearchParameter<SurfaceParameter, Point = Point3>
+        + TryIntoHomogeneousBsplineSurface,
 {
     if let Some(work) = work {
         work.check()?;
     }
     let surface = face.surface();
-    let pt = wire.front_vertex().unwrap().point();
-    let parameter = surface.search_parameter(pt, None, 100);
-    let p: Point2 = parameter.ok_or("boundary_front_parameter")?.into();
-    let vec = wire.edge_iter().try_fold(vec![p], |mut vec, edge| {
-        let poly = polys.get(edge, work)?;
+    // Start on an actual source occurrence when available, not an arbitrary
+    // inverse representative of a shared seam vertex. Only polygon traversal
+    // rotates; the native wire and its occurrence order remain unchanged.
+    let mut start = 0;
+    let mut initial = None;
+    for (index, edge) in wire.iter().enumerate() {
+        if let Some(chart) = current_source_chart(edge, charts, roots, work)? {
+            let (front, back) = edge.with_curve(BoundedCurve::range_tuple);
+            initial = Some(chart.map(if edge.orientation() { front } else { back }));
+            start = index;
+            break;
+        }
+    }
+    let first = wire.get(start).ok_or("boundary_empty_wire")?;
+    let point = first.front().point();
+    let p = match initial {
+        Some(point) => point,
+        None => surface
+            .search_parameter(point, None, 100)
+            .map(Point2::from)
+            .ok_or("boundary_front_parameter")?,
+    };
+    if !native_parameter_in_domain(&surface, p) || !surface.evaluate(p.x, p.y).near(&point) {
+        return Err("boundary_front_source_domain".into());
+    }
+    let mut vec = vec![p];
+    for offset in 0..wire.len() {
+        let _edge_index = (start + offset) % wire.len();
+        let edge = &wire[_edge_index];
+        let chart = current_source_chart(edge, charts, roots, work)?;
+        let next = &wire[(_edge_index + 1) % wire.len()];
+        let end_chart = if chart.is_none() {
+            current_source_chart(next, charts, roots, work)?
+        } else {
+            None
+        };
+        let end = if edge.orientation() {
+            edge.with_curve(BoundedCurve::range_tuple).1
+        } else {
+            edge.with_curve(BoundedCurve::range_tuple).0
+        };
+        let end_uv = if let Some(chart) = end_chart {
+            if edge.back().id() != next.front().id() {
+                return Err("boundary_disconnected_source_occurrence".into());
+            }
+            let (front, back) = next.with_curve(BoundedCurve::range_tuple);
+            Some(chart.map(if next.orientation() { front } else { back }))
+        } else {
+            None
+        };
+        let (parameters, poly) = polys.get(edge, work)?;
+        if parameters.len() != poly.len() {
+            return Err("boundary_curve_division_parameters".into());
+        }
         let mut p = *vec.last().unwrap();
-        let closure = |q: &P| -> DivisionResult<Point2> {
+        let mut append = |(&parameter, q): (&f64, &Point3)| -> DivisionResult<()> {
             if let Some(work) = work {
                 work.check()?;
             }
-            let parameter = surface.search_parameter(*q, Some(p.into()), 100);
-            let next: Point2 = parameter.ok_or("boundary_sample_parameter")?.into();
-            // Inverse maps can return a canonical representative even when
-            // given a hint. Lift periodic coordinates to the previous sheet
-            // before measuring signed area or testing loop containment.
-            p = Point2::new(
-                lift_periodic(next.x, p.x, surface.period_u())
-                    .ok_or("boundary_periodic_coordinate")?,
-                lift_periodic(next.y, p.y, surface.period_v())
-                    .ok_or("boundary_periodic_coordinate")?,
-            );
-            Ok(p)
+            let exact = chart
+                .map(|chart| chart.map(parameter))
+                .or_else(|| (parameter == end).then_some(end_uv).flatten());
+            let next = if let Some(point) = exact {
+                point
+            } else {
+                let parameter = surface.search_parameter(*q, Some(p.into()), 100);
+                let Some(parameter) = parameter else {
+                    return Err("boundary_sample_parameter".into());
+                };
+                Point2::from(parameter)
+            };
+            if !native_parameter_in_domain(&surface, next) {
+                return Err("boundary_sample_source_domain".into());
+            }
+            if !surface.evaluate(next.x, next.y).near(q) {
+                return Err("boundary_sample_source_residual".into());
+            }
+            p = if exact.is_some() {
+                next
+            } else {
+                Point2::new(
+                    lift_periodic(next.x, p.x, surface.period_u())
+                        .ok_or("boundary_periodic_coordinate")?,
+                    lift_periodic(next.y, p.y, surface.period_v())
+                        .ok_or("boundary_periodic_coordinate")?,
+                )
+            };
+            vec.push(p);
+            Ok(())
         };
-        let add: DivisionResult<Vec<Point2>> = match edge.orientation() {
-            true => poly.iter().skip(1).map(closure).collect(),
-            false => poly.iter().rev().skip(1).map(closure).collect(),
-        };
-        vec.append(&mut add?);
-        Ok::<_, DivisionFailure>(vec)
-    })?;
+        if edge.orientation() {
+            parameters
+                .iter()
+                .zip(poly.iter())
+                .skip(1)
+                .try_for_each(&mut append)?;
+        } else {
+            parameters
+                .iter()
+                .zip(poly.iter())
+                .rev()
+                .skip(1)
+                .try_for_each(&mut append)?;
+        }
+    }
     Ok(PolylineCurve(vec))
 }
 
@@ -244,12 +391,20 @@ fn divide_one_face<C, S>(
     face: &Face<Point3, C, S>,
     loops: &Loops<Point3, C>,
     polys: &mut CurveDivisionCache<Point3, C>,
+    roots: &NativeChartRoots<C>,
     work: Option<&BooleanWork<'_>>,
 ) -> DivisionResult<Vec<FaceWithShapesOpStatus<C, S>>>
 where
-    C: BoundedCurve<Point = Point3> + ParameterDivision1D<Point = Point3>,
-    S: Clone + ParametricSurface + SearchParameter<SurfaceParameter, Point = Point3>,
+    C: ParametricCurve3D
+        + BoundedCurve
+        + ParameterDivision1D<Point = Point3>
+        + TryIntoHomogeneousBsplineCurve,
+    S: Clone
+        + ParametricSurface3D
+        + SearchParameter<SurfaceParameter, Point = Point3>
+        + TryIntoHomogeneousBsplineSurface,
 {
+    let charts = original_boundary_charts(face, work)?;
     let (mut pre_faces, mut negative_wires) = (Vec::new(), Vec::new());
     let mut null_stack = Vec::new();
     loops
@@ -262,7 +417,8 @@ where
             if is_native_null_chain(wire, &mut null_stack, work)? {
                 return Ok(());
             }
-            let poly = create_parameter_boundary(face, wire, polys, work)?;
+            let poly =
+                create_parameter_boundary(face, wire, polys, charts.as_deref(), roots, work)?;
             let area = poly.area();
             // Native UV area has no world-distance tolerance or fixed gauge.
             // An unresolved sign is a refusal, never an empty material region.
@@ -331,12 +487,24 @@ pub(super) fn divide_faces<C, S>(
     work: Option<&BooleanWork<'_>>,
 ) -> ClassicResult<FacesClassification<Point3, C, S>>
 where
-    C: BoundedCurve<Point = Point3> + ParameterDivision1D<Point = Point3>,
-    S: Clone + ParametricSurface + SearchParameter<SurfaceParameter, Point = Point3>,
+    C: ParametricCurve3D
+        + BoundedCurve
+        + ParameterDivision1D<Point = Point3>
+        + TryIntoHomogeneousBsplineCurve,
+    S: Clone
+        + ParametricSurface3D
+        + SearchParameter<SurfaceParameter, Point = Point3>
+        + TryIntoHomogeneousBsplineSurface,
 {
-    divide_faces_recording(shell, loops_store, shell_index, polys, work, &mut |_, _| {
-        Ok(())
-    })
+    divide_faces_recording(
+        shell,
+        loops_store,
+        shell_index,
+        polys,
+        &HashMap::default(),
+        work,
+        &mut |_, _| Ok(()),
+    )
 }
 
 pub(super) fn divide_faces_recording<C, S>(
@@ -344,12 +512,19 @@ pub(super) fn divide_faces_recording<C, S>(
     loops_store: &LoopsStore<Point3, C>,
     shell_index: usize,
     polys: &mut CurveDivisionCache<Point3, C>,
+    roots: &NativeChartRoots<C>,
     work: Option<&BooleanWork<'_>>,
     record: &mut impl FnMut(usize, FaceId<S>) -> ClassicResult<()>,
 ) -> ClassicResult<FacesClassification<Point3, C, S>>
 where
-    C: BoundedCurve<Point = Point3> + ParameterDivision1D<Point = Point3>,
-    S: Clone + ParametricSurface + SearchParameter<SurfaceParameter, Point = Point3>,
+    C: ParametricCurve3D
+        + BoundedCurve
+        + ParameterDivision1D<Point = Point3>
+        + TryIntoHomogeneousBsplineCurve,
+    S: Clone
+        + ParametricSurface3D
+        + SearchParameter<SurfaceParameter, Point = Point3>
+        + TryIntoHomogeneousBsplineSurface,
 {
     let mut res = FacesClassification::<Point3, C, S>::default();
     shell
@@ -360,66 +535,80 @@ where
             if let Some(work) = work {
                 work.check()?;
             }
-            if loops
+            let unchanged = face.absolute_boundaries().len() == loops.len()
+                && face
+                    .absolute_boundaries()
+                    .iter()
+                    .zip(loops.iter())
+                    .all(|(old, new)| {
+                        old.len() == new.len()
+                            && old.iter().zip(new.iter()).all(|(a, b)| {
+                                a.id() == b.id() && a.orientation() == b.orientation()
+                            })
+                    });
+            let status = loops
+                .iter()
+                .map(BoundaryWire::status)
+                .find(|status| *status != ShapesOpStatus::Unknown)
+                .unwrap_or(ShapesOpStatus::Unknown);
+            let coherent = loops
+                .iter()
+                .all(|wire| wire.status() == ShapesOpStatus::Unknown || wire.status() == status);
+            if unchanged && coherent {
+                // The complete directed native trim is unchanged. Owned
+                // overlap may classify that region without cutting it; a UV
+                // polygon is not new authority for discarding the same face,
+                // particularly at a carrier's singular parameter poles.
+                // Opposed hole-wire statuses still use the existing UV
+                // containment path; a directed hole is not a contradiction.
+                let unchanged = face.clone();
+                record(face_index, unchanged.id())?;
+                res.push(unchanged, status);
+            } else if loops
                 .iter()
                 .all(|wire| wire.status() == ShapesOpStatus::Unknown)
             {
-                let unchanged = face.absolute_boundaries().len() == loops.len()
-                    && face
-                        .absolute_boundaries()
-                        .iter()
-                        .zip(loops.iter())
-                        .all(|(old, new)| {
-                            old.len() == new.len()
-                                && old.iter().zip(new.iter()).all(|(a, b)| {
-                                    a.id() == b.id() && a.orientation() == b.orientation()
-                                })
-                        });
-                let updated = if unchanged {
-                    face.clone()
-                } else {
-                    let wires = loops.iter().map(|wire| wire.deref().clone()).collect();
-                    let mut updated = Face::try_new(wires, face.surface()).map_err(|source| {
-                        ShapeOpsError::DivideFacesFailed {
-                            shell_index,
-                            face_index,
-                            stage: "propagated_face_topology",
-                            source: Some(source),
-                            boundary: loops
-                                .iter()
-                                .enumerate()
-                                .find(|(_, wire)| !wire.is_closed() || !wire.is_simple())
-                                .map(|(wire_index, wire)| DivideFaceBoundaryData {
-                                    wire_count: loops.len(),
-                                    wire_index,
-                                    wire_len: wire.len(),
-                                    closed: wire.is_closed(),
-                                    simple: wire.is_simple(),
-                                    edges: wire
-                                        .iter()
-                                        .take(12)
-                                        .map(|edge| {
-                                            (
-                                                edge.front().point(),
-                                                edge.back().point(),
-                                                edge.orientation(),
-                                            )
-                                        })
-                                        .collect(),
-                                }),
-                        }
-                    })?;
-                    if !face.orientation() {
-                        updated.invert();
+                let wires = loops.iter().map(|wire| wire.deref().clone()).collect();
+                let mut updated = Face::try_new(wires, face.surface()).map_err(|source| {
+                    ShapeOpsError::DivideFacesFailed {
+                        shell_index,
+                        face_index,
+                        stage: "propagated_face_topology",
+                        source: Some(source),
+                        boundary: loops
+                            .iter()
+                            .enumerate()
+                            .find(|(_, wire)| !wire.is_closed() || !wire.is_simple())
+                            .map(|(wire_index, wire)| DivideFaceBoundaryData {
+                                wire_count: loops.len(),
+                                wire_index,
+                                wire_len: wire.len(),
+                                closed: wire.is_closed(),
+                                simple: wire.is_simple(),
+                                edges: wire
+                                    .iter()
+                                    .take(12)
+                                    .map(|edge| {
+                                        (
+                                            edge.front().point(),
+                                            edge.back().point(),
+                                            edge.orientation(),
+                                        )
+                                    })
+                                    .collect(),
+                            }),
                     }
-                    updated.set_stable_id(face.stable_id());
-                    updated
-                };
+                })?;
+                if !face.orientation() {
+                    updated.invert();
+                }
+                updated.set_stable_id(face.stable_id());
+
                 record(face_index, updated.id())?;
                 res.push(updated, ShapesOpStatus::Unknown);
             } else {
-                let vec =
-                    divide_one_face(face, loops, polys, work).map_err(|failure| match failure {
+                let vec = divide_one_face(face, loops, polys, roots, work).map_err(|failure| {
+                    match failure {
                         DivisionFailure::Work(work) => work,
                         DivisionFailure::Geometry {
                             stage,
@@ -432,7 +621,8 @@ where
                             source,
                             boundary,
                         },
-                    })?;
+                    }
+                })?;
                 vec.into_iter().try_for_each(|(face, status)| {
                     record(face_index, face.id())?;
                     res.push(face, status);
@@ -447,7 +637,31 @@ where
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
-    use monstertruck_geometry::prelude::{Line, Plane};
+    use monstertruck_geometry::prelude::{BsplineSurface, Line, Plane};
+
+    #[test]
+    fn native_domain_authority_distinguishes_literal_plane_from_original_bounded_tensor() {
+        let plane = Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
+        let outside_display_rectangle = Point2::new(12.0, -7.0);
+        assert!(native_parameter_in_domain(
+            &plane,
+            outside_display_rectangle
+        ));
+        let bounded = BsplineSurface::from(plane);
+        assert!(!native_parameter_in_domain(
+            &bounded,
+            outside_display_rectangle
+        ));
+        assert!(native_parameter_in_domain(&bounded, Point2::new(0.5, 0.5)));
+        assert!(!native_parameter_in_domain(
+            &plane,
+            Point2::new(f64::NAN, 0.5)
+        ));
+    }
 
     fn rectangle(min: [f64; 2], max: [f64; 2]) -> PolylineCurve<Point2> {
         PolylineCurve(vec![

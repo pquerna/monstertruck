@@ -234,3 +234,77 @@ fn native_endpoint_kinds_and_replay_use_world_distance_not_parameter_nearness() 
     assert_eq!(face.boundaries()[0].len(), 4);
     assert_eq!(edge.absolute_back().point(), points[1]);
 }
+
+#[test]
+fn already_shared_original_endpoints_preserve_native_and_polygon_edge_identities() {
+    let (mut native, mut polygon, _) = circular_stores();
+    let original = &native[0][0][0];
+    let point = original.absolute_front().point();
+    let parameter = original.with_curve(BoundedCurve::range_tuple).0;
+    let origin = OriginalTrimContact {
+        point,
+        edge: original,
+        parameter,
+        input: 0,
+    };
+    let (polygon_vertex, native_vertex) = shared_contact_vertices(
+        &origin,
+        [(&native, &polygon, 0), (&native, &polygon, 0)],
+        None,
+    )
+    .unwrap()
+    .expect("literal source endpoint still has its actual owned occurrence");
+    assert_eq!(&native_vertex, original.absolute_front());
+    assert_eq!(&polygon_vertex, polygon[0][0][0].absolute_front());
+    let native_ids = native[0][0].iter().map(Edge::id).collect::<Vec<_>>();
+    let polygon_ids = polygon[0][0].iter().map(Edge::id).collect::<Vec<_>>();
+    let mut rewrites = 0;
+    native
+        .add_geom_vertex(
+            (0, 0, 0),
+            &native_vertex,
+            ParameterKind::Front,
+            &mut HashMap::default(),
+            &mut Some(&mut |_, _, _| {
+                rewrites += 1;
+                true
+            }),
+        )
+        .unwrap();
+    polygon
+        .add_polygon_vertex_at(
+            0,
+            &polygon_vertex,
+            (0, 0, ParameterKind::Front),
+            &mut HashMap::default(),
+        )
+        .unwrap();
+    assert_eq!(rewrites, 0);
+    assert_eq!(
+        native[0][0].iter().map(Edge::id).collect::<Vec<_>>(),
+        native_ids
+    );
+    assert_eq!(
+        polygon[0][0].iter().map(Edge::id).collect::<Vec<_>>(),
+        polygon_ids
+    );
+    let unrelated_vertex = Vertex::new(point);
+    let actual = &native[0][0][0];
+    let unrelated = Edge::new(&unrelated_vertex, actual.absolute_back(), actual.curve());
+    let origin = OriginalTrimContact {
+        point,
+        edge: &unrelated,
+        parameter,
+        input: 0,
+    };
+    assert!(
+        shared_contact_vertices(
+            &origin,
+            [(&native, &polygon, 0), (&native, &polygon, 0)],
+            None,
+        )
+        .unwrap()
+        .is_none(),
+        "equal coordinates do not create shared source-vertex identity"
+    );
+}
