@@ -16,6 +16,10 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Native Boolean loop construction caches admitted finite seed-face bounds and
+  rejects strictly disjoint mesh pairs before interference extraction. Touching
+  and unknown bounds retain unchanged Cartesian admission, native reconstruction,
+  two-sided topology and cut genealogy; scans and combined scratch remain bounded.
 - Surface-plane roots, witnesses and no-crossing proofs evaluate the original
   scalar functional before unused world coordinates. Planes, tensor splines,
   extrusion and generic revolution retain native UV composition, poses,

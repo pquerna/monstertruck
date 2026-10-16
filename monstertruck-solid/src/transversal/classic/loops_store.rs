@@ -4,6 +4,8 @@
 //! The marching backend yields a raw [`IntersectionCurve`] leader rather
 //! than the former parameter wrapper. Numerical failures retain face-pair
 //! and projection-stage identity instead of collapsing into `None`.
+//! A counted query-local seed AABB cache bypasses extraction only for strictly
+//! disjoint finite meshes; admitted pairs retain full reconstruction and topology.
 
 #![allow(clippy::many_single_char_names)]
 
@@ -20,6 +22,7 @@ use rustc_hash::FxHashMap as HashMap;
 mod native_component;
 mod native_interval;
 mod periodic_loops;
+mod seed_bounds;
 
 type PolylineCurve = monstertruck_meshing::prelude::PolylineCurve<Point3>;
 
@@ -760,6 +763,7 @@ where
         + TryIntoHomogeneousBsplineSurface
         + SearchNearestParameter<SurfaceParameter, Point = Point3>,
 {
+    let seed_bounds = seed_bounds::SeedBounds::new([poly_shell0, poly_shell1], work)?;
     let mut geom_loops_store0: LoopsStore<_, _> = geom_shell0.face_iter().collect();
     let mut poly_loops_store0: LoopsStore<_, _> = poly_shell0.face_iter().collect();
     let mut geom_loops_store1: LoopsStore<_, _> = geom_shell1.face_iter().collect();
@@ -769,8 +773,8 @@ where
     (0..store0_len)
         .flat_map(move |i| (0..store1_len).map(move |j| (i, j)))
         .try_for_each(|(face_index0, face_index1)| {
-            if let Some(work) = work {
-                work.check()?;
+            if seed_bounds.disjoint(face_index0, face_index1, work)? {
+                return Ok(());
             }
             let failure = |stage, detail| ShapeOpsError::IntersectionLoopsFailed {
                 face_index0,
