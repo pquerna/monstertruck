@@ -1,6 +1,7 @@
 use super::*;
 use crate::*;
 use monstertruck_topology::trimmed::TrimmedFace;
+use std::f64::consts::{PI, TAU};
 
 const CHART_ERROR: f64 = 1.0e-7;
 const SHORTENING: f64 = 1.0e-6;
@@ -773,5 +774,342 @@ fn root_inventory_compares_actual_processor_transform_and_orientation() {
         roots
             .root_chart_for_cut(0, 0.5, &mut budget, &cancel)
             .is_ok()
+    );
+}
+
+#[test]
+fn sphere_belt_plural_original_roots_select_independent_reversed_chart_gauges() {
+    for direction in [-1.0_f64, 1.0] {
+        let surface = Surface::SphericalSurface(Processor::new(Sphere::new(Point3::origin(), 5.0)));
+        let phase = (3.0_f64 / 4.0).atan();
+        let arc_end = 2.0 * phase;
+        let start_z = direction * 3.0;
+        let end_z = -start_z;
+        let start_u = (start_z / 5.0).acos();
+        let end_u = (end_z / 5.0).acos();
+        let circle = |origin, u, v, range| {
+            Curve::ParameterCurve(ParameterCurve::new(
+                Curve2D::Conic(Conic2D::Ellipse(Processor::new(TrimmedCurve::new(
+                    UnitCircle::<Point2>::new(),
+                    range,
+                )))),
+                Box::new(Surface::Plane(Plane::from_origin_vectors(origin, u, v))),
+            ))
+        };
+        let meridian = circle(
+            Point3::origin(),
+            Vector3::new(4.0, 0.0, start_z),
+            Vector3::new(3.0, 0.0, -direction * 4.0),
+            (0.0, arc_end),
+        );
+        let latitude = |z, range| {
+            circle(
+                Point3::new(0.0, 0.0, z),
+                Vector3::new(4.0, 0.0, 0.0),
+                Vector3::new(0.0, 4.0, 0.0),
+                range,
+            )
+        };
+        let originals = [
+            meridian,
+            latitude(end_z, (0.0, PI)),
+            latitude(end_z, (PI, TAU)),
+            latitude(start_z, (PI, TAU)),
+            latitude(start_z, (0.0, PI)),
+        ];
+        let start = builder::vertex(Point3::new(4.0, 0.0, start_z));
+        let end = builder::vertex(Point3::new(4.0, 0.0, end_z));
+        let end_opposite = builder::vertex(Point3::new(-4.0, 0.0, end_z));
+        let start_opposite = builder::vertex(Point3::new(-4.0, 0.0, start_z));
+        let seam = Edge::new(&start, &end, originals[0].clone());
+        let wire: Wire = [
+            seam.clone(),
+            Edge::new(&end, &end_opposite, originals[1].clone()),
+            Edge::new(&end_opposite, &end, originals[2].clone()),
+            seam.inverse(),
+            Edge::new(&start_opposite, &start, originals[3].clone()).inverse(),
+            Edge::new(&start, &start_opposite, originals[4].clone()).inverse(),
+        ]
+        .into_iter()
+        .collect();
+        let line = |a: (f64, f64), b: (f64, f64)| {
+            Some(Curve2D::Line(Line(
+                Point2::new(a.0, a.1),
+                Point2::new(b.0, b.1),
+            )))
+        };
+        let trimmed = TrimmedFace::new(
+            Face::new(vec![wire], surface.clone()),
+            vec![vec![
+                line((start_u, 0.0), (end_u, 0.0)),
+                line((end_u, 0.0), (end_u, PI)),
+                line((end_u, PI), (end_u, TAU)),
+                line((start_u, TAU), (end_u, TAU)),
+                line((start_u, PI), (start_u, TAU)),
+                line((start_u, 0.0), (start_u, PI)),
+            ]],
+        );
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(1_000_000);
+        let domain = prepare_face_parameter_domain_with_uncertainty(
+            &trimmed,
+            [CHART_ERROR; 2],
+            TrimDomainLimits {
+                max_coedges: 16,
+                max_subdivisions: 65_536,
+                max_retained_bytes: 32 * 1024 * 1024,
+            },
+            &mut budget,
+            &cancel,
+        )
+        .unwrap();
+        let prepared: Vec<_> = originals
+            .iter()
+            .map(|curve| {
+                let (a, b) = curve.range_tuple();
+                prepared_validated_curve(
+                    curve,
+                    [a, b],
+                    &ValidatedCurveOptions::default(),
+                    &mut budget,
+                    &cancel,
+                )
+                .unwrap()
+            })
+            .collect();
+        let bindings: Vec<_> = [0, 1, 2, 0, 3, 4]
+            .into_iter()
+            .enumerate()
+            .map(|(coedge, original)| ValidatedPlaneTrimBoundaryBinding {
+                coedge_index: coedge,
+                original_edge_id: domain.coedges()[coedge].identity.edge_id,
+                boundary: &prepared[original],
+                boundary_range: prepared[original].range(),
+                boundary_scale: 1.0,
+                source_chart_error_mm: CHART_ERROR,
+            })
+            .collect();
+        let plane = Plane::new(
+            Point3::new(4.5, 0.0, 0.0),
+            Point3::new(4.5, 1.0, 0.0),
+            Point3::new(4.5, 0.0, 1.0),
+        );
+        let roots = prepared_face_plane_roots(
+            &domain,
+            &plane,
+            &bindings,
+            32 * 1024 * 1024,
+            &mut budget,
+            &cancel,
+        )
+        .expect("both original meridian roots and the noncrossing latitude inventory");
+        let delta = 0.9_f64.acos();
+        for (cut, z) in [
+            (phase - delta, direction * 4.75_f64.sqrt()),
+            (phase + delta, -direction * 4.75_f64.sqrt()),
+        ] {
+            for (coedge, longitude) in [(0, 0.0), (3, TAU)] {
+                let uv = roots
+                    .root_chart_for_cut(coedge, cut, &mut budget, &cancel)
+                    .unwrap();
+                let theta = (z / 5.0).acos();
+                assert!(uv[0].lower <= theta && theta <= uv[0].upper);
+                assert!(uv[1].lower <= longitude && longitude <= uv[1].upper);
+            }
+            let actual = prepared[0]
+                .position_bounds([cut; 2], &mut budget, &cancel)
+                .unwrap();
+            for (bound, coordinate) in actual.into_iter().zip([4.5, 0.0, z]) {
+                assert!(bound.lower <= coordinate && coordinate <= bound.upper);
+            }
+        }
+        assert!(
+            validated_face_plane_coverage(
+                &domain,
+                &ValidatedPlaneCoverageQuery {
+                    plane: &plane,
+                    candidates: &[],
+                    endpoint_bindings: &[],
+                    prepared_roots: Some(&roots),
+                },
+                &ValidatedPlaneCoverageOptions::default(),
+                &mut budget,
+                &cancel,
+            )
+            .is_err(),
+            "inventoried plural source roots cannot authorize omitted candidates"
+        );
+    }
+}
+
+#[test]
+fn produced_planar_cap_chart_does_not_invent_or_erase_original_plane_roots() {
+    let origin = builder::vertex(Point3::new(0.0, 0.0, 3.0));
+    let start = builder::vertex(Point3::new(4.0, 0.0, 3.0));
+    let end = builder::vertex(Point3::new(2.4492935983e-16, 4.0, 3.0));
+    let originals = [
+        Curve::TrimmedCurve(Processor::with_transform(
+            TrimmedCurve::new(
+                Box::new(Curve::Line(Line(
+                    Point3::origin(),
+                    Point3::new(-4.0, 0.0, 0.0),
+                ))),
+                (-0.0, 1.0),
+            ),
+            Matrix4::from_translation(Vector3::new(4.0, 0.0, 3.0)),
+        )),
+        Curve::TrimmedCurve(Processor::with_transform(
+            TrimmedCurve::new(
+                Box::new(Curve::Line(Line(
+                    Point3::origin(),
+                    Point3::new(2.44929359828e-16, 4.0, 0.0),
+                ))),
+                (0.0, 1.0),
+            ),
+            Matrix4::from_translation(Vector3::new(0.0, 0.0, 3.0)),
+        )),
+        Curve::ParameterCurve(ParameterCurve::new(
+            Curve2D::Conic(Conic2D::Ellipse(Processor::new(TrimmedCurve::new(
+                UnitCircle::<Point2>::new(),
+                (TAU, 2.5 * PI),
+            )))),
+            Box::new(Surface::Plane(Plane::from_origin_vectors(
+                Point3::new(0.0, 0.0, 3.0),
+                Vector3::new(4.0, 0.0, 0.0),
+                Vector3::new(0.0, 4.0, 0.0),
+            ))),
+        )),
+    ];
+    let target = Plane::from_origin_vectors(
+        Point3::new(4.0, 0.0, 3.0),
+        Vector3::new(-1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    );
+    let wire: Wire = [
+        Edge::new(&start, &origin, originals[0].clone()),
+        Edge::new(&origin, &end, originals[1].clone()),
+        Edge::new(&start, &end, originals[2].clone()).inverse(),
+    ]
+    .into_iter()
+    .collect();
+    let mut face = Face::new(vec![wire], Surface::Plane(target));
+    face.invert();
+    let cancel = AtomicBool::new(false);
+    let mut budget = ValidatedGeometryBudget::new(1_000_000);
+    let charts = vec![vec![
+        Some(
+            certified_planar_parameter_curve(&originals[0], &target, &mut budget, &cancel).unwrap(),
+        ),
+        Some(Curve2D::Line(Line(
+            Point2::new(4.0, 0.0),
+            Point2::new(3.9999999999999996, 4.0),
+        ))),
+        Some(
+            certified_planar_parameter_curve(&originals[2], &target, &mut budget, &cancel).unwrap(),
+        ),
+    ]];
+    let chart_error = 1.9915985002206266e-16;
+    let trimmed = TrimmedFace::new(face, charts);
+    let domain = prepare_face_parameter_domain_with_uncertainty(
+        &trimmed,
+        [chart_error; 2],
+        TrimDomainLimits {
+            max_coedges: 200_000,
+            max_subdivisions: 1_000_000,
+            max_retained_bytes: 33_514_560,
+        },
+        &mut budget,
+        &cancel,
+    )
+    .unwrap();
+    let prepared: Vec<_> = originals
+        .iter()
+        .map(|curve| {
+            let range = curve.range_tuple();
+            prepared_validated_curve(
+                curve,
+                [range.0, range.1],
+                &ValidatedCurveOptions::default(),
+                &mut budget,
+                &cancel,
+            )
+            .unwrap()
+        })
+        .collect();
+    let bindings: Vec<_> = prepared
+        .iter()
+        .enumerate()
+        .map(|(index, boundary)| ValidatedPlaneTrimBoundaryBinding {
+            coedge_index: index,
+            original_edge_id: domain.coedges()[index].identity.edge_id,
+            boundary,
+            boundary_range: boundary.range(),
+            boundary_scale: 1.0,
+            source_chart_error_mm: if index == 1 { chart_error } else { 0.0 },
+        })
+        .collect();
+    let plane_at = |x| {
+        Plane::new(
+            Point3::new(x, 0.0, 0.0),
+            Point3::new(x, 1.0, 0.0),
+            Point3::new(x, 0.0, 1.0),
+        )
+    };
+    let outside = plane_at(4.5);
+    let outside_roots = prepared_face_plane_roots(
+        &domain,
+        &outside,
+        &bindings,
+        33_457_432,
+        &mut budget,
+        &cancel,
+    )
+    .expect("the actual radius-four cap has no root at x4.5");
+    let coverage = validated_face_plane_coverage(
+        &domain,
+        &ValidatedPlaneCoverageQuery {
+            plane: &outside,
+            candidates: &[],
+            endpoint_bindings: &[],
+            prepared_roots: Some(&outside_roots),
+        },
+        &ValidatedPlaneCoverageOptions::default(),
+        &mut budget,
+        &cancel,
+    )
+    .expect("complete original cap coverage proves this plane misses the material face");
+    assert!(coverage.endpoint_strata.is_empty());
+    let inside = plane_at(3.0);
+    let inside_roots = prepared_face_plane_roots(
+        &domain,
+        &inside,
+        &bindings,
+        33_457_432,
+        &mut budget,
+        &cancel,
+    )
+    .expect("both actual cap boundary crossings remain in the complete inventory");
+    for (coedge, cut, y) in [(0, 0.25, 0.0), (2, TAU + 0.75_f64.acos(), 7.0_f64.sqrt())] {
+        let uv = inside_roots
+            .root_chart_for_cut(coedge, cut, &mut budget, &cancel)
+            .unwrap();
+        assert!(uv[0].lower <= 1.0 && 1.0 <= uv[0].upper);
+        assert!(uv[1].lower <= y && y <= uv[1].upper);
+    }
+    assert!(
+        validated_face_plane_coverage(
+            &domain,
+            &ValidatedPlaneCoverageQuery {
+                plane: &inside,
+                candidates: &[],
+                endpoint_bindings: &[],
+                prepared_roots: Some(&inside_roots),
+            },
+            &ValidatedPlaneCoverageOptions::default(),
+            &mut budget,
+            &cancel,
+        )
+        .is_err(),
+        "correctly projected original roots never authorize omitted candidates"
     );
 }

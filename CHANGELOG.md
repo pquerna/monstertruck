@@ -16,6 +16,14 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Certified planar analytic pcurves emit exact affine native `Point2` operators
+  rather than projectively equivalent homogeneous matrices. Native `Matrix3`
+  point action intentionally does not divide by the homogeneous coordinate;
+  applying rational-control scaling to an analytic processor previously changed
+  its physical image and could invent cap/plane roots. Rational control nets
+  retain homogeneous scaling. Nonrepresentable affine quotients and genuinely
+  projective analytic chart operators refuse the exact lane without changing
+  original 3D geometry or authorizing rounded coefficients.
 - Whole original degree-one UV branches can prove straight regularity from a
   complete outward native derivative enclosure when checked exact endpoint
   arithmetic cannot represent intermediate affine offsets. Original coefficient

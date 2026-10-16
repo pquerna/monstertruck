@@ -95,6 +95,21 @@ impl Dyadic {
             * 2.0_f64.powi(self.exponent - denominator.exponent)
     }
 
+    /// Returns a quotient only when its exact value is finite binary64.
+    pub(super) fn exact_quotient(self, denominator: Self) -> Option<f64> {
+        if denominator.coefficient == 0
+            || self.coefficient.checked_rem(denominator.coefficient)? != 0
+        {
+            return None;
+        }
+        Self {
+            coefficient: self.coefficient.checked_div(denominator.coefficient)?,
+            exponent: self.exponent.checked_sub(denominator.exponent)?,
+        }
+        .normalized()
+        .exact_float()
+    }
+
     pub(super) fn compare(self, other: Self) -> std::cmp::Ordering {
         let sign = self.coefficient.signum().cmp(&other.coefficient.signum());
         if !sign.is_eq() {
@@ -203,9 +218,12 @@ pub(super) fn plane_coefficients(plane: &Plane) -> Option<[[Dyadic; 3]; 3]> {
 /// Complete original homogeneous controls are projected with an exactly checked
 /// plane identity, retaining original parameters and knots. Homogeneous UV storage
 /// avoids rounding nondyadic coordinate quotients. Plane-embedded analytic pcurves
-/// are recharted by exact coefficient maps, retaining their original conic pose
-/// factors. Selected generic trims retain every basis, interval and independent
-/// sense; spatial pose matrices are included in the whole carrier proof.
+/// are recharted with exactly representable affine `Point2` coefficients,
+/// retaining their original conic pose factors. Homogeneous common scaling is
+/// reserved for rational controls; projective or nondyadic `Point2` operators
+/// refuse this exact lane rather than claim that an undivided or rounded matrix
+/// is equivalent. Selected generic trims retain every basis, interval and
+/// independent sense; spatial poses participate in the complete carrier proof.
 /// Checked dyadic overflow, unrepresentable homogeneous factors, excessive nesting,
 /// implicit intersections and unrelated carriers return typed refusals.
 ///

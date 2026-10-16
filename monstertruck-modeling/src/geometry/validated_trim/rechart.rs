@@ -135,28 +135,32 @@ fn scaled(number: Dyadic, divisor: u128, exponent: i32) -> Result<f64, TrimDomai
         .ok_or_else(refusal)
 }
 
-fn matrix(values: [[Dyadic; 3]; 3]) -> Result<Matrix3, TrimDomainError> {
-    let (divisor, exponent) = common_scale(&values)?;
+fn affine_matrix(values: [[Dyadic; 3]; 3]) -> Result<Matrix3, TrimDomainError> {
+    let zero = value(0.0)?;
+    let denominator = values[2][2];
+    if values[0][2] != zero || values[1][2] != zero || denominator == zero {
+        return Err(refusal());
+    }
+    // Homogeneous common scaling is valid for rational controls, not for a
+    // native Point2 Processor, whose matrix action truncates without division.
+    // Certify the actual emitted affine coefficients, never a projectively
+    // equivalent matrix. A rounded nondyadic quotient has no exact authority.
     let mut columns = [Vector3::new(0.0, 0.0, 0.0); 3];
     for column in 0..3 {
         for row in 0..3 {
-            columns[column][row] = scaled(values[column][row], divisor, exponent)?;
+            columns[column][row] = values[column][row]
+                .exact_quotient(denominator)
+                .ok_or_else(refusal)?;
         }
     }
     Ok(Matrix3::from_cols(columns[0], columns[1], columns[2]))
 }
 
 fn transformed(curve: Curve2D, transform: Matrix3) -> Result<Curve2D, TrimDomainError> {
-    if (0..3).all(|column| {
-        (0..3).all(|row| {
-            if row == column {
-                transform[column][row] == transform[2][2]
-            } else {
-                transform[column][row] == 0.0
-            }
-        })
-    }) && transform[2][2] != 0.0
-    {
+    if transform[0][2] != 0.0 || transform[1][2] != 0.0 || transform[2][2] != 1.0 {
+        return Err(refusal());
+    }
+    if transform == Matrix3::from_scale(1.0) {
         return Ok(curve);
     }
     let range = curve.range_tuple();
@@ -198,23 +202,24 @@ pub(super) fn parameter_curve(
         projected[column] = projection.project(frame[column])?;
     }
     budget.charge(1, cancel)?;
-    let transform = matrix(projected);
+    let transform = affine_matrix(projected);
     let count = curve_storage_units(curve, budget, cancel)?;
     budget.charge(count, cancel)?;
-    let curve = curve.clone();
     if let Ok(transform) = transform {
-        return transformed(curve, transform);
+        return transformed(curve.clone(), transform);
     }
     // Retain exact factors rather than round a composed coefficient matrix.
     let [a, b] = projection.axes;
-    let first = matrix(frame.map(|point| [point[a], point[b], point[3]]))?;
+    budget.charge(1, cancel)?;
+    let first = affine_matrix(frame.map(|point| [point[a], point[b], point[3]]))?;
     let zero = value(0.0)?;
     let translated = Matrix3::from_cols(
         Vector3::new(1.0, 0.0, 0.0),
         Vector3::new(0.0, 1.0, 0.0),
         Vector3::new(-target.origin()[a], -target.origin()[b], 1.0),
     );
-    let inverse = matrix([
+    budget.charge(1, cancel)?;
+    let inverse = affine_matrix([
         [
             projection.coefficients[2][b],
             negate(projection.coefficients[1][b])?,
@@ -229,7 +234,7 @@ pub(super) fn parameter_curve(
     ])?;
     budget.charge(3, cancel)?;
     transformed(
-        transformed(transformed(curve, first)?, translated)?,
+        transformed(transformed(curve.clone(), first)?, translated)?,
         inverse,
     )
 }

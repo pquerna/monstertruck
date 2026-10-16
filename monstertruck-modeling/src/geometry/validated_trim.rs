@@ -1143,8 +1143,8 @@ impl<'a> PreparedFaceParameterDomain<'a> {
 mod native_trim_regressions {
     use super::*;
     use crate::{
-        BsplineCurve, BsplineSurface, EuclideanSpace, Invertible, KnotVector, Line, Matrix3, Plane,
-        Point2, Processor, Sphere, TrimmedCurve, UnitCircle, Vector3,
+        BsplineCurve, BsplineSurface, EuclideanSpace, InnerSpace, Invertible, KnotVector, Line,
+        Matrix3, Plane, Point2, Processor, Sphere, TrimmedCurve, UnitCircle, Vector3,
     };
     use monstertruck_topology::{Edge, Vertex, Wire};
 
@@ -1367,39 +1367,99 @@ mod native_trim_regressions {
     }
 
     #[test]
-    fn planar_conic_rechart_retains_original_basis_and_homogeneous_factors() {
+    fn planar_conic_rechart_preserves_actual_native_image_and_tangent() {
+        let range = (std::f64::consts::TAU, 2.5 * std::f64::consts::PI);
+        let targets = [
+            Plane::from_origin_vectors(
+                Point3::new(1.0, -2.0, 0.0),
+                Vector3::new(0.5, 0.0, 0.0),
+                Vector3::new(0.0, 0.25, 0.0),
+            ),
+            Plane::from_origin_vectors(
+                Point3::new(1.0, -2.0, 0.0),
+                Vector3::new(-2.0, 0.0, 0.0),
+                Vector3::new(1.0, 4.0, 0.0),
+            ),
+        ];
+        for inverted in [false, true] {
+            let mut uv = Processor::new(TrimmedCurve::new(UnitCircle::<Point2>::new(), range));
+            if inverted {
+                uv.invert();
+            }
+            let source = Surface::Plane(Plane::from_origin_vectors(
+                Point3::new(4.0, 5.0, 0.0),
+                Vector3::new(1.5, 0.0, 0.0),
+                Vector3::new(0.0, 2.5, 0.0),
+            ));
+            let curve = Curve::ParameterCurve(ParameterCurve::new(
+                Curve2D::Conic(Conic2D::Ellipse(uv)),
+                Box::new(source),
+            ));
+            for target in &targets {
+                let projected = certified_planar_parameter_curve(
+                    &curve,
+                    target,
+                    &mut ValidatedGeometryBudget::new(100_000),
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+                assert_eq!(projected.range_tuple(), range);
+                for fraction in [0.0, 0.137, 0.5, 0.823, 1.0] {
+                    let parameter = range.0 + fraction * (range.1 - range.0);
+                    let theta = if inverted {
+                        range.0 + range.1 - parameter
+                    } else {
+                        parameter
+                    };
+                    let orientation = if inverted { -1.0 } else { 1.0 };
+                    let position =
+                        Point3::new(4.0 + 1.5 * theta.cos(), 5.0 + 2.5 * theta.sin(), 0.0);
+                    let tangent =
+                        Vector3::new(-1.5 * theta.sin(), 2.5 * theta.cos(), 0.0) * orientation;
+                    let point = projected.subs(parameter);
+                    let derivative = projected.der(parameter);
+                    let image = target.subs(point.x, point.y);
+                    let image_derivative =
+                        target.axis_u() * derivative.x + target.axis_v() * derivative.y;
+                    assert!((image - position).magnitude() < 1.0e-12);
+                    assert!((image_derivative - tangent).magnitude() < 1.0e-12);
+                    assert!((curve.subs(parameter) - position).magnitude() < 1.0e-12);
+                    assert!((curve.der(parameter) - tangent).magnitude() < 1.0e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn planar_conic_rechart_refuses_nondyadic_affine_processor() {
         let uv = Curve2D::Conic(Conic2D::Ellipse(Processor::new(TrimmedCurve::new(
             UnitCircle::<Point2>::new(),
             (0.0, std::f64::consts::TAU),
         ))));
-        let source = Surface::Plane(Plane::from_origin_vectors(
-            Point3::new(4.0, 5.0, 0.0),
-            Vector3::new(1.1, 0.0, 0.0),
-            Vector3::new(0.0, 1.1, 0.0),
+        let curve = Curve::ParameterCurve(ParameterCurve::new(
+            uv,
+            Box::new(Surface::Plane(Plane::from_origin_vectors(
+                Point3::new(4.0, 5.0, 0.0),
+                Vector3::new(1.1, 0.0, 0.0),
+                Vector3::new(0.0, 1.1, 0.0),
+            ))),
         ));
-        let curve = Curve::ParameterCurve(ParameterCurve::new(uv, Box::new(source)));
         let target = Plane::from_origin_vectors(
             Point3::origin(),
             Vector3::new(37.0, 0.0, 0.0),
             Vector3::new(0.0, 31.0, 0.0),
         );
-        let projected = certified_planar_parameter_curve(
-            &curve,
-            &target,
-            &mut ValidatedGeometryBudget::new(100_000),
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        assert_eq!(projected.range_tuple(), (0.0, std::f64::consts::TAU));
-        let mut basis = &projected;
-        let mut factors = 0;
-        while let Curve2D::TrimmedCurve(wrapper) = basis {
-            factors += 1;
-            assert!(wrapper.orientation());
-            basis = wrapper.entity().curve();
-        }
-        assert!(factors >= 2);
-        assert!(matches!(basis, Curve2D::Conic(Conic2D::Ellipse(_))));
+        assert!(matches!(
+            certified_planar_parameter_curve(
+                &curve,
+                &target,
+                &mut ValidatedGeometryBudget::new(100_000),
+                &AtomicBool::new(false),
+            ),
+            Err(TrimDomainError::Geometry(
+                ValidatedGeometryError::Unresolved
+            )),
+        ));
     }
 
     #[test]

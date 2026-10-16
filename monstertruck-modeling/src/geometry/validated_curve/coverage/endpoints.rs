@@ -393,10 +393,27 @@ fn isolate_trim_roots(
     let chart = isolate_roots(
         [range.0, range.1],
         maximum_bytes,
-        |range, budget| Ok(chart_jet(context, index, range, budget, cancel)?.0),
+        |range, budget| {
+            chart_jet(context, index, range, budget, cancel)
+                .map(|jet| jet.0)
+                .map_err(|error| {
+                    coverage_context(
+                        error,
+                        "original trim inventory / source-chart jet enclosure",
+                        None,
+                    )
+                })
+        },
         budget,
         cancel,
-    )?;
+    )
+    .map_err(|error| {
+        coverage_context(
+            error,
+            "original trim inventory / complete source-chart root isolation",
+            None,
+        )
+    })?;
     let chart_bytes = chart
         .capacity()
         .checked_mul(size_of::<Root>())
@@ -409,7 +426,16 @@ fn isolate_trim_roots(
         binding.boundary_range,
         remaining,
         |range, budget| {
-            let jet = binding.boundary.jet(range, budget, cancel)?;
+            let jet = binding
+                .boundary
+                .jet(range, budget, cancel)
+                .map_err(|error| {
+                    coverage_context(
+                        error,
+                        "original trim inventory / original-3D jet enclosure",
+                        None,
+                    )
+                })?;
             Ok(ValidatedScalarCurveJet {
                 position: dot3(
                     context.normal,
@@ -421,9 +447,20 @@ fn isolate_trim_roots(
         },
         budget,
         cancel,
-    )?;
+    )
+    .map_err(|error| {
+        coverage_context(
+            error,
+            "original trim inventory / complete original-3D root isolation",
+            None,
+        )
+    })?;
     if original.len() != chart.len() {
-        return Err(ValidatedGeometryError::Unresolved);
+        return Err(coverage_context(
+            ValidatedGeometryError::Unresolved,
+            "original trim inventory / original-3D and source-chart root cardinality",
+            None,
+        ));
     }
     for (chart, original) in chart.iter().zip(&original) {
         budget.charge(1, cancel)?;
