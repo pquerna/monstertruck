@@ -3517,6 +3517,38 @@ mod continuation_regressions {
     }
 
     #[test]
+    fn exact_endpoint_coordinate_certifies_a_point_without_guide_extension() {
+        let curve = plane_intersection(false);
+        let fixed = CoordinatePlane {
+            normal: [0.0, 1.0, 0.0],
+            offset: 1.0,
+        };
+        let projection = Projection::BetweenPlanes {
+            parameter: [0.0, 1.0],
+            planes: [fixed; 2],
+        };
+        let bounds = [[-0.5, 0.5], [0.5, 1.5], [0.5, 1.5], [-0.5, 0.5]]
+            .map(|[lower, upper]| ValidatedInterval { lower, upper });
+        let tube = certify(
+            &curve,
+            projection,
+            ZERO,
+            bounds,
+            &mut ValidatedGeometryBudget::new(100_000),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let jet = implicit_jet(&tube).unwrap();
+        for (axis, truth) in [0.0, 1.0, 0.0].into_iter().enumerate() {
+            assert!(jet.position[axis].lower <= truth && truth <= jet.position[axis].upper);
+            assert!(jet.position[axis].width() < 1e-10);
+            for derivative in [jet.first[axis], jet.second[axis]] {
+                assert!(derivative.contains_zero() && derivative.magnitude() < 1e-10);
+            }
+        }
+    }
+
+    #[test]
     fn implicit_scalar_projection_preserves_a_source_plane_identity() {
         let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
             Box::new(Surface::Plane(Plane::new(

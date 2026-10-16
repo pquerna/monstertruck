@@ -16,6 +16,10 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Exact endpoint coordinates certify their original carrier point through a
+  constant-plane constraint, without inventing a positive-width guide extension.
+  Endpoint refinement reuses an identical certified domain instead of repeating
+  the same inclusion solve; physical displacement and incidence gates remain.
 - Native Boolean loop construction caches admitted finite seed-face bounds and
   rejects strictly disjoint mesh pairs before interference extraction. Touching
   and unknown bounds retain unchanged Cartesian admission, native reconstruction,

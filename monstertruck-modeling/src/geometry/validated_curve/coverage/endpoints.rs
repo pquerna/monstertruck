@@ -1280,16 +1280,29 @@ pub(super) fn endpoint_covers(
             .hull(original_root[axis])
             .hull(nominal_root[axis])
             .hull(nominal_end[axis]);
-        if coordinate.lower >= coordinate.upper {
+        if coordinate.lower > coordinate.upper {
             return Ok(EndpointCoverage::Refused(
-                "endpoint / nondegenerate fixed coordinate",
+                "endpoint / ordered fixed coordinate",
                 ValidatedGeometryError::Unresolved,
             ));
         }
         let mut direction = [0.0; 3];
         direction[axis] = 1.0;
+        // A point coordinate has no physical extension. Certify its unique
+        // carrier intersection with a constant-plane family, not an invented
+        // positive-width coordinate arc or an enlarged original guide.
+        let point_coordinate = coordinate.lower == coordinate.upper;
+        let coordinate_query = if point_coordinate {
+            ValidatedInterval::point(0.0)
+        } else {
+            coordinate
+        };
         let projection = Projection::BetweenPlanes {
-            parameter: [coordinate.lower, coordinate.upper],
+            parameter: if point_coordinate {
+                [0.0, 1.0]
+            } else {
+                [coordinate.lower, coordinate.upper]
+            },
             planes: [
                 CoordinatePlane {
                     normal: direction,
@@ -1332,7 +1345,7 @@ pub(super) fn endpoint_covers(
         let mut tube = match certify(
             candidate.source.curve()?,
             projection,
-            coordinate,
+            coordinate_query,
             box4,
             budget,
             cancel,
@@ -1347,6 +1360,7 @@ pub(super) fn endpoint_covers(
             Err(error) => return Err(error),
         };
         for _ in 0..8 {
+            budget.charge(1, cancel)?;
             let next = std::array::from_fn(|i| {
                 let root = tube.rooted_domain[i];
                 let radius = (root.width() * 0.51 + 64.0 * f64::EPSILON * (1.0 + root.magnitude()))
@@ -1358,10 +1372,13 @@ pub(super) fn endpoint_covers(
                     })
                     .unwrap_or(box4[i])
             });
+            if next == tube.domain {
+                break;
+            }
             match certify(
                 candidate.source.curve()?,
                 projection,
-                coordinate,
+                coordinate_query,
                 next,
                 budget,
                 cancel,
