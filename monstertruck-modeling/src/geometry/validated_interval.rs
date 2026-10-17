@@ -18,7 +18,8 @@ pub(crate) use explicit::{
     validated_projection_leader_jet,
 };
 pub use explicit::{
-    validated_boundary_jet, validated_curve_jet, validated_curve2d_jet, validated_surface_jet,
+    validated_boundary_jet, validated_curve_jet, validated_curve2d_jet,
+    validated_curve2d_piecewise_jet, validated_surface_jet,
     validated_surface_piecewise_jet,
 };
 pub use normal::validated_surface_geometric_normal;

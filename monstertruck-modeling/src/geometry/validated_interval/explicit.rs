@@ -215,11 +215,36 @@ pub fn validated_curve2d_jet(
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<ValidatedCurveJet2D, ValidatedGeometryError> {
-    let value = curve2d_taylor(
+    curve2d_jet_with_policy(curve, range, false, budget, cancel)
+}
+
+/// Encloses a continuous piecewise-smooth original UV curve and all one-sided
+/// derivatives, including both incident closed spans at an exact native knot.
+/// Discontinuous knots, nonfinite coefficients and denominator poles refuse.
+/// This supplies neither C1 continuity nor second-derivative continuity:
+/// consumers of a normal-coordinate ribbon must independently qualify C1.
+pub fn validated_curve2d_piecewise_jet(
+    curve: &Curve2D,
+    range: [f64; 2],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<ValidatedCurveJet2D, ValidatedGeometryError> {
+    curve2d_jet_with_policy(curve, range, true, budget, cancel)
+}
+
+fn curve2d_jet_with_policy(
+    curve: &Curve2D,
+    range: [f64; 2],
+    allow_c0: bool,
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<ValidatedCurveJet2D, ValidatedGeometryError> {
+    let value = curve2d_taylor_with_policy(
         curve,
         Taylor::variable(interval_range(range)?, 0),
         0,
         false,
+        allow_c0,
         budget,
         cancel,
     )?;
@@ -2828,6 +2853,39 @@ mod retained_trim_regressions {
 mod c0_source_policy_regressions {
     use super::*;
     use crate::{BsplineSurface, Point3};
+
+    #[test]
+    fn uv_piecewise_policy_keeps_closed_knot_sides_and_refuses_jumps() {
+        use crate::{BsplineCurve, Point2};
+        let curve = Curve2D::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 1.0, 2.0, 2.0]),
+            vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(1.0, 0.0),
+                Point2::new(1.0, 2.0),
+            ],
+        ));
+        let cancel = AtomicBool::new(false);
+        let mut budget = ValidatedGeometryBudget::new(100_000);
+        assert!(matches!(
+            validated_curve2d_jet(&curve, [0.5, 1.5], &mut budget, &cancel),
+            Err(ValidatedGeometryError::NonSmooth)
+        ));
+        for range in [[0.5, 1.5], [1.0, 1.0]] {
+            let jet = validated_curve2d_piecewise_jet(&curve, range, &mut budget, &cancel).unwrap();
+            for (derivative, maximum) in jet.first.into_iter().zip([1.0, 2.0]) {
+                assert!(derivative.lower <= 0.0 && maximum <= derivative.upper);
+            }
+        }
+        let jump = Curve2D::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0]),
+            (0..4).map(|i| Point2::new(i as f64, 0.0)).collect(),
+        ));
+        assert!(matches!(
+            validated_curve2d_piecewise_jet(&jump, [1.0, 1.0], &mut budget, &cancel),
+            Err(ValidatedGeometryError::NonSmooth)
+        ));
+    }
 
     #[test]
     fn continuous_piecewise_source_policy_does_not_admit_discontinuities() {
