@@ -216,11 +216,12 @@ fn isolate_roots(
                 {
                     continue;
                 }
-                let combined = [
-                    previous.witness[0].min(witness[0]),
-                    previous.witness[1].max(witness[1]),
-                ];
-                if jet(combined, budget)?.first.contains_zero() {
+                // Each root enclosure lies inside its independently certified
+                // monotone witness. Their overlap makes the witness union
+                // connected; matching strict derivative signs prove one root
+                // on that complete cover without a looser union reevaluation.
+                // Keep the retained witness and its own derivative together.
+                if sign(previous.derivative.hull(found.derivative)).is_none() {
                     return Err(ValidatedGeometryError::AmbiguousBranch);
                 }
                 duplicate = true;
@@ -596,6 +597,11 @@ fn same_binding(
 /// and the carrier coefficient snapshot share `max_retained_bytes`, narrowed
 /// by the existing 32 MiB local cap and bounded preparation stack allowance.
 /// Call outside original face-carrier and edge-curve mutex callbacks.
+///
+/// Overlapping captures may identify one root by composing their independently
+/// proved, same-sign monotone witnesses in the same original gauge. A looser
+/// enclosure over their union does not invalidate those local certificates;
+/// each retained witness remains paired with its own derivative enclosure.
 pub fn prepared_face_plane_roots<'a>(
     domain: &'a PreparedFaceParameterDomain<'a>,
     plane: &'a Plane,

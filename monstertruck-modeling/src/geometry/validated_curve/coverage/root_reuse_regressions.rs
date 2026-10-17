@@ -1,7 +1,7 @@
 use super::*;
 use crate::*;
 use monstertruck_topology::trimmed::TrimmedFace;
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 const CHART_ERROR: f64 = 1.0e-7;
 const SHORTENING: f64 = 1.0e-6;
@@ -889,6 +889,31 @@ fn sphere_belt_plural_original_roots_select_independent_reversed_chart_gauges() 
                 source_chart_error_mm: CHART_ERROR,
             })
             .collect();
+        {
+            // The equatorial root is interior in both independent gauges,
+            // although it is an artificial binary joint of the UV interval.
+            let equator = Plane::new(
+                Point3::origin(),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            );
+            let roots = prepared_face_plane_roots(
+                &domain,
+                &equator,
+                &bindings,
+                32 * 1024 * 1024,
+                &mut budget,
+                &cancel,
+            )
+            .expect("the transverse equator retains one original meridian root");
+            for (coedge, longitude) in [(0, 0.0), (3, TAU)] {
+                let uv = roots
+                    .root_chart_for_cut(coedge, phase, &mut budget, &cancel)
+                    .unwrap();
+                assert!(uv[0].lower <= FRAC_PI_2 && FRAC_PI_2 <= uv[0].upper);
+                assert!(uv[1].lower <= longitude && longitude <= uv[1].upper);
+            }
+        }
         let plane = Plane::new(
             Point3::new(4.5, 0.0, 0.0),
             Point3::new(4.5, 1.0, 0.0),
