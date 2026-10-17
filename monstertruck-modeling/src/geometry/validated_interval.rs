@@ -15,12 +15,11 @@ mod smoothness;
 pub(crate) use explicit::{
     ProjectionLeaderKnotEvaluator, TENSOR_EVALUATOR_FIXED_BYTES, processed_parameter,
     validated_curve_piecewise_jet, validated_curve_position_bounds,
-    validated_projection_leader_jet,
+    validated_projection_leader_jet, validated_surface_position_bounds,
 };
 pub use explicit::{
     validated_boundary_jet, validated_curve_jet, validated_curve2d_jet,
-    validated_curve2d_piecewise_jet, validated_surface_jet,
-    validated_surface_piecewise_jet,
+    validated_curve2d_piecewise_jet, validated_surface_jet, validated_surface_piecewise_jet,
 };
 pub use normal::validated_surface_geometric_normal;
 pub(crate) use projection::{

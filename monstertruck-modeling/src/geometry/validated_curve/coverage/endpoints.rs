@@ -3,7 +3,7 @@ use super::*;
 use crate::ValidatedScalarCurveJet;
 use crate::geometry::validated_interval::{
     ProjectionExecution, ScalarProjection, Taylor, projected_surface_curve_jet,
-    projected_surface_taylor,
+    projected_surface_taylor, validated_surface_position_bounds,
 };
 use monstertruck_topology::EdgeId;
 use monstertruck_traits::BoundedCurve;
@@ -590,6 +590,60 @@ fn same_binding(
         && a.source_chart_error_mm == b.source_chart_error_mm
 }
 
+// This optional theorem concerns the COMPLETE original face, not the existence
+// of numerical candidates. Require every directed occurrence's original source
+// binding, and retain the unrestricted chart box: material-support clipping may
+// otherwise hide nominal pcurve roots still required by this inventory.
+fn complete_face_excluded(
+    context: &FacePlaneContext<'_, '_>,
+    boundaries: &[Option<PreparedBoundaryRoots<'_>>],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, ValidatedGeometryError> {
+    let mut source_error = 0.0_f64;
+    for boundary in boundaries {
+        budget.charge(1, cancel)?;
+        let Some(boundary) = boundary else {
+            return Ok(false);
+        };
+        source_error = source_error.max(boundary.binding.source_chart_error_mm);
+    }
+    let separated = |position: [ValidatedInterval; 3], error: f64| {
+        // The physical error ball lies in this outward coordinate cube. The
+        // plane's exact stored axes remain enclosed in the interval normal.
+        let margin = ValidatedInterval::new(-error, error)?;
+        let height = dot3(
+            context.normal,
+            subtract3(
+                position.map(|coordinate| coordinate + margin),
+                context.origin,
+            ),
+        );
+        Ok::<_, ValidatedGeometryError>(height.is_finite() && !height.contains_zero())
+    };
+    let carrier = validated_surface_position_bounds(
+        context.surface,
+        context.domain.unrestricted_parameter_box(),
+        budget,
+        cancel,
+    )?;
+    if !separated(carrier, source_error)? {
+        return Ok(false);
+    }
+    for boundary in boundaries.iter().flatten() {
+        budget.charge(1, cancel)?;
+        let binding = &boundary.binding;
+        let original = binding
+            .boundary
+            .position_bounds(binding.boundary_range, budget, cancel)?
+            .map(|coordinate| coordinate * ValidatedInterval::point(binding.boundary_scale));
+        if !separated(original, binding.source_chart_error_mm)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Prepares each selected original coedge's complete trim-root inventories once.
 ///
 /// Bindings contain no candidate endpoint or cut hint. Repeated identical
@@ -602,6 +656,13 @@ fn same_binding(
 /// proved, same-sign monotone witnesses in the same original gauge. A looser
 /// enclosure over their union does not invalidate those local certificates;
 /// each retained witness remains paired with its own derivative enclosure.
+///
+/// A strict C0 image enclosure may exclude the complete original carrier and
+/// every bound original boundary without root isolation. This requires bindings
+/// for all directed occurrences and includes chart/joint and physical source
+/// uncertainty. Touching or unavailable enclosures retain complete isolation;
+/// source/plane validation, cancellation and cumulative resource failures never
+/// become empty inventories. Exclusion does not replace downstream face coverage.
 pub fn prepared_face_plane_roots<'a>(
     domain: &'a PreparedFaceParameterDomain<'a>,
     plane: &'a Plane,
@@ -682,13 +743,36 @@ pub(super) fn prepare_roots<'a>(
             continue;
         }
         validate_binding_source(context.domain, &binding, budget, cancel)?;
+        prepared.boundaries[binding.coedge_index] = Some(PreparedBoundaryRoots {
+            binding,
+            roots: TrimRoots {
+                chart: Vec::new(),
+                original: Vec::new(),
+                retained_bytes: 0,
+            },
+        });
+    }
+    match complete_face_excluded(context, &prepared.boundaries, budget, cancel) {
+        Ok(true) => return Ok(prepared),
+        Err(
+            error @ (ValidatedGeometryError::ResourceLimit | ValidatedGeometryError::Cancelled),
+        ) => {
+            return Err(error);
+        }
+        // This is only a precheck. Unsupported arithmetic or a nonseparated
+        // enclosure has no exclusion authority; all work already spent remains
+        // charged when the existing complete root algorithm resumes.
+        Ok(false) | Err(_) => {}
+    }
+    for boundary in prepared.boundaries.iter_mut().flatten() {
+        budget.charge(1, cancel)?;
         let remaining = maximum_bytes
             .checked_sub(prepared.retained_bytes)
             .ok_or(ValidatedGeometryError::ResourceLimit)?;
         let roots = isolate_trim_roots(
             context,
-            binding.coedge_index,
-            &binding,
+            boundary.binding.coedge_index,
+            &boundary.binding,
             remaining,
             budget,
             cancel,
@@ -697,7 +781,7 @@ pub(super) fn prepare_roots<'a>(
             .retained_bytes
             .checked_add(roots.retained_bytes)
             .ok_or(ValidatedGeometryError::ResourceLimit)?;
-        prepared.boundaries[binding.coedge_index] = Some(PreparedBoundaryRoots { binding, roots });
+        boundary.roots = roots;
     }
     Ok(prepared)
 }
@@ -925,8 +1009,29 @@ fn prove_no_crossing(
             let uv = domain
                 .boundary_position_enclosure(coedge, span, budget, cancel)
                 .map_err(trim_error)?;
-            if !chart_height(surface, uv, normal, origin, budget, cancel)?.0[0][0].contains_zero() {
+            // Absence only needs a fresh C0 image enclosure of the complete
+            // source-chart uncertainty tube, not a smooth height jet. In
+            // particular, an empty inventory does not make a source crease C1.
+            let position = validated_surface_position_bounds(
+                surface,
+                uv.map(|axis| [axis.lower, axis.upper]),
+                budget,
+                cancel,
+            )?;
+            let height = dot3(normal, subtract3(position, origin));
+            if !height.is_finite() {
+                return Err(ValidatedGeometryError::ConditioningFailure);
+            }
+            if !height.contains_zero() {
                 continue;
+            }
+            // Preserve the existing coefficient-correlated exclusion for
+            // smooth sources when separate coordinate bounds are too loose.
+            // At a C0 joint only subdivision of the position proof is valid.
+            match chart_height(surface, uv, normal, origin, budget, cancel) {
+                Ok(height) if !height.0[0][0].contains_zero() => continue,
+                Ok(_) | Err(ValidatedGeometryError::NonSmooth) => {}
+                Err(error) => return Err(error),
             }
             let midpoint = span[0] * 0.5 + span[1] * 0.5;
             if depth == 48 || midpoint <= span[0] || midpoint >= span[1] {

@@ -1138,3 +1138,231 @@ fn produced_planar_cap_chart_does_not_invent_or_erase_original_plane_roots() {
         "correctly projected original roots never authorize omitted candidates"
     );
 }
+
+#[test]
+fn complete_face_exclusion_uses_c0_original_images_without_admitting_touch_or_forgery() {
+    // A genuine continuous crease defeats smooth source-chart root jets even
+    // though the complete carrier and all original boundaries are at z = 0.
+    let surface = Surface::BsplineSurface(BsplineSurface::new(
+        (
+            KnotVector::from(vec![0.0, 0.0, 1.0, 2.0, 2.0]),
+            KnotVector::from(vec![0.0, 0.0, 1.0, 1.0]),
+        ),
+        vec![
+            vec![Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)],
+            vec![Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)],
+            vec![Point3::new(2.0, 0.25, 0.0), Point3::new(2.0, 1.25, 0.0)],
+        ],
+    ));
+    let corners = [
+        Point2::new(0.0, 0.0),
+        Point2::new(2.0, 0.0),
+        Point2::new(2.0, 1.0),
+        Point2::new(0.0, 1.0),
+    ];
+    let charts = std::array::from_fn::<_, 4, _>(|index| {
+        Curve2D::Line(Line(corners[index], corners[(index + 1) % 4]))
+    });
+    let originals = charts.each_ref().map(|chart| {
+        Curve::ParameterCurve(ParameterCurve::new(
+            chart.clone(),
+            Box::new(surface.clone()),
+        ))
+    });
+    let vertices = corners.map(|uv| builder::vertex(surface.subs(uv.x, uv.y)));
+    let wire = (0..4)
+        .map(|index| {
+            Edge::new(
+                &vertices[index],
+                &vertices[(index + 1) % 4],
+                originals[index].clone(),
+            )
+        })
+        .collect::<Wire>();
+    let trimmed = TrimmedFace::new(
+        Face::new(vec![wire], surface),
+        vec![charts.into_iter().map(Some).collect()],
+    );
+    let cancel = AtomicBool::new(false);
+    let mut budget = ValidatedGeometryBudget::new(4_000_000);
+    let domain = prepare_face_parameter_domain_with_uncertainty(
+        &trimmed,
+        [0.0; 2],
+        TrimDomainLimits {
+            max_coedges: 4,
+            max_subdivisions: 65_536,
+            max_retained_bytes: 32 * 1024 * 1024,
+        },
+        &mut budget,
+        &cancel,
+    )
+    .unwrap();
+    let options = ValidatedCurveOptions::default();
+    let prepared = originals
+        .iter()
+        .map(|curve| {
+            prepared_validated_curve(curve, [0.0, 1.0], &options, &mut budget, &cancel).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let bindings = prepared
+        .iter()
+        .enumerate()
+        .map(|(index, boundary)| ValidatedPlaneTrimBoundaryBinding {
+            coedge_index: index,
+            original_edge_id: domain.coedges()[index].identity.edge_id,
+            boundary,
+            boundary_range: [0.0, 1.0],
+            boundary_scale: 1.0,
+            source_chart_error_mm: 0.0,
+        })
+        .collect::<Vec<_>>();
+    let plane_at = |z| {
+        Plane::new(
+            Point3::new(0.0, 0.0, z),
+            Point3::new(1.0, 0.0, z),
+            Point3::new(0.0, 1.0, z),
+        )
+    };
+    let outside = plane_at(2.0);
+    let roots = prepared_face_plane_roots(
+        &domain,
+        &outside,
+        &bindings,
+        32 * 1024 * 1024,
+        &mut budget,
+        &cancel,
+    )
+    .expect("a complete C0 image proof needs no smooth trim-root jet");
+    assert!(matches!(
+        roots.root_chart_for_cut(0, 0.5, &mut budget, &cancel),
+        Err(ValidatedGeometryError::PlaneCoverageUnresolved { .. }),
+    ));
+    let coverage = validated_face_plane_coverage(
+        &domain,
+        &ValidatedPlaneCoverageQuery {
+            plane: &outside,
+            candidates: &[],
+            endpoint_bindings: &[],
+            prepared_roots: Some(&roots),
+        },
+        &ValidatedPlaneCoverageOptions::default(),
+        &mut budget,
+        &cancel,
+    )
+    .expect("empty inventories remain usable by independent whole-face coverage");
+    assert!(coverage.endpoint_strata.is_empty());
+    assert_eq!(coverage.covered_cells, 0);
+    let touching = Plane::new(
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 1.0, 0.0),
+        Point3::new(2.0, 0.0, 1.0),
+    );
+    assert!(
+        prepared_face_plane_roots(
+            &domain,
+            &touching,
+            &bindings,
+            32 * 1024 * 1024,
+            &mut budget,
+            &cancel,
+        )
+        .is_err(),
+        "closed contact must resume complete isolation, not manufacture empty roots",
+    );
+    let mut uncertain = bindings.clone();
+    uncertain[0].source_chart_error_mm = 2.0;
+    assert!(
+        prepared_face_plane_roots(
+            &domain,
+            &outside,
+            &uncertain,
+            32 * 1024 * 1024,
+            &mut budget,
+            &cancel,
+        )
+        .is_err(),
+        "a captured source-error tube touching the plane has no quick-path authority",
+    );
+    assert!(
+        prepared_face_plane_roots(
+            &domain,
+            &outside,
+            &bindings[..1],
+            32 * 1024 * 1024,
+            &mut budget,
+            &cancel,
+        )
+        .is_err(),
+        "an incomplete source inventory cannot use complete-face exclusion",
+    );
+    let forged = originals[0].transformed(Matrix4::from_translation(Vector3::unit_z()));
+    let forged =
+        prepared_validated_curve(&forged, [0.0, 1.0], &options, &mut budget, &cancel).unwrap();
+    for change in 0..7 {
+        let mut invalid = bindings.clone();
+        match change {
+            0 => invalid[0].boundary = &forged,
+            1 => invalid[0].boundary_range = [0.25, 0.75],
+            2 => invalid[0].boundary_scale = 2.0,
+            3 => invalid[0].original_edge_id = bindings[1].original_edge_id,
+            4 => invalid[0].coedge_index = 1,
+            5 => invalid[0].coedge_index = usize::MAX,
+            _ => invalid[0].source_chart_error_mm = -1.0,
+        }
+        assert!(matches!(
+            prepared_face_plane_roots(
+                &domain,
+                &outside,
+                &invalid,
+                32 * 1024 * 1024,
+                &mut budget,
+                &cancel,
+            ),
+            Err(ValidatedGeometryError::InvalidInput),
+        ));
+    }
+    let contact = originals[0].transformed(Matrix4::from_translation(2.0 * Vector3::unit_z()));
+    let contact_prepared =
+        prepared_validated_curve(&contact, [0.0, 1.0], &options, &mut budget, &cancel).unwrap();
+    let edge = &domain.face().absolute_boundaries()[0][0];
+    edge.set_curve(contact.clone());
+    let mut contact_bindings = bindings.clone();
+    contact_bindings[0].boundary = &contact_prepared;
+    assert!(
+        prepared_face_plane_roots(
+            &domain,
+            &outside,
+            &contact_bindings,
+            32 * 1024 * 1024,
+            &mut budget,
+            &cancel,
+        )
+        .is_err(),
+        "the carrier alone cannot exclude a bound original-3D boundary contact",
+    );
+    edge.set_curve(originals[0].clone());
+    for (mut work, flag, expected) in [
+        (
+            ValidatedGeometryBudget::new(0),
+            &cancel,
+            ValidatedGeometryError::ResourceLimit,
+        ),
+        (
+            ValidatedGeometryBudget::new(1_000_000),
+            &AtomicBool::new(true),
+            ValidatedGeometryError::Cancelled,
+        ),
+    ] {
+        assert!(matches!(
+            prepared_face_plane_roots(
+                &domain,
+                &outside,
+                &bindings,
+                32 * 1024 * 1024,
+                &mut work,
+                flag,
+            ),
+            Err(error) if error == expected,
+        ));
+    }
+}

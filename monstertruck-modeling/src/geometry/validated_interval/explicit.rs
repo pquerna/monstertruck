@@ -334,6 +334,26 @@ pub fn validated_surface_piecewise_jet(
     surface_jet_with_policy(surface, range, true, budget, cancel)
 }
 
+/// Zeroth-order original carrier image across continuous C0 source knots.
+/// Constant Taylor inputs avoid derivative overflow in position-only proofs.
+pub(crate) fn validated_surface_position_bounds(
+    surface: &Surface,
+    range: [[f64; 2]; 2],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<[ValidatedInterval; 3], ValidatedGeometryError> {
+    let value = surface_taylor_with_policy(
+        surface,
+        Taylor::interval(interval_range(range[0])?),
+        Taylor::interval(interval_range(range[1])?),
+        0,
+        true,
+        budget,
+        cancel,
+    )?;
+    Ok(value.map(|v| v.0[0][0]))
+}
+
 fn surface_jet_with_policy(
     surface: &Surface,
     range: [[f64; 2]; 2],

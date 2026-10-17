@@ -163,6 +163,7 @@ pub struct PreparedFaceParameterDomain<'a> {
     joints: Vec<PreparedTrimJoint>,
     spans: Vec<TrimSpan>,
     bounds: [[f64; 2]; 2],
+    unrestricted_bounds: [[f64; 2]; 2],
     uncertainty_uv: [f64; 2],
     limits: TrimDomainLimits,
 }
@@ -751,6 +752,7 @@ pub fn prepare_face_parameter_domain_with_natural_boundaries<'a, T: NativeTrimCu
         joints,
         spans,
         bounds: bounds.map(|interval| [interval.lower, interval.upper]),
+        unrestricted_bounds: bounds.map(|interval| [interval.lower, interval.upper]),
         limits,
         uncertainty_uv: margin_uv,
     })
@@ -810,6 +812,13 @@ impl<'a> PreparedFaceParameterDomain<'a> {
 
     /// Returns a finite closed box covering every bounded material chart region.
     pub const fn closed_parameter_box(&self) -> [[f64; 2]; 2] { self.bounds }
+
+    /// Covers the complete stored chart, joints and source-map uncertainty before
+    /// independently certified material-support restrictions. Original nominal
+    /// trim-root inventories must not discard chart arcs outside a restricted box.
+    pub(crate) const fn unrestricted_parameter_box(&self) -> [[f64; 2]; 2] {
+        self.unrestricted_bounds
+    }
 
     /// Returns the certified source-map positional UV error retained by this domain.
     pub const fn uncertainty_uv(&self) -> [f64; 2] { self.uncertainty_uv }
