@@ -84,6 +84,16 @@ native cut ancestors. Exact original occurrence binding wins; a generated report
 requires its explicit matching receipt. Unmarked missing and ambiguous original
 genealogy must still refuse.
 
+Analytic circular overlap retains the literal original circle frame, raw angle
+domain and sense through adapters; a borrowed view is not itself a containment
+certificate. Prove the complete original curved carrier, arc and opposing trim.
+Complete an untouched Unknown incident face only through its unchanged original
+boundary, an actual shared native edge already in the opposing current boundary,
+identical polygon replay and fresh material-side proof. Do not classify across a
+section edge by component propagation or create source receipts for generated uses.
+Release native curve/surface guards before traversing other geometry; callbacks
+can otherwise re-enter the same nonreentrant geometry mutex.
+
 This fork uses the public project-specific rules below. The private `.blueprints`
 agent-guidance submodule is not required to clone or build the public source.
 

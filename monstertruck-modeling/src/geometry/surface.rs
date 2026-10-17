@@ -637,6 +637,13 @@ impl TryIntoAnalyticSurfaceKind for Surface {
             _ => None,
         }
     }
+
+    fn original_torus(&self) -> Option<(&Torus, Option<&Matrix4>)> {
+        match self {
+            Self::ToroidalSurface(torus) => torus.original_torus(),
+            _ => None,
+        }
+    }
 }
 
 impl ToSameGeometry<Surface> for HomotopySurface<Curve, Curve> {

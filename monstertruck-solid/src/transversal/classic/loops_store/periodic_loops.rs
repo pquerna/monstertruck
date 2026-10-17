@@ -478,9 +478,9 @@ impl From<ShapeOpsError> for AttachmentFailure {
 
 type NativeIntersection<S> = (PolylineCurve, IntersectionCurve<PolylineCurve, S, S>);
 
-fn same_path<C>(
+fn same_path<'a, C: 'a>(
     wire: &Wire<Point3, C>,
-    path: &Wire<Point3, C>,
+    mut path: impl ExactSizeIterator<Item = &'a Edge<Point3, C>> + DoubleEndedIterator,
     start: usize,
     reverse: bool,
     work: Option<&BooleanWork<'_>>,
@@ -490,11 +490,12 @@ fn same_path<C>(
             work.check()?;
         }
         let actual = &wire[(start + offset) % wire.len()];
-        let expected = &path[if reverse {
-            path.len() - 1 - offset
+        let expected = if reverse {
+            path.next_back()
         } else {
-            offset
-        }];
+            path.next()
+        }
+        .ok_or("intersection_chart_empty_path")?;
         let (front, back, orientation) = if reverse {
             (expected.back(), expected.front(), !expected.orientation())
         } else {
@@ -522,7 +523,45 @@ fn bind_existing_path<C>(
     status: ShapesOpStatus,
     work: Option<&BooleanWork<'_>>,
 ) -> std::result::Result<bool, AttachmentFailure> {
-    if native.len() != polygon.len() || path.is_empty() || path.len() != polygon_path.len() {
+    bind_existing_iter(
+        native,
+        polygon,
+        path.iter(),
+        polygon_path.iter(),
+        status,
+        work,
+    )
+}
+
+pub(super) fn bind_existing_edge<C>(
+    native: &mut Loops<Point3, C>,
+    polygon: &mut Loops<Point3, PolylineCurve>,
+    edge: &Edge<Point3, C>,
+    polygon_edge: &Edge<Point3, PolylineCurve>,
+    status: ShapesOpStatus,
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<bool, AttachmentFailure> {
+    bind_existing_iter(
+        native,
+        polygon,
+        std::iter::once(edge),
+        std::iter::once(polygon_edge),
+        status,
+        work,
+    )
+}
+
+fn bind_existing_iter<'a, C: 'a>(
+    native: &mut Loops<Point3, C>,
+    polygon: &mut Loops<Point3, PolylineCurve>,
+    path: impl ExactSizeIterator<Item = &'a Edge<Point3, C>> + DoubleEndedIterator + Clone,
+    polygon_path: impl ExactSizeIterator<Item = &'a Edge<Point3, PolylineCurve>>
+    + DoubleEndedIterator
+    + Clone,
+    status: ShapesOpStatus,
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<bool, AttachmentFailure> {
+    if native.len() != polygon.len() || path.len() == 0 || path.len() != polygon_path.len() {
         return Err("intersection_original_overlap_polygon_occurrence".into());
     }
     let mut total = [0; 2];
@@ -536,8 +575,8 @@ fn bind_existing_path<C>(
         let mut count = [0; 2];
         for start in 0..wire.len() {
             for (direction, reverse) in [false, true].into_iter().enumerate() {
-                let matches = same_path(wire, path, start, reverse, work)?;
-                if matches != same_path(polygon_wire, polygon_path, start, reverse, work)? {
+                let matches = same_path(wire, path.clone(), start, reverse, work)?;
+                if matches != same_path(polygon_wire, polygon_path.clone(), start, reverse, work)? {
                     return Err("intersection_original_overlap_polygon_occurrence".into());
                 }
                 if matches {

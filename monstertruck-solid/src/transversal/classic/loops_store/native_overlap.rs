@@ -18,6 +18,7 @@ mod sphere_boundary;
 pub(super) use chart_boundary::original_loop;
 pub(super) use endpoint_root::canonical_plane_endpoint;
 pub(super) use owned_endpoint::{OwnedEndpointBinding, early_owned_endpoints};
+pub(super) use sphere_boundary::proves_original_branch;
 
 fn exact_add(a: f64, b: f64) -> Option<f64> {
     if !a.is_finite() || !b.is_finite() {

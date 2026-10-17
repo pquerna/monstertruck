@@ -2,10 +2,10 @@ use super::*;
 use derive_more::From;
 use monstertruck_core::{ContentHasher, DeterministicContentHash};
 use monstertruck_geometry::prelude::{
-    AnalyticSurfaceKind, BoundaryCurve2D, HomogeneousSurfaceConversion, OriginalCurveCoefficients,
-    OriginalSurfaceCoefficients, SupportsExactPatchDomains, SurfaceParameterRectangle,
-    TryIntoAnalyticSurfaceKind, TryIntoBsplineSurface, TryIntoHomogeneousBsplineCurve,
-    TryIntoHomogeneousBsplineSurface,
+    AnalyticSurfaceKind, BoundaryCurve2D, HomogeneousSurfaceConversion, OriginalAffineCircle,
+    OriginalCurveCoefficients, OriginalSurfaceCoefficients, SupportsExactPatchDomains,
+    SurfaceParameterRectangle, TryIntoAnalyticSurfaceKind, TryIntoBsplineSurface,
+    TryIntoHomogeneousBsplineCurve, TryIntoHomogeneousBsplineSurface,
 };
 #[doc(hidden)]
 pub use monstertruck_geometry::prelude::{algo, inv_or_zero};
@@ -75,7 +75,7 @@ pub use validated_interval::{
     ValidatedSurfaceFunctional, ValidatedSurfaceFunctionalJet, ValidatedSurfaceJet,
     validated_boundary_jet, validated_curve_jet, validated_curve_projected_jet,
     validated_curve2d_jet, validated_curve2d_piecewise_jet, validated_sin_cos,
-    validated_surface_functional_jets,
-    validated_surface_geometric_normal, validated_surface_jet, validated_surface_piecewise_jet,
+    validated_surface_functional_jets, validated_surface_geometric_normal, validated_surface_jet,
+    validated_surface_piecewise_jet,
 };
 pub use validated_phase::{validated_asin, validated_atan2};

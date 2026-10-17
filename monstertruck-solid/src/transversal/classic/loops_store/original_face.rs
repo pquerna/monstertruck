@@ -94,6 +94,76 @@ fn source_control(source: OriginalCurveCoefficients<'_>, index: usize) -> Option
     }
 }
 
+fn original_halfspace<C>(
+    edge: &Edge<Point3, C>,
+    boundary: &Wire<Point3, C>,
+    plane: &OriginalPlane,
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<Option<(Vector3, Vector3, bool)>, AttachmentFailure>
+where
+    C: ParametricCurve3D + BoundedCurve + TryIntoHomogeneousBsplineCurve,
+{
+    if let Some(work) = work {
+        work.check()?;
+    }
+    // Borrow a boundary's curve only for its own literal coefficient proof.
+    // The lock is released before any other boundary occurrence is visited.
+    let affine = edge.with_curve(|curve| {
+        let (controls, domain) = segment_coefficients(curve.original_curve_coefficients()?)?;
+        (curve.parameter_range() == domain
+            && coefficient_endpoint(controls[0], edge.absolute_front().point())?
+            && coefficient_endpoint(controls[1], edge.absolute_back().point())?
+            && plane_value(plane, controls[0]) == Some(0.0)
+            && plane_value(plane, controls[1]) == Some(0.0))
+        .then_some(())
+    });
+    if affine.is_none() {
+        return Ok(None);
+    }
+    let origin = edge.front().point().to_vec();
+    let Some(direction) = difference(edge.back().point().to_vec(), origin) else {
+        return Ok(None);
+    };
+    let Some(normal) = cross(plane.normal, direction) else {
+        return Ok(None);
+    };
+    if normal == Vector3::zero() {
+        return Ok(None);
+    }
+    let mut positive = None;
+    for vertex in boundary.iter().map(Edge::front) {
+        if let Some(work) = work {
+            work.check()?;
+        }
+        if vertex == edge.front() || vertex == edge.back() {
+            continue;
+        }
+        let point = vertex.point();
+        let side = sum((0..3).map(|axis| {
+            Enclosure::point(point[axis])
+                .sub(Enclosure::point(origin[axis]))
+                .mul(Enclosure::point(normal[axis]))
+        }));
+        if !side.finite() {
+            return Ok(None);
+        }
+        let sign = if side.lo > 0.0 {
+            true
+        } else if side.hi < 0.0 {
+            false
+        } else if projected_difference(normal, point.to_vec(), origin) == Some(0.0) {
+            continue;
+        } else {
+            return Ok(None);
+        };
+        if positive.is_some_and(|previous| previous != sign) {
+            return Ok(None);
+        }
+        positive = Some(sign);
+    }
+    Ok(positive.map(|positive| (origin, normal, positive)))
+}
+
 pub(super) fn contains_curve<C>(
     source: OriginalCurveCoefficients<'_>,
     boundaries: &[Wire<Point3, C>],
@@ -137,63 +207,8 @@ where
         weight_sign = Some(control.w.is_sign_positive());
     }
     for edge in boundary {
-        if let Some(work) = work {
-            work.check()?;
-        }
-        let affine = edge.with_curve(|curve| {
-            let (controls, domain) = segment_coefficients(curve.original_curve_coefficients()?)?;
-            (curve.parameter_range() == domain
-                && coefficient_endpoint(controls[0], edge.absolute_front().point())?
-                && coefficient_endpoint(controls[1], edge.absolute_back().point())?
-                && plane_value(plane, controls[0]) == Some(0.0)
-                && plane_value(plane, controls[1]) == Some(0.0))
-            .then_some(())
-        });
-        if affine.is_none() {
-            return Ok(false);
-        }
-        let origin = edge.front().point().to_vec();
-        let Some(direction) = difference(edge.back().point().to_vec(), origin) else {
-            return Ok(false);
-        };
-        let Some(normal) = cross(plane.normal, direction) else {
-            return Ok(false);
-        };
-        if normal == Vector3::zero() {
-            return Ok(false);
-        }
-        let mut positive = None;
-        for vertex in boundary.iter().map(Edge::front) {
-            if let Some(work) = work {
-                work.check()?;
-            }
-            if vertex == edge.front() || vertex == edge.back() {
-                continue;
-            }
-            let point = vertex.point();
-            let side = sum((0..3).map(|axis| {
-                Enclosure::point(point[axis])
-                    .sub(Enclosure::point(origin[axis]))
-                    .mul(Enclosure::point(normal[axis]))
-            }));
-            if !side.finite() {
-                return Ok(false);
-            }
-            let sign = if side.lo > 0.0 {
-                true
-            } else if side.hi < 0.0 {
-                false
-            } else if projected_difference(normal, point.to_vec(), origin) == Some(0.0) {
-                continue;
-            } else {
-                return Ok(false);
-            };
-            if positive.is_some_and(|previous| previous != sign) {
-                return Ok(false);
-            }
-            positive = Some(sign);
-        }
-        let Some(positive) = positive else {
+        let Some((origin, normal, positive)) = original_halfspace(edge, boundary, plane, work)?
+        else {
             return Ok(false);
         };
         for index in 0..count {
@@ -239,6 +254,60 @@ where
     }
     // Positive rational weights put the entire curve in its control hull.
     // Every hull point satisfies every proved original convex trim halfspace.
+    Ok(true)
+}
+
+pub(super) fn contains_affine_circle<C>(
+    (frame, circle): OriginalAffineCircle<'_>,
+    boundaries: &[Wire<Point3, C>],
+    plane: &OriginalPlane,
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<bool, AttachmentFailure>
+where
+    C: ParametricCurve3D + BoundedCurve + TryIntoHomogeneousBsplineCurve,
+{
+    let [boundary] = boundaries else {
+        return Ok(false);
+    };
+    let Some(axes) = frame.stored_axes() else {
+        return Ok(false);
+    };
+    if boundary.len() < 3
+        || !boundary.is_closed()
+        || !boundary.is_simple()
+        || *circle.transform() != Matrix3::identity()
+    {
+        return Ok(false);
+    }
+    for edge in boundary {
+        let Some((origin, normal, positive)) = original_halfspace(edge, boundary, plane, work)?
+        else {
+            return Ok(false);
+        };
+        let center = sum((0..3).map(|axis| {
+            Enclosure::point(frame.origin()[axis])
+                .sub(Enclosure::point(origin[axis]))
+                .mul(Enclosure::point(normal[axis]))
+        }));
+        let extent = sum(axes.into_iter().map(|vector| {
+            Enclosure::point(
+                sum((0..3).map(|axis| {
+                    Enclosure::point(vector[axis]).mul(Enclosure::point(normal[axis]))
+                }))
+                .magnitude(),
+            )
+        }));
+        // |cos|, |sin| <= 1 bounds the complete original affine circle,
+        // independently of its bounded angle interval and orientation.
+        let support = if positive {
+            center.sub(extent)
+        } else {
+            center.add(extent)
+        };
+        if !support.finite() || (positive && support.lo < 0.0) || (!positive && support.hi > 0.0) {
+            return Ok(false);
+        }
+    }
     Ok(true)
 }
 

@@ -78,6 +78,13 @@ pub trait TryIntoAnalyticSurfaceKind {
     /// refuse. Parameter inversion does not change the carrier's point set;
     /// callers still use the actual surface for oriented normals and domains.
     fn original_sphere(&self) -> Option<(&Sphere, Option<&Matrix4>)> { None }
+
+    /// Borrows a literal original [`Torus`] and its stored affine pose, if any.
+    ///
+    /// This grants source access, not a fitted-circle or containment certificate.
+    /// Parameter inversion retains the carrier; composed nontrivial nested
+    /// poses refuse rather than replacing the original transform.
+    fn original_torus(&self) -> Option<(&Torus, Option<&Matrix4>)> { None }
 }
 
 impl TryIntoAnalyticSurfaceKind for Plane {
@@ -321,6 +328,8 @@ impl TryIntoAnalyticSurfaceKind for Sphere {
 impl TryIntoAnalyticSurfaceKind for Torus {
     #[inline]
     fn try_into_analytic_surface_kind(&self) -> Option<AnalyticSurfaceKind> { None }
+
+    fn original_torus(&self) -> Option<(&Torus, Option<&Matrix4>)> { Some((self, None)) }
 }
 
 impl<C> TryIntoAnalyticSurfaceKind for RevolutionSurface<C>
@@ -352,6 +361,17 @@ where C: TryIntoAnalyticSurfaceKind
             Some((sphere, pose))
         } else if pose.is_none() {
             Some((sphere, Some(self.transform())))
+        } else {
+            None
+        }
+    }
+
+    fn original_torus(&self) -> Option<(&Torus, Option<&Matrix4>)> {
+        let (torus, pose) = self.entity().original_torus()?;
+        if *self.transform() == Matrix4::identity() {
+            Some((torus, pose))
+        } else if pose.is_none() {
+            Some((torus, Some(self.transform())))
         } else {
             None
         }

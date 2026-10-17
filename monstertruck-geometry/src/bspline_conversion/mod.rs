@@ -76,6 +76,15 @@ pub enum OriginalCurveCoefficients<'a> {
     Rational(&'a NurbsCurve<Vector4>),
 }
 
+/// Borrowed original affine-plane circle, retaining its raw angle, pose and sense.
+///
+/// The plane stores the actual world origin and axes independently of the
+/// original two-dimensional circle. This is source data, not a circle proof.
+pub type OriginalAffineCircle<'a> = (
+    &'a Plane,
+    &'a Processor<TrimmedCurve<UnitCircle<Point2>>, Matrix3>,
+);
+
 /// Attempts to produce an exact homogeneous B-spline curve representation.
 ///
 /// The returned control net is in homogeneous coordinates, so true rational
@@ -91,6 +100,12 @@ pub trait TryIntoHomogeneousBsplineCurve {
     /// The borrowed object must retain this value's own original coefficients
     /// and active native parameter domain. A view is not a geometric certificate.
     fn original_curve_coefficients(&self) -> Option<OriginalCurveCoefficients<'_>> { None }
+
+    /// Borrows an original analytic circle on its actual affine plane.
+    ///
+    /// Converted rational nets, sampled pcurves and recomposed wrappers refuse.
+    /// Consumers must prove the whole frame, native interval and source carrier.
+    fn original_affine_circle(&self) -> Option<OriginalAffineCircle<'_>> { None }
 
     /// Converts this curve into a homogeneous B-spline curve spanning the given
     /// parameter interval, which may lie wholly OUTSIDE the curve's own bounded

@@ -23,6 +23,7 @@ use std::mem::size_of;
 mod native_component;
 mod native_interval;
 mod native_overlap;
+mod owned_incidence;
 mod periodic_loops;
 mod seed_bounds;
 
@@ -1560,6 +1561,12 @@ where
         return Err(error);
     }
     result?;
+    owned_incidence::complete(
+        [geom_shell0, geom_shell1],
+        [&mut geom_loops_store0, &mut geom_loops_store1],
+        [&mut poly_loops_store0, &mut poly_loops_store1],
+        work,
+    )?;
     Ok(LoopsStoreQuadruple {
         geom_loops_store0,
         poly_loops_store0,

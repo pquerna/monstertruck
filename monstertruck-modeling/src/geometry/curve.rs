@@ -462,6 +462,19 @@ impl TryIntoHomogeneousBsplineCurve for Curve {
         }
     }
 
+    fn original_affine_circle(&self) -> Option<OriginalAffineCircle<'_>> {
+        let Self::ParameterCurve(curve) = self else {
+            return None;
+        };
+        let Curve2D::Conic(Conic2D::Ellipse(circle)) = curve.curve() else {
+            return None;
+        };
+        let Surface::Plane(plane) = curve.surface().as_ref() else {
+            return None;
+        };
+        Some((plane, circle))
+    }
+
     fn try_into_homogeneous_bspline_curve_over(
         &self,
         range: (f64, f64),

@@ -98,6 +98,18 @@ fn curve3d_only_curve(curve: &Curve) -> Curve {
                 None,
             ))
         }
+        Curve::TrimmedCurve(processed) => {
+            let trimmed = processed.entity();
+            let mut result = Processor::new(TrimmedCurve::new(
+                Box::new(curve3d_only_curve(trimmed.curve())),
+                trimmed.range(),
+            ));
+            result.transform_by(*processed.transform());
+            if !processed.orientation() {
+                result.invert();
+            }
+            Curve::TrimmedCurve(result)
+        }
     }
 }
 

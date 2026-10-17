@@ -1,9 +1,9 @@
 use monstertruck_geometry::prelude::{
-    AnalyticSurfaceKind, BsplineCurve, BsplineSurface, HomogeneousSurfaceConversion,
-    OriginalCurveCoefficients, OriginalSurfaceCoefficients, ParametricSurface3D, Plane, Point2,
-    SearchNearestParameter, SearchParameter, SupportsExactPatchDomains, SurfaceParameterRectangle,
-    TryIntoAnalyticSurfaceKind, TryIntoBsplineSurface, TryIntoHomogeneousBsplineCurve,
-    TryIntoHomogeneousBsplineSurface,
+    AnalyticSurfaceKind, BsplineCurve, BsplineSurface, HomogeneousSurfaceConversion, Matrix4,
+    OriginalAffineCircle, OriginalCurveCoefficients, OriginalSurfaceCoefficients,
+    ParametricSurface3D, Plane, Point2, SearchNearestParameter, SearchParameter, Sphere,
+    SupportsExactPatchDomains, SurfaceParameterRectangle, Torus, TryIntoAnalyticSurfaceKind,
+    TryIntoBsplineSurface, TryIntoHomogeneousBsplineCurve, TryIntoHomogeneousBsplineSurface,
 };
 use monstertruck_meshing::prelude::*;
 
@@ -247,6 +247,20 @@ where
             Self::SecondType(entity) => entity.original_plane(),
         }
     }
+
+    fn original_sphere(&self) -> Option<(&Sphere, Option<&Matrix4>)> {
+        match self {
+            Self::FirstType(entity) => entity.original_sphere(),
+            Self::SecondType(entity) => entity.original_sphere(),
+        }
+    }
+
+    fn original_torus(&self) -> Option<(&Torus, Option<&Matrix4>)> {
+        match self {
+            Self::FirstType(entity) => entity.original_torus(),
+            Self::SecondType(entity) => entity.original_torus(),
+        }
+    }
 }
 
 impl<T, U> TryIntoHomogeneousBsplineCurve for Alternative<T, U>
@@ -265,6 +279,13 @@ where
         match self {
             Self::FirstType(entity) => entity.original_curve_coefficients(),
             Self::SecondType(entity) => entity.original_curve_coefficients(),
+        }
+    }
+
+    fn original_affine_circle(&self) -> Option<OriginalAffineCircle<'_>> {
+        match self {
+            Self::FirstType(entity) => entity.original_affine_circle(),
+            Self::SecondType(entity) => entity.original_affine_circle(),
         }
     }
 }

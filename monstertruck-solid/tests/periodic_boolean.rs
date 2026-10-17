@@ -1,5 +1,6 @@
 //! Native periodic chart regressions, constructed without STEP or an exporter.
 
+use monstertruck_geometry::prelude::TryIntoHomogeneousBsplineCurve;
 use monstertruck_meshing::prelude::*;
 use monstertruck_modeling::*;
 use monstertruck_solid::{
@@ -1139,4 +1140,183 @@ fn original_sphere_equatorial_section_reuses_native_arcs_and_shared_endpoint_ide
         });
     }
     assert_eq!(source_snapshot(&source), before);
+}
+
+fn torus_with_original_analytic_circle_edges(reversed: bool) -> Solid {
+    use monstertruck_io::step::load::step_geometry::{Curve3D, Surface as StepSurface};
+
+    let direction = if reversed { -1.0 } else { 1.0 };
+    let profile: monstertruck_topology::Wire<Point3, Curve3D> = builder::revolve(
+        &builder::vertex(Point3::new(4.0, 0.0, 0.0)),
+        Point3::new(3.0, 0.0, 0.0),
+        direction * Vector3::unit_y(),
+        builder::SweepAngle::Closed,
+        4,
+    );
+    let patches: monstertruck_topology::Shell<Point3, Curve3D, StepSurface> = builder::revolve(
+        &profile,
+        Point3::origin(),
+        direction * Vector3::unit_z(),
+        builder::SweepAngle::Closed,
+        4,
+    );
+    let shell = patches.mapped(
+        |point| *point,
+        |curve| curve.to_parameter_preserving_modeling().unwrap(),
+        |original| {
+            let mut carrier =
+                Surface::ToroidalSurface(Processor::new(Torus::new(Point3::origin(), 3.0, 1.0)));
+            let point = original.evaluate(0.31, 0.43);
+            let uv = carrier.search_parameter(point, None, 100).unwrap();
+            if original.normal(0.31, 0.43).dot(carrier.normal(uv.0, uv.1)) < 0.0 {
+                carrier.invert();
+            }
+            carrier
+        },
+    );
+    Solid::try_new(vec![shell]).expect("closed original analytic-circle ring torus")
+}
+
+#[test]
+fn original_and_reversed_analytic_torus_equators_reuse_source_arcs_and_complete_incidence() {
+    for reversed in [false, true] {
+        let source = torus_with_original_analytic_circle_edges(reversed);
+        let before = source_snapshot(&source);
+        let upper_faces = source.boundaries()[0]
+            .iter()
+            .filter(|face| {
+                face.edge_iter().all(|edge| {
+                    edge.front().point().z >= -TOLERANCE && edge.back().point().z >= -TOLERANCE
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(upper_faces.len(), 8);
+        let mut upper_edges = Vec::new();
+        let mut equator = Vec::new();
+        for face in &upper_faces {
+            for edge in face.edge_iter() {
+                assert!(
+                    edge.with_curve(|curve| curve.original_affine_circle().is_some()),
+                    "the actual analytic source gauge must not become a rational fit"
+                );
+                if !upper_edges.contains(&edge.id()) {
+                    upper_edges.push(edge.id());
+                }
+                if edge.front().point().z.abs() < TOLERANCE
+                    && edge.back().point().z.abs() < TOLERANCE
+                    && !equator.contains(&edge.id())
+                {
+                    equator.push(edge.id());
+                }
+            }
+        }
+        assert_eq!((upper_edges.len(), equator.len()), (20, 8));
+        let cancel = AtomicBool::new(false);
+        let budget = BooleanWorkBudget::new(100_000_000);
+        let prepared = prepare_boolean_source_counted_with_options(
+            &source,
+            BooleanPreparationOptions {
+                geometric_tolerance: 1.0e-5,
+                seed_tolerance: 0.005,
+            },
+            closed_material_limits(),
+            &cancel,
+            &budget,
+        )
+        .expect("prepare original torus without curve or surface replacements");
+        let clip = primitive::cuboid(BoundingBox::from_iter([
+            Point3::new(-5.0, -5.0, 0.0),
+            Point3::new(5.0, 5.0, 2.0),
+        ]));
+        let result = and_prepared_with_provenance(&prepared, &clip, &cancel)
+            .expect("the equator is already an original boundary, not an interior-corner cut");
+        assert_eq!(result.solid.boundaries().len(), 1);
+        let shell = &result.solid.boundaries()[0];
+        shell
+            .check_solid_boundary()
+            .expect("closed retained upper toroidal material");
+        assert!(
+            result.solid.is_geometric_consistent(),
+            "{}",
+            consistency_witness(&result.solid)
+        );
+        assert_eq!(shell.len(), upper_faces.len() + 1);
+        for original in &upper_faces {
+            let retained = shell
+                .iter()
+                .find(|face| face.id() == original.id())
+                .unwrap();
+            assert_eq!(retained.orientation(), original.orientation());
+            assert!(matches!(retained.surface(), Surface::ToroidalSurface(_)));
+        }
+        let caps = shell
+            .iter()
+            .filter(|face| matches!(face.surface(), Surface::Plane(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(caps.len(), 1);
+        let cap = caps[0];
+        assert_eq!(
+            cap.absolute_boundaries().len(),
+            2,
+            "retain the toroidal void"
+        );
+        assert!(cap.oriented_surface().normal(0.0, 0.0).z < -0.999);
+        let mut radii = Vec::new();
+        for wire in cap.absolute_boundaries() {
+            assert!(wire.is_closed() && wire.is_simple());
+            assert_eq!(wire.len(), 4);
+            let point = wire.front_vertex().unwrap().point();
+            radii.push(point.x.hypot(point.y));
+            for edge in wire {
+                assert!(equator.contains(&edge.id()));
+            }
+        }
+        radii.sort_by(f64::total_cmp);
+        assert!((radii[0] - 2.0).abs() < TOLERANCE);
+        assert!((radii[1] - 4.0).abs() < TOLERANCE);
+        let mut original_equators = 0;
+        let mut generated_equators = 0;
+        let mut other_original_uses = 0;
+        for coedge in &result.coedge_origins {
+            assert!(upper_edges.contains(&coedge.output_edge));
+            if coedge.output_face == cap.id() {
+                assert!(equator.contains(&coedge.output_edge));
+                assert!(
+                    matches!(&coedge.source, BooleanCoedgeOrigin::GeneratedIntersection { face }
+                    if face.operand == BooleanOperand::Other)
+                );
+                generated_equators += 1;
+            } else {
+                assert!(
+                    matches!(&coedge.source, BooleanCoedgeOrigin::Original { face, edge_id, .. }
+                    if face.operand == BooleanOperand::Source && *edge_id == coedge.output_edge)
+                );
+                if equator.contains(&coedge.output_edge) {
+                    original_equators += 1;
+                } else {
+                    other_original_uses += 1;
+                }
+            }
+        }
+        assert_eq!(
+            (original_equators, generated_equators, other_original_uses),
+            (8, 8, 24)
+        );
+        for identity in &upper_edges {
+            assert!(shell.edge_iter().any(|edge| edge.id() == *identity));
+        }
+        for edge in shell.edge_iter() {
+            assert!(upper_edges.contains(&edge.id()));
+            edge.with_curve(|curve| {
+                let (front, back) = curve.range_tuple();
+                for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                    let point = curve.evaluate(front + fraction * (back - front));
+                    assert!(point.z >= -TOLERANCE);
+                    let meridian = (point.x.hypot(point.y) - 3.0).powi(2) + point.z * point.z;
+                    assert!((meridian - 1.0).abs() < TOLERANCE);
+                }
+            });
+        }
+        assert_eq!(source_snapshot(&source), before);
+    }
 }

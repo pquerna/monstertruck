@@ -1,6 +1,7 @@
-//! Whole original rational arc admission on a literal, independently posed sphere.
-//! Directed rounding bounds the complete homogeneous Bernstein identity in world
-//! distance. The original coefficients, native domain and owned edge stay intact.
+//! Whole original rational arc admission on literal, independently posed carriers.
+//! Directed rounding bounds complete homogeneous Bernstein identities in world
+//! distance. Spheres and the two regular ring-torus equators retain their actual
+//! source coefficients, native domains and owned edge identities.
 
 use super::chart_boundary::{clamped, curve_control, curve_data, plane_value};
 use super::original_face::{Enclosure, sum};
@@ -86,8 +87,8 @@ impl SpherePose {
     }
 }
 
-fn plane_support(control: Vector4, plane: &OriginalPlane) -> bool {
-    if plane_value(plane, control) != Some(0.0) {
+fn plane_support(control: Vector4, plane: &OriginalPlane, exact_plane: bool) -> bool {
+    if exact_plane && plane_value(plane, control) != Some(0.0) {
         return false;
     }
     let Some(support) = &plane.support else {
@@ -227,6 +228,24 @@ fn proves_arc<C>(
 where
     C: ParametricCurve3D + BoundedCurve + TryIntoHomogeneousBsplineCurve,
 {
+    proves_circle_arc(original, absolute, sphere, pose, plane, None, work)
+}
+
+fn proves_circle_arc<C>(
+    original: &C,
+    absolute: [Point3; 2],
+    sphere: &Sphere,
+    pose: &SpherePose,
+    plane: &OriginalPlane,
+    equator: Option<(usize, f64)>,
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<bool, AttachmentFailure>
+where
+    C: ParametricCurve3D + BoundedCurve + TryIntoHomogeneousBsplineCurve,
+{
+    if original.original_affine_circle().is_some() {
+        return proves_affine_circle(original, absolute, sphere, pose, plane, equator, work);
+    }
     let Some(source) = original.original_curve_coefficients() else {
         return Ok(false);
     };
@@ -247,6 +266,7 @@ where
     let direction = absolute[1] - absolute[0];
     let mut previous: Option<(Enclosure, f64)> = None;
     let mut minimum_weight = f64::INFINITY;
+    let mut axial_residual = 0.0_f64;
     for index in 0..count {
         let Some(control) = curve_control(source, index) else {
             return Ok(false);
@@ -262,10 +282,19 @@ where
         {
             return Ok(false);
         }
-        if !plane_support(control, plane) {
+        if !plane_support(control, plane, equator.is_none()) {
             return Ok(false);
         }
         minimum_weight = minimum_weight.min(control.w.abs());
+        if let Some((axis, center)) = equator {
+            let distance = Enclosure::point(control[axis])
+                .div(control.w)
+                .sub(Enclosure::point(center));
+            if !distance.finite() {
+                return Ok(false);
+            }
+            axial_residual = axial_residual.max(distance.magnitude());
+        }
         if index == 0 || index + 1 == count {
             let vertex = absolute[usize::from(index != 0)];
             if (0..3).any(|axis| {
@@ -333,12 +362,217 @@ where
     }
     // |rho-r| <= |rho²-r²|/r. Same-sign weights bound the complete native
     // denominator, and the literal similarity converts this to world distance.
-    let world_residual = Enclosure::point(residual).mul(Enclosure::point(pose.scale));
-    let allowed = Enclosure::point(minimum_weight)
+    let denominator = Enclosure::point(minimum_weight)
         .mul(Enclosure::point(minimum_weight))
-        .mul(Enclosure::point(sphere.radius()))
-        .mul(Enclosure::point(TOLERANCE));
+        .mul(Enclosure::point(sphere.radius()));
+    // A torus equator is a circle, not a sphere. Distance to that circle is at
+    // most the spherical radial error plus twice the axial error. Bound both
+    // over the complete original rational hull, including rounded revolution
+    // coefficients; no endpoint or tangent tolerance grants source identity.
+    let world_residual = Enclosure::point(residual)
+        .mul(Enclosure::point(pose.scale))
+        .add(
+            Enclosure::point(axial_residual)
+                .mul(Enclosure::point(2.0))
+                .mul(denominator),
+        );
+    let allowed = denominator.mul(Enclosure::point(TOLERANCE));
     Ok(world_residual.finite() && allowed.finite() && world_residual.hi <= allowed.lo)
+}
+
+fn proves_affine_circle<C>(
+    original: &C,
+    absolute: [Point3; 2],
+    sphere: &Sphere,
+    pose: &SpherePose,
+    plane: &OriginalPlane,
+    equator: Option<(usize, f64)>,
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<bool, AttachmentFailure>
+where
+    C: ParametricCurve3D + BoundedCurve + TryIntoHomogeneousBsplineCurve,
+{
+    if let Some(work) = work {
+        work.charge(3)?;
+    }
+    let Some((frame, circle)) = original.original_affine_circle() else {
+        return Ok(false);
+    };
+    let Some(axes) = frame.stored_axes() else {
+        return Ok(false);
+    };
+    let (front, back) = original.range_tuple();
+    if *circle.transform() != Matrix3::identity()
+        || (front, back) != circle.range_tuple()
+        || !front.is_finite()
+        || !back.is_finite()
+        || front >= back
+        || back - front > std::f64::consts::PI
+        || !sphere.radius().is_finite()
+        || sphere.radius() <= 0.0
+        || !pose.transverse(sphere, plane)
+    {
+        return Ok(false);
+    }
+    for (parameter, point) in [front, back].into_iter().zip(absolute) {
+        if !original.evaluate(parameter).near(&point) {
+            return Ok(false);
+        }
+    }
+    let delta = pose.delta(frame.origin().to_homogeneous(), sphere);
+    let axes = axes.map(|vector| {
+        std::array::from_fn::<_, 3, _>(|axis| {
+            Enclosure::point(vector[pose.rows[axis]]).div(pose.axes[axis])
+        })
+    });
+    let dot = |first: [Enclosure; 3], second: [Enclosure; 3]| {
+        sum((0..3).map(|axis| first[axis].mul(second[axis])))
+    };
+    let radius2 = Enclosure::point(sphere.radius()).mul(Enclosure::point(sphere.radius()));
+    let norm = axes.map(|axis| dot(axis, axis));
+    let coupling = dot(axes[0], axes[1]);
+    let gram = norm[0].mul(norm[1]).sub(coupling.mul(coupling));
+    if norm.iter().any(|norm| !norm.finite() || norm.lo <= 0.0) || !gram.finite() || gram.lo <= 0.0
+    {
+        return Ok(false);
+    }
+    // The original analytic basis is cos(t), sin(t), with its actual sense.
+    // Bound the complete quadratic identity, not a fitted or sampled circle.
+    let residual = dot(delta, delta)
+        .add(Enclosure::point(
+            norm[0]
+                .sub(radius2)
+                .magnitude()
+                .max(norm[1].sub(radius2).magnitude()),
+        ))
+        .add(Enclosure::point(2.0 * coupling.magnitude()))
+        .add(Enclosure::point(2.0 * dot(delta, axes[0]).magnitude()))
+        .add(Enclosure::point(2.0 * dot(delta, axes[1]).magnitude()));
+    let world_residual = residual
+        .div(sphere.radius())
+        .mul(Enclosure::point(pose.scale));
+    let axial = if let Some((axis, center)) = equator {
+        let Some(axes) = frame.stored_axes() else {
+            return Ok(false);
+        };
+        Enclosure::point(
+            Enclosure::point(frame.origin()[axis])
+                .sub(Enclosure::point(center))
+                .magnitude(),
+        )
+        .add(Enclosure::point(axes[0][axis].abs()))
+        .add(Enclosure::point(axes[1][axis].abs()))
+        .magnitude()
+    } else {
+        if plane_value(plane, frame.origin().to_homogeneous()) != Some(0.0)
+            || frame.stored_axes().is_none_or(|axes| {
+                axes.into_iter()
+                    .any(|axis| plane_value(plane, axis.extend(0.0)) != Some(0.0))
+            })
+        {
+            return Ok(false);
+        }
+        0.0
+    };
+    let distance = world_residual.add(Enclosure::point(axial).mul(Enclosure::point(2.0)));
+    Ok(distance.finite() && distance.hi <= TOLERANCE)
+}
+
+fn proves_torus_equator<C>(
+    original: &C,
+    absolute: [Point3; 2],
+    torus: &Torus,
+    pose: &SpherePose,
+    plane: &OriginalPlane,
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<bool, AttachmentFailure>
+where
+    C: ParametricCurve3D + BoundedCurve + TryIntoHomogeneousBsplineCurve,
+{
+    let major = torus.large_radius();
+    let minor = torus.small_radius();
+    if !major.is_finite() || !minor.is_finite() || minor <= 0.0 || major <= minor {
+        return Ok(false);
+    }
+    let axis = pose.rows[2];
+    // This source identity is the torus's own equatorial plane, not a plane
+    // fitted to source samples. Its two circle radii follow from the literal
+    // carrier. Strict ring radii prove both branches transverse and distinct.
+    let Some(center) = exact_mul(pose.axes[2], torus.center().z)
+        .and_then(|center| exact_add(pose.translation[axis], center))
+    else {
+        return Ok(false);
+    };
+    if plane.normal[axis] == 0.0
+        || (0..3).any(|row| row != axis && plane.normal[row] != 0.0)
+        || plane.origin[axis] != center
+    {
+        return Ok(false);
+    }
+    let mut selected = false;
+    for sign in [-1.0, 1.0] {
+        if let Some(work) = work {
+            work.check()?;
+        }
+        let Some(radius) = exact_add(major, sign * minor) else {
+            return Ok(false);
+        };
+        let circle = Sphere::new(torus.center(), radius);
+        if proves_circle_arc(
+            original,
+            absolute,
+            &circle,
+            pose,
+            plane,
+            Some((axis, center)),
+            work,
+        )? {
+            if selected {
+                return Err("intersection_original_overlap_ambiguous".into());
+            }
+            selected = true;
+        }
+    }
+    Ok(selected)
+}
+
+pub(in crate::transversal::classic::loops_store) fn proves_original_branch<C, S>(
+    original: &C,
+    absolute: [Point3; 2],
+    [carrier, opposing]: [&S; 2],
+    original_boundary: &[Wire<Point3, C>],
+    work: Option<&BooleanWork<'_>>,
+) -> std::result::Result<bool, AttachmentFailure>
+where
+    C: ParametricCurve3D + BoundedCurve + TryIntoHomogeneousBsplineCurve,
+    S: ParametricSurface3D + TryIntoAnalyticSurfaceKind + TryIntoHomogeneousBsplineSurface,
+{
+    let Some(plane) = OriginalPlane::from_surface(opposing) else {
+        return Ok(false);
+    };
+    let proved = if let Some((sphere, stored_pose)) = carrier.original_sphere() {
+        let Some(pose) = SpherePose::new(stored_pose) else {
+            return Ok(false);
+        };
+        proves_arc(original, absolute, sphere, &pose, &plane, work)?
+    } else if let Some((torus, stored_pose)) = carrier.original_torus() {
+        let Some(pose) = SpherePose::new(stored_pose) else {
+            return Ok(false);
+        };
+        proves_torus_equator(original, absolute, torus, &pose, &plane, work)?
+    } else {
+        false
+    };
+    if !proved {
+        return Ok(false);
+    }
+    if let Some(source) = original.original_curve_coefficients() {
+        original_face::contains_curve(source, original_boundary, &plane, work)
+    } else if let Some(source) = original.original_affine_circle() {
+        original_face::contains_affine_circle(source, original_boundary, &plane, work)
+    } else {
+        Ok(false)
+    }
 }
 
 pub(super) fn proves_overlap<C, S>(
@@ -360,22 +594,13 @@ where
         + TryIntoHomogeneousBsplineSurface,
 {
     let operands = [intersection.surface0(), intersection.surface1()];
-    let Some((sphere, stored_pose)) = operands[side].original_sphere() else {
-        return Ok(false);
-    };
-    let Some(plane) = OriginalPlane::from_surface(operands[1 - side]) else {
-        return Ok(false);
-    };
-    let Some(source) = original.original_curve_coefficients() else {
-        return Ok(false);
-    };
-    let Some(pose) = SpherePose::new(stored_pose) else {
-        return Ok(false);
-    };
-    if !proves_arc(original, absolute, sphere, &pose, &plane, work)? {
-        return Ok(false);
-    }
-    if !original_face::contains_curve(source, original_boundary, &plane, work)? {
+    if !proves_original_branch(
+        original,
+        absolute,
+        [operands[side], operands[1 - side]],
+        original_boundary,
+        work,
+    )? {
         return Ok(false);
     }
     if (directed != absolute && directed != [absolute[1], absolute[0]])
@@ -439,6 +664,149 @@ mod tests {
                 Vector4::new(0.0, 5.0, 0.0, 1.0),
             ],
         ))
+    }
+
+    #[test]
+    fn analytic_torus_source_arcs_keep_raw_angles_and_refuse_wrong_frames_and_endpoints() {
+        let torus = Torus::new(Point3::origin(), 3.0, 1.0);
+        let pose = SpherePose::new(None).unwrap();
+        let plane = OriginalPlane::new(&Plane::xy()).unwrap();
+        for radius in [2.0, 4.0] {
+            for reversed in [false, true] {
+                let arc = |other_axis: f64| {
+                    let mut circle = Processor::new(TrimmedCurve::new(
+                        UnitCircle::<Point2>::new(),
+                        (10.0, 11.0),
+                    ));
+                    if reversed {
+                        circle.invert();
+                    }
+                    modeling::Curve::ParameterCurve(ParameterCurve::new(
+                        modeling::Curve2D::Conic(modeling::Conic2D::Ellipse(circle)),
+                        Box::new(modeling::Surface::Plane(Plane::from_origin_vectors(
+                            Point3::new(0.0, 0.0, 1.0e-15),
+                            radius * Vector3::unit_x(),
+                            other_axis * Vector3::unit_y(),
+                        ))),
+                    ))
+                };
+                let curve = arc(radius);
+                let endpoints = [curve.front(), curve.back()];
+                assert_eq!(curve.range_tuple(), (10.0, 11.0));
+                assert!(curve.original_curve_coefficients().is_none());
+                assert!(curve.original_affine_circle().is_some());
+                assert!(
+                    proves_torus_equator(&curve, endpoints, &torus, &pose, &plane, None).unwrap()
+                );
+                let wrong = arc(radius + 0.001);
+                assert!(
+                    !proves_torus_equator(
+                        &wrong,
+                        [wrong.front(), wrong.back()],
+                        &torus,
+                        &pose,
+                        &plane,
+                        None,
+                    )
+                    .unwrap()
+                );
+                assert!(
+                    !proves_torus_equator(
+                        &curve,
+                        [endpoints[0], endpoints[1] + Vector3::unit_x()],
+                        &torus,
+                        &pose,
+                        &plane,
+                        None,
+                    )
+                    .unwrap()
+                );
+                let wrapped = modeling::Curve::TrimmedCurve(Processor::new(TrimmedCurve::new(
+                    Box::new(curve),
+                    (10.0, 11.0),
+                )));
+                assert!(wrapped.original_affine_circle().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn original_torus_equators_require_whole_carrier_pose_and_native_arc_identity() {
+        let center = Point3::new(1.0, 2.0, 3.0);
+        let matrix = Matrix4::from_cols(
+            Vector4::new(0.0, 0.0, -2.0, 0.0),
+            Vector4::new(0.0, 2.0, 0.0, 0.0),
+            Vector4::new(2.0, 0.0, 0.0, 0.0),
+            Vector4::new(16.0, -8.0, 4.0, 1.0),
+        );
+        let mut source = modeling::Surface::ToroidalSurface(Processor::with_transform(
+            Torus::new(center, 3.0, 2.0),
+            matrix,
+        ));
+        source.invert();
+        let (torus, stored) = source.original_torus().unwrap();
+        assert_eq!(stored, Some(&matrix));
+        let pose = SpherePose::new(stored).unwrap();
+        let plane = OriginalPlane::new(&Plane::new(
+            Point3::new(22.0, 0.0, 0.0),
+            Point3::new(22.0, 1.0, 0.0),
+            Point3::new(22.0, 0.0, 1.0),
+        ))
+        .unwrap();
+        for radius in [1.0, 5.0] {
+            let mut curve = original_quarter();
+            curve.control_points_mut().for_each(|control| {
+                control.x *= radius / 5.0;
+                control.y *= radius / 5.0;
+                *control += center.to_vec().extend(0.0) * control.w;
+                *control = matrix * *control;
+            });
+            curve.parameter_transform(2.0, 10.0);
+            let before = curve.non_rationalized().clone();
+            let endpoints = [curve.front(), curve.back()];
+            assert!(proves_torus_equator(&curve, endpoints, torus, &pose, &plane, None).unwrap());
+            let unrelated = Torus::new(center, 3.01, 2.0);
+            assert!(
+                !proves_torus_equator(&curve, endpoints, &unrelated, &pose, &plane, None).unwrap()
+            );
+            let invalid_endpoint = [endpoints[0] + Vector3::unit_y(), endpoints[1]];
+            assert!(
+                !proves_torus_equator(&curve, invalid_endpoint, torus, &pose, &plane, None)
+                    .unwrap()
+            );
+            let mut off_carrier = curve.clone();
+            off_carrier.control_points_mut().nth(1).unwrap().x += 0.01;
+            assert!(
+                !proves_torus_equator(&off_carrier, endpoints, torus, &pose, &plane, None).unwrap()
+            );
+            assert_eq!(curve.non_rationalized(), &before);
+        }
+        let tangent = OriginalPlane::new(&Plane::new(
+            Point3::new(26.0, 0.0, 0.0),
+            Point3::new(26.0, 1.0, 0.0),
+            Point3::new(26.0, 0.0, 1.0),
+        ))
+        .unwrap();
+        let curve = original_quarter();
+        assert!(
+            !proves_torus_equator(
+                &curve,
+                [curve.front(), curve.back()],
+                torus,
+                &pose,
+                &tangent,
+                None,
+            )
+            .unwrap()
+        );
+        let nested = Processor::with_transform(source, matrix);
+        assert!(nested.original_torus().is_none());
+        let converted = modeling::Surface::NurbsSurface(NurbsSurface::new(
+            Torus::new(center, 3.0, 2.0)
+                .try_into_homogeneous_bspline_surface()
+                .unwrap(),
+        ));
+        assert!(converted.original_torus().is_none());
     }
 
     #[test]
