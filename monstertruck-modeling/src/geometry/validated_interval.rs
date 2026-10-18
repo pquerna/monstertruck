@@ -195,6 +195,23 @@ pub struct ValidatedPlaneEndpointOrientationWitness {
     pub endpoint_is_back: bool,
     /// World coordinate selected from the strict candidate tangent.
     pub coordinate: u8,
+    /// Strict candidate tangent component at the bound endpoint.
+    pub candidate_derivative: [f64; 2],
+    /// Certified positive world-axis direction toward original material.
+    pub material_positive: bool,
+    /// Certified positive world-axis direction of increasing candidate time.
+    pub candidate_positive: bool,
+    /// Endpoint-first native guide coefficients, at most three stored controls.
+    /// Polynomial controls have homogeneous weight one; no curve is evaluated.
+    pub guide_end_coefficients: Option<[[f64; 4]; 3]>,
+    /// Endpoint-first native guide knots, at most four stored values.
+    pub guide_end_knots: Option<[f64; 4]>,
+    /// Complete native guide control and knot counts.
+    pub guide_coefficient_counts: Option<[u32; 2]>,
+    /// Actual endpoint piece's raw range for an affine coordinate-plane family.
+    pub projection_range: Option<[f64; 2]>,
+    /// Exact endpoint coordinate-plane coefficients `[nx, ny, nz, offset]`.
+    pub projection_planes: Option<[[f64; 4]; 2]>,
     /// Complete ascending candidate parameter range.
     pub candidate_range: [f64; 2],
     /// Independently isolated chart root and its monotonicity witness.
@@ -209,18 +226,12 @@ pub struct ValidatedPlaneEndpointOrientationWitness {
     pub original_derivative: [f64; 2],
     /// Strict chart crossing determinant on the original root enclosure.
     pub determinant: [f64; 2],
-    /// Strict candidate tangent component at the bound endpoint.
-    pub candidate_derivative: [f64; 2],
     /// Original face-use orientation.
     pub face_orientation: bool,
     /// Original coedge material orientation, including face-use inversion.
     pub coedge_orientation: bool,
     /// Recovered absolute stored-wire direction.
     pub absolute_orientation: bool,
-    /// Certified positive world-axis direction toward original material.
-    pub material_positive: bool,
-    /// Certified positive world-axis direction of increasing candidate time.
-    pub candidate_positive: bool,
 }
 
 /// Fixed-size evidence from a terminal coverage or mandatory endpoint attempt.

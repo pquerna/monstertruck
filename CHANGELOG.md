@@ -19,7 +19,10 @@ monstertruck 0.4.0.
 - Original plane-endpoint material-side refusals retain bounded diagnostic
   operands: the actual candidate/coedge/end binding, separate original-3D and
   chart root gauges, strict tangent/determinant signs and stored-wire/face-use
-  orientations. Diagnostics do not relax endpoint acceptance or root bounds.
+  orientations. Endpoint-first native guide controls/knots and actual coordinate
+  planes distinguish guide direction from continuation direction without
+  evaluating another curve. Diagnostics do not relax endpoint acceptance or
+  root bounds.
 
 - Public const-generic surface functional first jets retain interval directions,
   displacement origins and offsets inside original source coefficients. Scalar

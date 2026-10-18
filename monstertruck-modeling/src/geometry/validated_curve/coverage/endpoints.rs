@@ -1254,6 +1254,61 @@ fn endpoint_orientation_witness(
     let [face_orientation, coedge_orientation, absolute_orientation,
         material_positive, candidate_positive] = orientations;
     let bounds = |value: ValidatedInterval| [value.lower, value.upper];
+    let indices = |len: usize| {
+        std::array::from_fn::<_, 4, _>(|index| {
+            if binding.endpoint_is_back {
+                len.saturating_sub(1 + index)
+            } else {
+                index.min(len.saturating_sub(1))
+            }
+        })
+    };
+    let guide = candidate.native_curve().and_then(|curve| match curve {
+        Curve::IntersectionCurve(curve) => Some(curve.leader().as_ref()),
+        _ => None,
+    });
+    let (guide_end_coefficients, guide_end_knots, guide_coefficient_counts) = match guide {
+        Some(Curve::BsplineCurve(curve)) if !curve.control_points().is_empty()
+            && !curve.knot_vector().is_empty() =>
+        {
+            let points = curve.control_points();
+            let knots = curve.knot_vector();
+            let control_indices = indices(points.len());
+            (
+                Some(std::array::from_fn(|index| {
+                    let point = points[control_indices[index]];
+                    [point.x, point.y, point.z, 1.0]
+                })),
+                Some(indices(knots.len()).map(|index| knots[index])),
+                Some([u32::try_from(points.len()).ok()?, u32::try_from(knots.len()).ok()?]),
+            )
+        }
+        Some(Curve::NurbsCurve(curve)) if !curve.control_points().is_empty()
+            && !curve.knot_vector().is_empty() =>
+        {
+            let points = curve.control_points();
+            let knots = curve.knot_vector();
+            let control_indices = indices(points.len());
+            (
+                Some(std::array::from_fn(|index| {
+                    let point = points[control_indices[index]];
+                    [point.x, point.y, point.z, point.w]
+                })),
+                Some(indices(knots.len()).map(|index| knots[index])),
+                Some([u32::try_from(points.len()).ok()?, u32::try_from(knots.len()).ok()?]),
+            )
+        }
+        _ => (None, None, None),
+    };
+    let (projection_range, projection_planes) = match candidate.pieces[piece_index].projection {
+        Projection::BetweenPlanes { parameter, planes } => (
+            Some(parameter),
+            Some(planes.map(|plane| [
+                plane.normal[0], plane.normal[1], plane.normal[2], plane.offset,
+            ])),
+        ),
+        _ => (None, None),
+    };
     // Diagnostic representability never changes the original refusal.
     Some(ValidatedPlaneCoverageWitness::EndpointOrientation(
         ValidatedPlaneEndpointOrientationWitness {
@@ -1263,6 +1318,14 @@ fn endpoint_orientation_witness(
             source_index: u8::try_from(source_index).ok()?,
             endpoint_is_back: binding.endpoint_is_back,
             coordinate: u8::try_from(coordinate).ok()?,
+            candidate_derivative: bounds(candidate_derivative),
+            material_positive,
+            candidate_positive,
+            guide_end_coefficients,
+            guide_end_knots,
+            guide_coefficient_counts,
+            projection_range,
+            projection_planes,
             candidate_range: candidate.range,
             chart_root: [prepared.root.parameter, prepared.root.witness],
             original_root: [prepared.original.parameter, prepared.original.witness],
@@ -1270,12 +1333,9 @@ fn endpoint_orientation_witness(
             chart_derivative: bounds(prepared.root.derivative),
             original_derivative: bounds(prepared.original.derivative),
             determinant: bounds(determinant),
-            candidate_derivative: bounds(candidate_derivative),
             face_orientation,
             coedge_orientation,
             absolute_orientation,
-            material_positive,
-            candidate_positive,
         },
     ))
 }
