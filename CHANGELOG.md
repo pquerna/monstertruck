@@ -16,6 +16,13 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Rational curves preserve the regular parameter domain of their homogeneous
+  B-spline, matching polynomial curves and rational surfaces. Unclamped exterior
+  knots no longer become invalid NURBS endpoints in bounded searches or STEP
+  closed-edge subdivision. Explicit carrier contradictions on declared closed
+  edges remain fatal rather than disappearing as reported conversion loss.
+  Original knots, weights, geometry and closure checks remain unchanged.
+
 - Open Boolean intersections invert their actual original trim contacts before
   modifying generated guide endpoints. Native and polygon leaders retain the
   same directed raw-index restriction and every interior control; exact shared

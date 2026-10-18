@@ -185,7 +185,7 @@ impl Table {
         shell: &ShellHolder,
         vidx_map: &HashMap<u64, usize>,
         sink: &LossSink,
-    ) -> (Vec<CompressedEdge<Curve3D>>, HashMap<u64, usize>) {
+    ) -> Result<(Vec<CompressedEdge<Curve3D>>, HashMap<u64, usize>), StepConvertingError> {
         use PlaceHolder::Ref;
         let mut eidx_map = HashMap::<u64, usize>::new();
         // Same split as `shell_vertices`, for the same reason: a failed edge used
@@ -193,7 +193,7 @@ impl Table {
         let mut attempted = HashSet::<u64>::new();
         let edge_curve_to_compressed_edge = |(idx, edge): (u64, EdgeCurveHolder)| {
             if !attempted.insert(idx) {
-                return None;
+                return Ok(None);
             }
             sink.listed(Cat::Edge, 1);
             let edge_curve = match edge.clone().into_owned(self) {
@@ -206,12 +206,30 @@ impl Table {
                         Some(idx),
                         Some(e.to_string()),
                     );
-                    return None;
+                    return Ok(None);
                 }
             };
             let curve = match edge_curve.parse_curve3d() {
                 Ok(curve) => curve,
                 Err(e) => {
+                    // Unsupported carriers remain reportable losses. A proved
+                    // contradiction on a declared closed edge must not disappear
+                    // before the shared closed-edge validity check can see it.
+                    let declared_closed = matches!(
+                        (&edge.edge_start, &edge.edge_end),
+                        (Ref(Name::Entity(front)), Ref(Name::Entity(back))) if front == back
+                    );
+                    if declared_closed
+                        && matches!(
+                            e.downcast_ref::<step_geometry::ExactConversionError>(),
+                            Some(
+                                step_geometry::ExactConversionError::LineEdgeSense
+                                    | step_geometry::ExactConversionError::LineEdgeVertexOffCarrier
+                            )
+                        )
+                    {
+                        return Err(e);
+                    }
                     eprintln!("{e}");
                     sink.lost(
                         Cat::Edge,
@@ -219,7 +237,7 @@ impl Table {
                         Some(idx),
                         Some(e.to_string()),
                     );
-                    return None;
+                    return Ok(None);
                 }
             };
             let (Ref(Name::Entity(front_idx)), Ref(Name::Entity(back_idx))) =
@@ -231,7 +249,7 @@ impl Table {
                     Some(idx),
                     Some("edge_start or edge_end is not an entity reference".to_owned()),
                 );
-                return None;
+                return Ok(None);
             };
             let (Some(front), Some(back)) = (vidx_map.get(front_idx), vidx_map.get(back_idx))
             else {
@@ -241,15 +259,15 @@ impl Table {
                     Some(idx),
                     Some(format!("no kept vertex for #{front_idx} or #{back_idx}",)),
                 );
-                return None;
+                return Ok(None);
             };
             let index = eidx_map.len();
             eidx_map.insert(idx, index);
             sink.kept(Cat::Edge, 1);
-            Some(CompressedEdge {
+            Ok(Some(CompressedEdge {
                 vertices: (*front, *back),
                 curve,
-            })
+            }))
         };
         let edges: Vec<CompressedEdge<Curve3D>> = shell
             .cfs_faces_holder(self)
@@ -261,9 +279,10 @@ impl Table {
             .filter_map(move |(_, bound)| bound?.bound_holder(self))
             .flat_map(move |bound| bound.edge_list)
             .filter_map(move |edge| self.place_holder_edge_any_to_index_and_edge_curve(&edge))
-            .filter_map(edge_curve_to_compressed_edge)
-            .collect();
-        (edges, eidx_map)
+            .map(edge_curve_to_compressed_edge)
+            .filter_map(Result::transpose)
+            .collect::<Result<_, _>>()?;
+        Ok((edges, eidx_map))
     }
     /// Composes a `FACE_BOUND`'s own orientation with the face's `same_sense`,
     /// so a boundary loop is emitted in the SURFACE's sense and not the FACE's.
@@ -816,7 +835,7 @@ impl Table {
         self.validate_shell_source(shell, false)?;
         let sink = LossSink::default();
         let (vertices, vidx_map) = self.shell_vertices(shell, &sink);
-        let (edges, eidx_map) = self.shell_edges(shell, &vidx_map, &sink);
+        let (edges, eidx_map) = self.shell_edges(shell, &vidx_map, &sink)?;
         let mut faces = Vec::new();
         let mut source_edges = eidx_map
             .iter()
@@ -1722,7 +1741,7 @@ impl StepShell for ShellHolder {
         table.validate_shell_source(self, false)?;
         let sink = LossSink::default();
         let (vertices, vidx_map) = table.shell_vertices(self, &sink);
-        let (edges, eidx_map) = table.shell_edges(self, &vidx_map, &sink);
+        let (edges, eidx_map) = table.shell_edges(self, &vidx_map, &sink)?;
         let faces = table.shell_faces(self, &eidx_map, &sink);
         let mut shell = CompressedShell {
             vertices,
@@ -1749,7 +1768,7 @@ impl StepShell for ShellHolder {
         table.validate_shell_source(self, true)?;
         let sink = LossSink::default();
         let (vertices, vidx_map) = table.shell_vertices(self, &sink);
-        let (edges, eidx_map) = table.shell_edges(self, &vidx_map, &sink);
+        let (edges, eidx_map) = table.shell_edges(self, &vidx_map, &sink)?;
         let faces = table.shell_trimmed_faces(self, &eidx_map, &sink);
         let mut shell = CompressedTrimmedShell {
             vertices,
