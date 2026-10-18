@@ -164,22 +164,19 @@ impl<'a> ProjectionLeaderKnotEvaluator<'a> {
         };
         let parameter = Taylor::variable(ValidatedInterval::point(parameter), 0);
         let values = match self.curve {
-            Curve::BsplineCurve(curve) => {
-                curve_sum_with_validated_knots(
-                    curve.knot_vector(),
-                    (curve.control_points().len(), degree),
-                    parameter,
-                    |i| {
-                        let point = curve.control_points()[i];
-                        [point.x, point.y, point.z]
-                    },
-                    None,
-                    (budget, cancel),
-                )?
-                .values
-            }
+            Curve::BsplineCurve(curve) => curve_sum_with_validated_knots(
+                curve.knot_vector(),
+                (curve.control_points().len(), degree),
+                parameter,
+                |i| {
+                    let point = curve.control_points()[i];
+                    [point.x, point.y, point.z]
+                },
+                None,
+                (budget, cancel),
+            )?,
             Curve::NurbsCurve(curve) => {
-                let homogeneous = curve_sum_with_validated_knots(
+                let values = curve_sum_with_validated_knots(
                     curve.knot_vector(),
                     (curve.control_points().len(), degree),
                     parameter,
@@ -190,7 +187,6 @@ impl<'a> ProjectionLeaderKnotEvaluator<'a> {
                     Some(3),
                     (budget, cancel),
                 )?;
-                let values = normalized(homogeneous)?;
                 [values[0], values[1], values[2]]
             }
             _ => return Err(ValidatedGeometryError::InvalidInput),
@@ -1113,7 +1109,6 @@ fn spline_curve<const N: usize>(
         allow_c0,
         (budget, cancel),
     )
-    .map(|value| value.values)
 }
 
 fn curve_sum<const N: usize>(
@@ -1124,7 +1119,7 @@ fn curve_sum<const N: usize>(
     weight_axis: Option<usize>,
     allow_c0: bool,
     (budget, cancel): (&mut ValidatedGeometryBudget, &AtomicBool),
-) -> Result<ControlSum<N>, ValidatedGeometryError> {
+) -> Result<[Taylor; N], ValidatedGeometryError> {
     let degree = validate_knots_with_policy(
         knots,
         count,
@@ -1154,7 +1149,7 @@ fn curve_sum_with_validated_knots<const N: usize>(
     control: impl Fn(usize) -> [f64; N],
     weight_axis: Option<usize>,
     (budget, cancel): (&mut ValidatedGeometryBudget, &AtomicBool),
-) -> Result<ControlSum<N>, ValidatedGeometryError> {
+) -> Result<[Taylor; N], ValidatedGeometryError> {
     let bound = parameter.0[0][0];
     let mut boundary = |strict: bool| -> Result<usize, ValidatedGeometryError> {
         let (mut low, mut high) = (0, knots.len());
@@ -1183,7 +1178,7 @@ fn curve_sum_with_validated_knots<const N: usize>(
     } else {
         boundary(true)?.min(knots.len() - 1)
     };
-    let mut result: Option<ControlSum<N>> = None;
+    let mut result: Option<[Taylor; N]> = None;
     for span in first.max(degree)..end.min(count) {
         budget.charge(1, cancel)?;
         if knots[span] == knots[span + 1] {
@@ -1202,9 +1197,17 @@ fn curve_sum_with_validated_knots<const N: usize>(
             evidence.include(p, *basis_value, partition_unity, &mut value)?;
         }
         let value = evidence.finish(value, partition_unity, true)?;
+        // Dehomogenize each incident piece before hulling. Homogeneous weight
+        // derivatives may jump at a C0 source knot even when the Cartesian
+        // tangent agrees; hulling first destroys that numerator/weight coupling.
+        let value = if weight_axis.is_some() {
+            normalized(value)?
+        } else {
+            value.values
+        };
         result = Some(match result {
             None => value,
-            Some(previous) => previous.hull(value),
+            Some(previous) => std::array::from_fn(|i| previous[i].hull(value[i])),
         });
     }
     result.ok_or(ValidatedGeometryError::ParameterOutOfRange)
@@ -2033,7 +2036,7 @@ fn rational_spline<const N: usize>(
         budget.charge(1, cancel)?;
         length -= 1;
         let (part, depth) = pending[length];
-        let homogeneous = curve_sum(
+        let value = curve_sum(
             knots,
             count,
             part,
@@ -2041,8 +2044,8 @@ fn rational_spline<const N: usize>(
             Some(N - 1),
             allow_c0,
             (budget, cancel),
-        )?;
-        match normalized(homogeneous) {
+        );
+        match value {
             Ok(value) => {
                 result = Some(match result {
                     None => value,

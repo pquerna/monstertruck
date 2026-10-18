@@ -21,7 +21,9 @@ monstertruck 0.4.0.
   knots no longer become invalid NURBS endpoints in bounded searches or STEP
   closed-edge subdivision. Scalar evaluation and strict curve enclosures use
   interior one-sided branches at regular endpoints, retaining both incident
-  branches at internal knots. Explicit carrier contradictions on declared closed
+  branches at internal knots. Each rational piece is dehomogenized before its
+  Cartesian jet is hulled, preserving numerator/weight derivative correlation
+  across joins. Explicit carrier contradictions on declared closed
   edges remain fatal rather than disappearing as reported conversion loss, and
   public load errors retain their typed conversion causes. Original knots,
   weights, geometry and closure checks remain unchanged.
