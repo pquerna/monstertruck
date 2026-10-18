@@ -23,7 +23,9 @@ monstertruck 0.4.0.
   interior one-sided branches at regular endpoints, retaining both incident
   branches at internal knots. Each rational piece is dehomogenized before its
   Cartesian jet is hulled, preserving numerator/weight derivative correlation
-  across joins. Explicit carrier contradictions on declared closed
+  across joins. Curve numerators are centered against their original weight
+  coefficients before division, reducing world-translation dependence without
+  copying or changing source controls. Explicit carrier contradictions on closed
   edges remain fatal rather than disappearing as reported conversion loss, and
   public load errors retain their typed conversion causes. Original knots,
   weights, geometry and closure checks remain unchanged.

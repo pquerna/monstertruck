@@ -1190,10 +1190,29 @@ fn curve_sum_with_validated_knots<const N: usize>(
         let (start, length, values) = basis(knots, count, degree, span, parameter, budget, cancel)?;
         let partition_unity = span >= degree && span < count;
         let mut value = [Taylor::ZERO; N];
-        let mut evidence = ControlEvidence::new(weight_axis);
+        let reference = control(start);
+        let origin = std::array::from_fn(|axis| match weight_axis {
+            Some(weight) if axis != weight && reference[weight] != 0.0 => {
+                let coordinate = reference[axis] / reference[weight];
+                if coordinate.is_finite() {
+                    coordinate
+                } else {
+                    0.0
+                }
+            }
+            _ => 0.0,
+        });
+        let mut evidence = ControlEvidence {
+            quotient_origin: origin,
+            ..ControlEvidence::new(weight_axis)
+        };
         for (index, basis_value) in values.iter().take(length).enumerate() {
             budget.charge(1, cancel)?;
-            let p = control(start + index);
+            let p = if index == 0 {
+                reference
+            } else {
+                control(start + index)
+            };
             evidence.include(p, *basis_value, partition_unity, &mut value)?;
         }
         let value = evidence.finish(value, partition_unity, true)?;
@@ -1201,7 +1220,7 @@ fn curve_sum_with_validated_knots<const N: usize>(
         // derivatives may jump at a C0 source knot even when the Cartesian
         // tangent agrees; hulling first destroys that numerator/weight coupling.
         let value = if weight_axis.is_some() {
-            normalized(value)?
+            normalized(value, &origin)?
         } else {
             value.values
         };
@@ -1885,6 +1904,8 @@ struct ControlEvidence<const N: usize> {
     weight: Option<usize>,
     euclidean_hulls: [Option<ValidatedInterval>; N],
     origin: Option<[f64; N]>,
+    /// Fixed arithmetic reference; it never changes the original coefficients.
+    quotient_origin: [f64; N],
 }
 impl<const N: usize> ControlEvidence<N> {
     fn new(weight: Option<usize>) -> Self {
@@ -1895,6 +1916,7 @@ impl<const N: usize> ControlEvidence<N> {
             weight,
             euclidean_hulls: [None; N],
             origin: None,
+            quotient_origin: [0.0; N],
         }
     }
     fn include(
@@ -1907,18 +1929,41 @@ impl<const N: usize> ControlEvidence<N> {
         self.observe(point)?;
         // Curves need only the one-axis origin identity.
         let first = self.origin.is_none();
+        let weight = self.weight;
+        let euclidean_origin = &self.quotient_origin;
         let origin = self
             .origin
             .get_or_insert(if partition_unity { point } else { [0.0; N] });
         if first {
-            *values = origin.map(Taylor::constant);
+            *values = std::array::from_fn(|i| {
+                let mut value = ValidatedInterval::point(origin[i]);
+                if let Some(weight) = weight
+                    && euclidean_origin[i] != 0.0
+                {
+                    value = value
+                        - ValidatedInterval::point(euclidean_origin[i])
+                            * ValidatedInterval::point(origin[weight]);
+                }
+                Taylor::interval(value)
+            });
         }
         for i in 0..N {
-            let coefficient = if point[i] == origin[i] {
+            let mut coefficient = if point[i] == origin[i] {
                 ValidatedInterval::point(0.0)
             } else {
                 ValidatedInterval::point(point[i]) - ValidatedInterval::point(origin[i])
             };
+            // Fold translation against the original weight coefficients before
+            // division; a world origin must not inflate Cartesian derivatives.
+            if let Some(weight) = weight
+                && euclidean_origin[i] != 0.0
+                && point[weight] != origin[weight]
+            {
+                coefficient = coefficient
+                    - ValidatedInterval::point(euclidean_origin[i])
+                        * (ValidatedInterval::point(point[weight])
+                            - ValidatedInterval::point(origin[weight]));
+            }
             values[i] = values[i] + Taylor::interval(coefficient) * basis;
         }
         Ok(())
@@ -1961,7 +2006,9 @@ impl<const N: usize> ControlEvidence<N> {
     ) -> Result<ControlSum<N>, ValidatedGeometryError> {
         if partition_unity {
             for (i, value) in values.iter_mut().enumerate() {
-                if let Some(hull) = self.hulls[i] {
+                if self.quotient_origin[i] == 0.0
+                    && let Some(hull) = self.hulls[i]
+                {
                     if hull.lower == hull.upper {
                         // Identical coefficients are a constant polynomial by partition unity.
                         *value = Taylor::interval(hull);
@@ -1998,6 +2045,7 @@ impl<const N: usize> ControlEvidence<N> {
 
 fn normalized<const N: usize>(
     homogeneous: ControlSum<N>,
+    euclidean_origin: &[f64; N],
 ) -> Result<[Taylor; N], ValidatedGeometryError> {
     let inverse = homogeneous.values[N - 1].reciprocal()?;
     let mut value = [Taylor::ZERO; N];
@@ -2008,7 +2056,11 @@ fn normalized<const N: usize>(
             // Exact dyadic coefficient cross-products prove the quotient constant.
             Taylor::interval(ratio.enclosure()?)
         } else {
-            homogeneous.values[i] * inverse
+            let mut centered = homogeneous.values[i] * inverse;
+            if euclidean_origin[i] != 0.0 {
+                centered.0[0][0] = centered.0[0][0] + ValidatedInterval::point(euclidean_origin[i]);
+            }
+            centered
         };
         if let Some(hull) = homogeneous.euclidean_hulls[i] {
             component.0[0][0] = component.0[0][0]
@@ -2094,7 +2146,7 @@ fn rational_surface<P, const N: usize>(
             allow_c0,
             (budget, cancel),
         )?;
-        match normalized(homogeneous) {
+        match normalized(homogeneous, &[0.0; N]) {
             Ok(value) => {
                 result = Some(match result {
                     None => value,
