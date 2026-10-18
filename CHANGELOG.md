@@ -23,6 +23,9 @@ monstertruck 0.4.0.
   retains an outside-trim guide tail that reverses endpoint continuation.
   Original source gauges, incidence and strict material-side coverage remain
   unchanged; no tolerance-based tail removal or retry grants acceptance.
+  Pre-binding contact construction uses the actual projected carrier root;
+  a nearby raw parameter does not turn an unbound guide endpoint into that root.
+  Existing bound-curve endpoint inversion keeps its separate unchanged contract.
   Stalled original-contact inversions retain fixed-size native point, range,
   correction and proposed-versus-clamped parameter operands; these diagnostics
   neither extend a guide nor grant a root certificate.

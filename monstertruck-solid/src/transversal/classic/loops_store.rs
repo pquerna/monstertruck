@@ -1305,7 +1305,9 @@ where
                                 let parameter = |point| {
                                     let mut diagnostic = None;
                                     periodic_loops::intersection_parameter(
-                                        &intersection_curve, point, work, Some(&mut diagnostic),
+                                        &intersection_curve, point,
+                                        periodic_loops::IntersectionParameterBinding::OriginalContactConstruction,
+                                        work, Some(&mut diagnostic),
                                     ).map_err(|error| match error {
                                         periodic_loops::AttachmentFailure::Geometry(detail) => {
                                             ShapeOpsError::IntersectionLoopsFailed {

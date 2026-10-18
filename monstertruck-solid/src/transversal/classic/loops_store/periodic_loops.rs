@@ -6,9 +6,19 @@ use super::*;
 use crate::transversal::integrate::NativeIntersectionParameterWitness;
 use std::mem::size_of;
 
+/// Whether the target belongs to an existing curve or constructs its new trim.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum IntersectionParameterBinding {
+    /// Existing endpoint representation remains part of the inverse contract.
+    BoundCurve,
+    /// Original contact is not bound to a generated guide endpoint yet.
+    OriginalContactConstruction,
+}
+
 pub(super) fn intersection_parameter<S>(
     curve: &IntersectionCurve<PolylineCurve, S, S>,
     point: Point3,
+    binding: IntersectionParameterBinding,
     work: Option<&BooleanWork<'_>>,
     diagnostic: Option<&mut Option<NativeIntersectionParameterWitness>>,
 ) -> std::result::Result<f64, AttachmentFailure>
@@ -35,14 +45,20 @@ where
         {
             return Err("intersection_chart_native_projection_residual".into());
         }
-        let evaluated = if parameter.near(&front) {
-            curve.leader().front()
-        } else if parameter.near(&back) {
-            curve.leader().back()
-        } else {
-            actual
+        let endpoint_matches = match binding {
+            IntersectionParameterBinding::OriginalContactConstruction => true,
+            IntersectionParameterBinding::BoundCurve if parameter.near(&front) => {
+                curve.leader().front().near(&point)
+            }
+            IntersectionParameterBinding::BoundCurve if parameter.near(&back) => {
+                curve.leader().back().near(&point)
+            }
+            IntersectionParameterBinding::BoundCurve => true,
         };
-        if actual.near(&point) && evaluated.near(&point) {
+        // Construction binds the original contact only after restricting this
+        // guide. It needs the actual carrier root, not an unbound seed endpoint.
+        // Existing curve consumers retain their unchanged endpoint contract.
+        if actual.near(&point) && endpoint_matches {
             return Ok(parameter);
         }
         // A guide's nearest chord parameter is only a proposal. Invert the
@@ -930,7 +946,9 @@ where
                                 .ok_or("intersection_chart_polygon_parameter")?,
                         );
                         let mut polygon_parameter = index as f64 + fraction;
-                        let mut native_parameter = intersection_parameter(&curve, point, work, None)?;
+                        let mut native_parameter = intersection_parameter(
+                            &curve, point, IntersectionParameterBinding::BoundCurve, work, None,
+                        )?;
                         let boundary = &native[side][faces[side]][wire][edge];
                         let (boundary_start, boundary_end) =
                             boundary.with_curve(BoundedCurve::range_tuple);
@@ -1177,7 +1195,9 @@ where
         let parameter = polygon_head_parameter(point.polygon_parameter, previous_polygon_cut);
         polygon_parts.push(cut_polygon(&mut polyline, parameter));
         previous_polygon_cut = point.polygon_parameter;
-        let parameter = intersection_parameter(&curve, point.native.point(), work, None)?;
+        let parameter = intersection_parameter(
+            &curve, point.native.point(), IntersectionParameterBinding::BoundCurve, work, None,
+        )?;
         native_parts.push(curve.cut(parameter));
     }
     polygon_parts.push(polyline);

@@ -329,6 +329,7 @@ mod tests {
         let proposal = periodic_loops::intersection_parameter(
             &branch,
             fixture.source[0].front().point(),
+            periodic_loops::IntersectionParameterBinding::BoundCurve,
             None,
             None,
         )
