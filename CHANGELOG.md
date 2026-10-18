@@ -18,8 +18,10 @@ monstertruck 0.4.0.
 
 - Rational curves preserve the regular parameter domain of their homogeneous
   B-spline, matching polynomial curves and rational surfaces. Unclamped exterior
-  knots no longer become invalid NURBS endpoints in bounded searches or STEP
-  closed-edge subdivision. Scalar evaluation and strict curve enclosures use
+  knots no longer become invalid NURBS endpoints in bounded searches, STEP
+  closed-edge subdivision or surface inclusion. Inclusion checks borrow active
+  knot spans instead of allocating unique-knot vectors or sampling exterior
+  support. Scalar evaluation and strict curve enclosures use
   interior one-sided branches at regular endpoints, retaining both incident
   branches at internal knots. Each rational piece is dehomogenized before its
   Cartesian jet is hulled, preserving numerator/weight derivative correlation
