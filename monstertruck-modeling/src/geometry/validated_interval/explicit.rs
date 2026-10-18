@@ -1685,7 +1685,7 @@ fn rational_affine_factor<P>(
         }
         (&knots.1, &knots.0, v, u, columns)
     };
-    if factor_knots.len() != 4 || base_knots.is_empty() {
+    if factor_knots.len() != 4 || base_knots.len() <= base_count {
         return Ok(None);
     }
     budget.charge(4, cancel)?;
@@ -1696,8 +1696,10 @@ fn rational_affine_factor<P>(
     if factor_knots[1] != start || factor_knots[2] != end || start >= end {
         return Ok(None);
     }
-    if base_parameter.0[0][0].lower < base_knots[0]
-        || base_parameter.0[0][0].upper > base_knots[base_knots.len() - 1]
+    let base_degree = base_knots.len() - base_count - 1;
+    if base_knots[base_degree] >= base_knots[base_count]
+        || base_parameter.0[0][0].lower < base_knots[base_degree]
+        || base_parameter.0[0][0].upper > base_knots[base_count]
     {
         return Ok(None);
     }
@@ -1808,9 +1810,13 @@ fn rational_rank_one_coordinate<P>(
     } else {
         (nv, nu, &knots.0, u)
     };
-    if base_knots.is_empty()
-        || parameter.0[0][0].lower < base_knots[0]
-        || parameter.0[0][0].upper > base_knots[base_knots.len() - 1]
+    if base_knots.len() <= inner_count {
+        return Ok(None);
+    }
+    let base_degree = base_knots.len() - inner_count - 1;
+    if base_knots[base_degree] >= base_knots[inner_count]
+        || parameter.0[0][0].lower < base_knots[base_degree]
+        || parameter.0[0][0].upper > base_knots[inner_count]
     {
         return Ok(None);
     }

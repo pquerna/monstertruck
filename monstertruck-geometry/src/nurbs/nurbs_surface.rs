@@ -883,7 +883,10 @@ impl IncludeCurve<NurbsCurve<Vector3>> for NurbsSurface<Vector3> {
                 let p = j as f64 / degree as f64;
                 let t = knots[0] * (1.0 - p) + knots[1] * p;
                 let pt = curve.subs(t);
-                hint = match self.search_parameter(pt, Some(hint), INCLUDE_CURVE_TRIALS) {
+                hint = match self
+                    .search_parameter(pt, Some(hint), INCLUDE_CURVE_TRIALS)
+                    .or_else(|| self.search_parameter(pt, None, INCLUDE_CURVE_TRIALS))
+                {
                     Some(got) => got,
                     None => return false,
                 };
@@ -921,7 +924,10 @@ impl IncludeCurve<BsplineCurve<Point3>> for NurbsSurface<Vector4> {
                 let p = j as f64 / degree as f64;
                 let t = knots[0] * (1.0 - p) + knots[1] * p;
                 let pt = curve.subs(t);
-                hint = match self.search_parameter(pt, Some(hint), INCLUDE_CURVE_TRIALS) {
+                hint = match self
+                    .search_parameter(pt, Some(hint), INCLUDE_CURVE_TRIALS)
+                    .or_else(|| self.search_parameter(pt, None, INCLUDE_CURVE_TRIALS))
+                {
                     Some(got) => got,
                     None => return false,
                 };
@@ -959,7 +965,10 @@ impl IncludeCurve<NurbsCurve<Vector4>> for NurbsSurface<Vector4> {
                 let p = j as f64 / degree as f64;
                 let t = knots[0] * (1.0 - p) + knots[1] * p;
                 let pt = curve.subs(t);
-                hint = match self.search_parameter(pt, Some(hint), INCLUDE_CURVE_TRIALS) {
+                hint = match self
+                    .search_parameter(pt, Some(hint), INCLUDE_CURVE_TRIALS)
+                    .or_else(|| self.search_parameter(pt, None, INCLUDE_CURVE_TRIALS))
+                {
                     Some(got) => got,
                     None => return false,
                 };

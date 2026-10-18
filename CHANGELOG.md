@@ -21,13 +21,19 @@ monstertruck 0.4.0.
   knots no longer become invalid NURBS endpoints in bounded searches, STEP
   closed-edge subdivision or surface inclusion. Inclusion checks borrow active
   knot spans instead of allocating unique-knot vectors or sampling exterior
-  support. Scalar evaluation and strict curve enclosures use
+  support. Surface point inversion can retain an independently matching seed
+  after a singular-Jacobian refusal; this grants neither a unique inverse nor
+  regularity. Inclusion uses the existing hinted-then-unhinted exact solve when
+  a previous sample's chart seed cannot advance. Scalar evaluation and strict
+  curve enclosures use
   interior one-sided branches at regular endpoints, retaining both incident
   branches at internal knots. Each rational piece is dehomogenized before its
   Cartesian jet is hulled, preserving numerator/weight derivative correlation
   across joins. Curve numerators are centered against their original weight
   coefficients before division, reducing world-translation dependence without
-  copying or changing source controls. Explicit carrier contradictions on closed
+  copying or changing source controls. Optional surface-to-curve reductions
+  decline outside the curve's regular interval, preserving the full tensor
+  evaluator's extension semantics. Explicit carrier contradictions on closed
   edges remain fatal rather than disappearing as reported conversion loss, and
   public load errors retain their typed conversion causes. Original knots,
   weights, geometry and closure checks remain unchanged.

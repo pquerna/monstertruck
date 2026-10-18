@@ -411,13 +411,17 @@ where
     S: ParametricSurface<Point = P, Vector = P::Diff>,
 {
     let function = move |param: Vector2| SearchParameterVector::subs(surface, point, param);
-    let res = newton::solve(function, hint.into(), trials);
-    res.ok().and_then(
-        |Vector2 { x: u, y: v }| match surface.evaluate(u, v).near(&point) {
-            true => Some((u, v)),
-            false => None,
-        },
-    )
+    match newton::solve(function, hint.into(), trials) {
+        Ok(Vector2 { x: u, y: v }) => surface.evaluate(u, v).near(&point).then_some((u, v)),
+        // A collapsed parameter direction can make the Jacobian singular at
+        // an already matching seed. Return that independently checked point,
+        // not a uniqueness or surface-regularity claim.
+        Err(log) if log.degenerate() => surface
+            .evaluate(hint.0, hint.1)
+            .near(&point)
+            .then_some(hint),
+        Err(_) => None,
+    }
 }
 
 /// Searches the parameters of the intersection point of `surface` and `curve`.
