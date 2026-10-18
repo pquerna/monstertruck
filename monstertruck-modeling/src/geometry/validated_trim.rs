@@ -10,6 +10,7 @@
 use super::{
     Conic2D, Curve, Curve2D, ParameterCurve, Surface, ValidatedCurveJet2D, ValidatedGeometryBudget,
     ValidatedGeometryError, ValidatedInterval, validated_curve2d_jet,
+    validated_curve2d_piecewise_jet,
 };
 use crate::{Face, ParametricCurve, ParametricSurface, Point3};
 use monstertruck_topology::VertexId;
@@ -313,11 +314,28 @@ fn breaks(
         if mapped == lower || mapped == upper {
             return Ok(());
         }
-        let parameter = mapped.exact_float().ok_or(TrimDomainError::Geometry(
+        // A reflected stored knot need not have a binary64 parameter. Retain
+        // both neighboring floats and the complete intervening C0 source band.
+        // These partitions are position enclosures, not C1 certificates.
+        let bounds = mapped.float_bounds().ok_or(TrimDomainError::Geometry(
             ValidatedGeometryError::Unresolved,
         ))?;
-        if range[0] < parameter && parameter < range[1] {
-            result.push(parameter);
+        for (index, parameter) in bounds.into_iter().enumerate() {
+            if index == 1 && parameter == bounds[0] {
+                continue;
+            }
+            if range[0] < parameter && parameter < range[1] {
+                budget.charge(1, cancel)?;
+                if result.len().saturating_add(2) > limit {
+                    return Err(TrimDomainError::ResourceLimit);
+                }
+                admit_bytes(
+                    growing_capacity(result.len(), result.capacity())
+                        .saturating_mul(size_of::<f64>()),
+                    byte_limit,
+                )?;
+                result.push(parameter);
+            }
         }
         Ok(())
     };
@@ -333,6 +351,10 @@ fn breaks(
         Curve2D::Polyline(_) => (0..count).try_for_each(|parameter| insert(parameter as f64))?,
         _ => {}
     }
+    admit_bytes(
+        growing_capacity(result.len(), result.capacity()).saturating_mul(size_of::<f64>()),
+        byte_limit,
+    )?;
     result.push(range[1]);
     budget.charge(
         result
@@ -371,7 +393,7 @@ impl SpanAdmission<'_> {
         if self.nodes > self.limit {
             return Err(TrimDomainError::ResourceLimit);
         }
-        match validated_curve2d_jet(curve, span.range, budget, cancel) {
+        match validated_curve2d_piecewise_jet(curve, span.range, budget, cancel) {
             Ok(jet) => {
                 if !jet.position.into_iter().all(ValidatedInterval::is_finite) {
                     return Err(TrimDomainError::InvalidChart);
@@ -635,8 +657,10 @@ pub fn prepare_face_parameter_domain_with_natural_boundaries<'a, T: NativeTrimCu
                     next_range.0
                 };
                 let mut front =
-                    validated_curve2d_jet(current.curve, [ta; 2], budget, cancel)?.position;
-                let mut back = validated_curve2d_jet(next.curve, [tb; 2], budget, cancel)?.position;
+                    validated_curve2d_piecewise_jet(current.curve, [ta; 2], budget, cancel)?
+                        .position;
+                let mut back =
+                    validated_curve2d_piecewise_jet(next.curve, [tb; 2], budget, cancel)?.position;
                 let mut enclosure = [front[0].hull(back[0]), front[1].hull(back[1])];
                 if !face.orientation() {
                     std::mem::swap(&mut front, &mut back);
@@ -825,7 +849,8 @@ impl<'a> PreparedFaceParameterDomain<'a> {
 
     /// Borrows every ascending closed native parameter interval of an original coedge.
     ///
-    /// Includes all exact transported knots and retained adaptive denominator spans.
+    /// Includes exact transported knots, outward bands for nonrepresentable
+    /// transported knots and adaptive denominator spans; none certify C1.
     /// The borrow is constant-time and does not scan other coedges. Material direction
     /// remains in the coedge's `oriented_range`; no interval or circuit is omitted.
     /// Invalid original occurrence indices return a typed chart error.
@@ -910,6 +935,17 @@ impl<'a> PreparedFaceParameterDomain<'a> {
         budget: &mut ValidatedGeometryBudget,
         cancel: &AtomicBool,
     ) -> Result<ValidatedCurveJet2D, TrimDomainError> {
+        let curve = self.boundary_curve(coedge_index, range, budget, cancel)?;
+        Ok(validated_curve2d_jet(curve, range, budget, cancel)?)
+    }
+
+    fn boundary_curve(
+        &self,
+        coedge_index: usize,
+        range: [f64; 2],
+        budget: &mut ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<&Curve2D, TrimDomainError> {
         budget.charge(1, cancel)?;
         let coedge = self
             .coedges
@@ -919,13 +955,14 @@ impl<'a> PreparedFaceParameterDomain<'a> {
         if range[0] < a || range[1] > b {
             return Err(TrimDomainError::InvalidChart);
         }
-        Ok(validated_curve2d_jet(coedge.curve, range, budget, cancel)?)
+        Ok(coedge.curve)
     }
 
     /// Encloses the entire true source-boundary position tube on a nominal subarc.
     ///
     /// Unlike nominal boundary jets, this includes the supplied whole-source UV
     /// mapping error. It does not assert any bound on true-source derivatives.
+    /// Continuous nonsmooth knots remain in the position enclosure without C1 authority.
     /// The tube is intersected with independently certified restricted source
     /// support, if supplied; an empty intersection is a typed unresolved chart.
     pub fn boundary_position_enclosure(
@@ -935,9 +972,8 @@ impl<'a> PreparedFaceParameterDomain<'a> {
         budget: &mut ValidatedGeometryBudget,
         cancel: &AtomicBool,
     ) -> Result<[ValidatedInterval; 2], TrimDomainError> {
-        let nominal = self
-            .boundary_span_enclosure(coedge_index, range, budget, cancel)?
-            .position;
+        let curve = self.boundary_curve(coedge_index, range, budget, cancel)?;
+        let nominal = validated_curve2d_piecewise_jet(curve, range, budget, cancel)?.position;
         let position = [
             nominal[0] + ValidatedInterval::new(-self.uncertainty_uv[0], self.uncertainty_uv[0])?,
             nominal[1] + ValidatedInterval::new(-self.uncertainty_uv[1], self.uncertainty_uv[1])?,
@@ -1078,14 +1114,23 @@ impl<'a> PreparedFaceParameterDomain<'a> {
                 }
                 let coedge = &self.coedges[span.coedge];
                 let position =
-                    validated_curve2d_jet(coedge.curve, span.range, budget, cancel)?.position;
+                    validated_curve2d_piecewise_jet(coedge.curve, span.range, budget, cancel)?
+                        .position;
                 if disjoint(position, query) {
-                    let mut front =
-                        validated_curve2d_jet(coedge.curve, [span.range[0]; 2], budget, cancel)?
-                            .position;
-                    let mut back =
-                        validated_curve2d_jet(coedge.curve, [span.range[1]; 2], budget, cancel)?
-                            .position;
+                    let mut front = validated_curve2d_piecewise_jet(
+                        coedge.curve,
+                        [span.range[0]; 2],
+                        budget,
+                        cancel,
+                    )?
+                    .position;
+                    let mut back = validated_curve2d_piecewise_jet(
+                        coedge.curve,
+                        [span.range[1]; 2],
+                        budget,
+                        cancel,
+                    )?
+                    .position;
                     if !coedge.identity.orientation {
                         std::mem::swap(&mut front, &mut back);
                     }

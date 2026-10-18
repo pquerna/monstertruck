@@ -191,6 +191,34 @@ impl Dyadic {
         };
         Some(f64::from_bits(sign | bits))
     }
+
+    /// Retains an inexact scalar between adjacent floats, never as one rounded knot.
+    pub(super) fn float_bounds(self) -> Option<[f64; 2]> {
+        if let Some(value) = self.exact_float() {
+            return Some([value; 2]);
+        }
+        let width = 128 - self.coefficient.unsigned_abs().leading_zeros();
+        let shift = width.checked_sub(53)?;
+        if shift == 0 {
+            return None;
+        }
+        let magnitude = (self.coefficient.unsigned_abs() >> shift) as i128;
+        let toward_zero = Self {
+            coefficient: if self.coefficient < 0 {
+                -magnitude
+            } else {
+                magnitude
+            },
+            exponent: self.exponent.checked_add(shift as i32)?,
+        }
+        .exact_float()?;
+        let bounds = if self.coefficient < 0 {
+            [toward_zero.next_down(), toward_zero]
+        } else {
+            [toward_zero, toward_zero.next_up()]
+        };
+        bounds.into_iter().all(f64::is_finite).then_some(bounds)
+    }
 }
 
 pub(super) fn plane_coefficients(plane: &Plane) -> Option<[[Dyadic; 3]; 3]> {
