@@ -613,11 +613,20 @@ impl Table {
         orientation: bool,
     ) -> Result<Option<Curve2D>, StepConvertingError> {
         let trim = Self::compact_declared_uv_on(curve, surface, orientation)?;
-        Ok(trim.map(|mut uv| {
-            if !orientation {
-                uv.invert();
+        Ok(trim.map(|uv| match (orientation, uv) {
+            (false, uv @ (Curve2D::BsplineCurve(_) | Curve2D::NurbsCurve(_))) => {
+                // Reversal is a parameter operator, not a rewrite of literal
+                // source knots. Reflecting coefficients can move a C0 join.
+                let range = uv.range_tuple();
+                let mut reflected = Processor::new(TrimmedCurve::new(Box::new(uv), range));
+                reflected.invert();
+                Curve2D::TrimmedCurve(SourceTrimmedCurve::internal(reflected))
             }
-            uv
+            (false, mut uv) => {
+                uv.invert();
+                uv
+            }
+            (true, uv) => uv,
         }))
     }
 

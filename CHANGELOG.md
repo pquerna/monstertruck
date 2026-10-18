@@ -21,7 +21,9 @@ monstertruck 0.4.0.
   knots no longer become invalid NURBS endpoints in bounded searches, STEP
   closed-edge subdivision or surface inclusion. Inclusion checks borrow active
   knot spans instead of allocating unique-knot vectors or sampling exterior
-  support. Surface point inversion can retain an independently matching seed
+  support. Compact declared spline UV reversals retain literal knots under
+  parameter operators instead of reflecting coefficient arrays.
+  Surface point inversion can retain an independently matching seed
   after a singular-Jacobian refusal; this grants neither a unique inverse nor
   regularity. Inclusion uses the existing hinted-then-unhinted exact solve when
   a previous sample's chart seed cannot advance. Scalar evaluation and strict
