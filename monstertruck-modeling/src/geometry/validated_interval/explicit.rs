@@ -986,10 +986,15 @@ pub(super) fn validate_knots_with_policy(
             return Err(ValidatedGeometryError::InvalidInput);
         }
     }
-    if knots[0] >= knots[knots.len() - 1] {
+    let active = if extrapolate {
+        [knots[0], knots[knots.len() - 1]]
+    } else {
+        [knots[degree], knots[count]]
+    };
+    if active[0] >= active[1] {
         return Err(ValidatedGeometryError::InvalidInput);
     }
-    if !extrapolate && (parameter.lower < knots[0] || parameter.upper > knots[knots.len() - 1]) {
+    if !extrapolate && (parameter.lower < active[0] || parameter.upper > active[1]) {
         return Err(ValidatedGeometryError::ParameterOutOfRange);
     }
     let mut index = 0;
@@ -1007,7 +1012,7 @@ pub(super) fn validate_knots_with_policy(
             && parameter.lower < knot
             && knot < parameter.upper
             && multiplicity > degree.saturating_sub(1);
-        if knots[0] < knot && knot < knots[knots.len() - 1] && (touches_jump || crosses_kink) {
+        if active[0] < knot && knot < active[1] && (touches_jump || crosses_kink) {
             return Err(ValidatedGeometryError::NonSmooth);
         }
     }
@@ -1140,7 +1145,8 @@ fn curve_sum<const N: usize>(
 }
 
 // The caller owns complete immutable knot admission for this same range.
-// Binary searches retain both incident closed spans at an exact knot.
+// Retain both incident closed spans at an interior knot, but only the
+// interior one-sided branch at each regular-domain endpoint.
 fn curve_sum_with_validated_knots<const N: usize>(
     knots: &KnotVector,
     (count, degree): (usize, usize),
@@ -1178,7 +1184,7 @@ fn curve_sum_with_validated_knots<const N: usize>(
         boundary(true)?.min(knots.len() - 1)
     };
     let mut result: Option<ControlSum<N>> = None;
-    for span in first..end {
+    for span in first.max(degree)..end.min(count) {
         budget.charge(1, cancel)?;
         if knots[span] == knots[span + 1] {
             continue;

@@ -255,8 +255,10 @@ impl KnotVector {
                 .floor(t)
                 // SAFETY: `self[0]` is always in the knot vector, so `floor` succeeds.
                 .unwrap_or_else(|| self.floor(self[0]).unwrap());
-            if idx == n {
-                n.saturating_sub(self.strict_multiplicity(n))
+            // At the regular right endpoint use the last nonempty interior
+            // span, even when exterior support knots follow that endpoint.
+            if t == self[n - degree] || idx == n {
+                idx.saturating_sub(self.strict_multiplicity(idx))
             } else {
                 idx
             }

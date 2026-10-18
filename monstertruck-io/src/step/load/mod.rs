@@ -54,7 +54,7 @@ pub enum LoadError {
     Parse(#[from] step_p21::error::Error),
     /// A per-entity conversion from STEP types into `monstertruck` types failed.
     #[error("STEP conversion error: {0}")]
-    Conversion(String),
+    Conversion(#[source] StepConvertingError),
     /// The load SUCCEEDED but lost part of the input.
     ///
     /// Never produced by the ordinary load path -- a lossy load still returns
@@ -68,15 +68,15 @@ pub enum LoadError {
 }
 
 impl From<StepConvertingError> for LoadError {
-    fn from(value: StepConvertingError) -> Self { Self::Conversion(value.to_string()) }
+    fn from(value: StepConvertingError) -> Self { Self::Conversion(value) }
 }
 
 impl From<&str> for LoadError {
-    fn from(value: &str) -> Self { Self::Conversion(value.to_owned()) }
+    fn from(value: &str) -> Self { Self::Conversion(value.into()) }
 }
 
 impl From<String> for LoadError {
-    fn from(value: String) -> Self { Self::Conversion(value) }
+    fn from(value: String) -> Self { Self::Conversion(value.into()) }
 }
 
 use step_geometry::*;
