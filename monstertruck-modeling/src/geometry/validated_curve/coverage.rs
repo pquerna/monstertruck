@@ -7,8 +7,8 @@ use crate::{
     Conic2D, Curve, Curve2D, ParameterBoxClassification, Plane, PreparedFaceParameterDomain,
     Surface, TrimDomainError, ValidatedGeometryBudget, ValidatedGeometryError, ValidatedInterval,
     ValidatedPlaneCandidateWitness, ValidatedPlaneCoverageRejection, ValidatedPlaneCoverageWitness,
-    ValidatedPlaneEndpointWitness, ValidatedPlaneJunctionCondition,
-    ValidatedPlaneJunctionRejection, ValidatedPlaneJunctionWitness,
+    ValidatedPlaneEndpointOrientationWitness, ValidatedPlaneEndpointWitness,
+    ValidatedPlaneJunctionCondition, ValidatedPlaneJunctionRejection, ValidatedPlaneJunctionWitness,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -544,7 +544,8 @@ impl CandidateDiagnostics<'_> {
                         && usize::from(previous.piece_count) >= group.1)
             }
             ValidatedPlaneCoverageWitness::Junction(_)
-            | ValidatedPlaneCoverageWitness::Endpoint(_) => true,
+            | ValidatedPlaneCoverageWitness::Endpoint(_)
+            | ValidatedPlaneCoverageWitness::EndpointOrientation(_) => true,
         }) {
             return;
         }
@@ -595,7 +596,8 @@ impl JunctionDiagnostics<'_> {
                 progress(previous.rejection) >= progress(rejection)
             }
             ValidatedPlaneCoverageWitness::Candidate(_) => false,
-            ValidatedPlaneCoverageWitness::Endpoint(_) => true,
+            ValidatedPlaneCoverageWitness::Endpoint(_)
+            | ValidatedPlaneCoverageWitness::EndpointOrientation(_) => true,
         }) {
             return;
         }

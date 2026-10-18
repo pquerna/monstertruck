@@ -70,8 +70,9 @@ pub use validated_curve::{
 pub use validated_interval::{
     ValidatedCurveJet, ValidatedCurveJet2D, ValidatedGeometryBudget, ValidatedGeometryError,
     ValidatedInterval, ValidatedPlaneCandidateWitness, ValidatedPlaneCoverageRejection,
-    ValidatedPlaneCoverageWitness, ValidatedPlaneEndpointWitness, ValidatedPlaneJunctionCondition,
-    ValidatedPlaneJunctionRejection, ValidatedPlaneJunctionWitness, ValidatedScalarCurveJet,
+    ValidatedPlaneCoverageWitness, ValidatedPlaneEndpointOrientationWitness,
+    ValidatedPlaneEndpointWitness, ValidatedPlaneJunctionCondition, ValidatedPlaneJunctionRejection,
+    ValidatedPlaneJunctionWitness, ValidatedScalarCurveJet,
     ValidatedSurfaceFunctional, ValidatedSurfaceFunctionalJet, ValidatedSurfaceJet,
     validated_boundary_jet, validated_curve_jet, validated_curve_projected_jet,
     validated_curve2d_jet, validated_curve2d_piecewise_jet, validated_sin_cos,

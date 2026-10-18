@@ -177,6 +177,52 @@ pub struct ValidatedPlaneEndpointWitness {
     pub query_bounds: [f64; 2],
 }
 
+/// Fixed-size operands from an original endpoint's strict material-side refusal.
+///
+/// Chart and original-3D root gauges remain distinct. These values diagnose the
+/// failed binding; they grant no endpoint or continuation authority.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ValidatedPlaneEndpointOrientationWitness {
+    /// Actual matched candidate in the original query.
+    pub candidate_index: u32,
+    /// Actual first/last prepared piece selected for that endpoint.
+    pub piece_index: u32,
+    /// Actual original coedge occurrence bound to that endpoint.
+    pub coedge_index: u32,
+    /// Original face carrier index in the candidate source system.
+    pub source_index: u8,
+    /// Front=false, back=true in the ascending candidate parameter.
+    pub endpoint_is_back: bool,
+    /// World coordinate selected from the strict candidate tangent.
+    pub coordinate: u8,
+    /// Complete ascending candidate parameter range.
+    pub candidate_range: [f64; 2],
+    /// Independently isolated chart root and its monotonicity witness.
+    pub chart_root: [[f64; 2]; 2],
+    /// Independently isolated original-3D root and its monotonicity witness.
+    pub original_root: [[f64; 2]; 2],
+    /// Actual original-3D cut parameter supplied by construction genealogy.
+    pub source_cut_parameter: f64,
+    /// Strict original chart height derivative on its retained witness.
+    pub chart_derivative: [f64; 2],
+    /// Strict original-3D height derivative on its retained witness.
+    pub original_derivative: [f64; 2],
+    /// Strict chart crossing determinant on the original root enclosure.
+    pub determinant: [f64; 2],
+    /// Strict candidate tangent component at the bound endpoint.
+    pub candidate_derivative: [f64; 2],
+    /// Original face-use orientation.
+    pub face_orientation: bool,
+    /// Original coedge material orientation, including face-use inversion.
+    pub coedge_orientation: bool,
+    /// Recovered absolute stored-wire direction.
+    pub absolute_orientation: bool,
+    /// Certified positive world-axis direction toward original material.
+    pub material_positive: bool,
+    /// Certified positive world-axis direction of increasing candidate time.
+    pub candidate_positive: bool,
+}
+
 /// Fixed-size evidence from a terminal coverage or mandatory endpoint attempt.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ValidatedPlaneCoverageWitness {
@@ -186,6 +232,8 @@ pub enum ValidatedPlaneCoverageWitness {
     Junction(ValidatedPlaneJunctionWitness),
     /// Mandatory original endpoint preseal refused tube containment.
     Endpoint(ValidatedPlaneEndpointWitness),
+    /// Mandatory original endpoint preseal refused strict material orientation.
+    EndpointOrientation(ValidatedPlaneEndpointOrientationWitness),
 }
 
 /// Failure to establish a native interval geometry certificate.

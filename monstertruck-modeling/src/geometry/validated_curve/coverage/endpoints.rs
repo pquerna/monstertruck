@@ -1236,6 +1236,50 @@ fn endpoint_tube_witness(
     ))
 }
 
+fn endpoint_orientation_witness(
+    candidate: &PreparedValidatedCurve<'_>,
+    prepared: &PreparedEndpoint<'_>,
+    source_index: usize,
+    coordinate: usize,
+    determinant: ValidatedInterval,
+    candidate_derivative: ValidatedInterval,
+    orientations: [bool; 5],
+) -> Option<ValidatedPlaneCoverageWitness> {
+    let binding = &prepared.binding;
+    let piece_index = if binding.endpoint_is_back {
+        candidate.pieces.len().checked_sub(1)?
+    } else {
+        0
+    };
+    let [face_orientation, coedge_orientation, absolute_orientation,
+        material_positive, candidate_positive] = orientations;
+    let bounds = |value: ValidatedInterval| [value.lower, value.upper];
+    // Diagnostic representability never changes the original refusal.
+    Some(ValidatedPlaneCoverageWitness::EndpointOrientation(
+        ValidatedPlaneEndpointOrientationWitness {
+            candidate_index: u32::try_from(binding.candidate_index).ok()?,
+            piece_index: u32::try_from(piece_index).ok()?,
+            coedge_index: u32::try_from(binding.coedge_index).ok()?,
+            source_index: u8::try_from(source_index).ok()?,
+            endpoint_is_back: binding.endpoint_is_back,
+            coordinate: u8::try_from(coordinate).ok()?,
+            candidate_range: candidate.range,
+            chart_root: [prepared.root.parameter, prepared.root.witness],
+            original_root: [prepared.original.parameter, prepared.original.witness],
+            source_cut_parameter: binding.source_cut_parameter,
+            chart_derivative: bounds(prepared.root.derivative),
+            original_derivative: bounds(prepared.original.derivative),
+            determinant: bounds(determinant),
+            candidate_derivative: bounds(candidate_derivative),
+            face_orientation,
+            coedge_orientation,
+            absolute_orientation,
+            material_positive,
+            candidate_positive,
+        },
+    ))
+}
+
 pub(super) fn endpoint_covers(
     context: &FacePlaneContext<'_, '_>,
     candidates: &[&PreparedValidatedCurve<'_>],
@@ -1353,6 +1397,23 @@ pub(super) fn endpoint_covers(
     let candidate_positive =
         sign(endpoint_jet.first[axis]).ok_or(ValidatedGeometryError::NonTransverse)?;
     if material_positive != (candidate_positive != binding.endpoint_is_back) {
+        if let Some(diagnostic) = diagnostic.as_deref_mut() {
+            *diagnostic = endpoint_orientation_witness(
+                candidate,
+                prepared,
+                source_index,
+                axis,
+                determinant,
+                endpoint_jet.first[axis],
+                [
+                    domain.face().orientation(),
+                    boundary.identity.orientation,
+                    absolute_orientation,
+                    material_positive,
+                    candidate_positive,
+                ],
+            );
+        }
         return Ok(EndpointCoverage::Refused(
             "endpoint / oriented material side",
             ValidatedGeometryError::Unresolved,
