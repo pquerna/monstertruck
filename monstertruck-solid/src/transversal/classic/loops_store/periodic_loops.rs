@@ -3,6 +3,7 @@
 //! Native and polygon stores replay the same occurrence-level partition.
 
 use super::*;
+use crate::transversal::integrate::NativeIntersectionParameterWitness;
 use std::mem::size_of;
 
 pub(super) fn intersection_parameter<S>(

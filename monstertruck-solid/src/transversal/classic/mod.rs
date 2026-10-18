@@ -26,8 +26,8 @@ use super::edge_lineage::{
     BooleanCoedgeOrigin, BooleanCoedgeProvenance, EdgeRewrite, EdgeTrace, PairEdgeTrace,
 };
 use super::integrate::{
-    InvalidOutputEdgeIncidenceData, InvalidOutputShellConditionData,
-    NativeIntersectionParameterWitness, ShapeOpsCurve, ShapeOpsError, ShapeOpsSurface,
+    InvalidOutputEdgeIncidenceData, InvalidOutputShellConditionData, ShapeOpsCurve, ShapeOpsError,
+    ShapeOpsSurface,
 };
 use super::prepared::{BooleanWork, MeshShell, PreparedBooleanSource};
 use super::provenance::{
