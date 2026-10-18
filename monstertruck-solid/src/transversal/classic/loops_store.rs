@@ -614,6 +614,37 @@ where
     }
 }
 
+/// Restrict one generated guide to the actual original-contact parameter interval.
+///
+/// Raw interference and projected native leaders retain one paired control per
+/// integer parameter from `build_intersection_curve`. Preserve every control
+/// strictly inside the directed cut interval and replace only its two cut ends.
+/// This is source-contact restriction, not distance-based guide simplification.
+fn restrict_intersection_guide(
+    guide: &mut PolylineCurve,
+    interval: [f64; 2],
+    endpoints: [Point3; 2],
+) -> std::result::Result<(), &'static str> {
+    if guide.len() < 2
+        || !interval.into_iter().all(f64::is_finite)
+        || interval[0] < 0.0
+        || interval[0] >= interval[1]
+        || interval[1] > (guide.len() - 1) as f64
+    {
+        return Err("intersection_original_contact_guide_interval");
+    }
+    let first = interval[0].floor() as usize + 1;
+    let end = interval[1].ceil() as usize;
+    let interior = end - first;
+    if first != 1 && interior != 0 {
+        guide.copy_within(first..end, 1);
+    }
+    guide.truncate(interior + 2);
+    guide[0] = endpoints[0];
+    guide[interior + 1] = endpoints[1];
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BoundaryAttachment {
     wire_index: usize,
@@ -1261,6 +1292,35 @@ where
                                         "collapsed_original_trim_contacts",
                                     ));
                                 }
+                                if polyline.len() != intersection_curve.leader().len() {
+                                    return Err(failure(
+                                        "boundary_contact",
+                                        "unpaired_intersection_guides",
+                                    ));
+                                }
+                                // Invert the actual original contacts before changing any
+                                // guide endpoint. Snapping a distant seed end can retain
+                                // an outside-root tail and reverse its final chord.
+                                let parameter = |point| {
+                                    periodic_loops::intersection_parameter(
+                                        &intersection_curve, point, work,
+                                    ).map_err(|error| match error {
+                                        periodic_loops::AttachmentFailure::Geometry(detail) => {
+                                            failure("boundary_contact_native_parameter", detail)
+                                        }
+                                        periodic_loops::AttachmentFailure::Work(error) => error,
+                                    })
+                                };
+                                let contact_parameters = [
+                                    parameter(front_contact)?,
+                                    parameter(back_contact)?,
+                                ];
+                                if contact_parameters[0] >= contact_parameters[1] {
+                                    return Err(failure(
+                                        "boundary_contact",
+                                        "unordered_original_contacts",
+                                    ));
+                                }
                                 let shared = |origin| {
                                     shared_contact_vertices(
                                         origin,
@@ -1335,8 +1395,6 @@ where
                                         .map_err(|detail| {
                                             failure("boundary_vertex0_front", detail)
                                         })?;
-                                    let polyline = intersection_curve.leader_mut();
-                                    *polyline.first_mut().unwrap() = gv0.point();
                                 }
                                 let idx01 = boundary_attachment(
                                     &geom_loops_store0,
@@ -1378,8 +1436,6 @@ where
                                         .map_err(|detail| {
                                             failure("boundary_vertex0_back", detail)
                                         })?;
-                                    let polyline = intersection_curve.leader_mut();
-                                    *polyline.last_mut().unwrap() = gv1.point();
                                 }
                                 let contact0_front = idx00.map(|_| gv0.point());
                                 let contact0_back = idx01.map(|_| gv1.point());
@@ -1423,8 +1479,6 @@ where
                                         .map_err(|detail| {
                                             failure("boundary_vertex1_front", detail)
                                         })?;
-                                    let polyline = intersection_curve.leader_mut();
-                                    *polyline.first_mut().unwrap() = gv0.point();
                                 }
                                 if contact0_front.is_some_and(|point| !point.near(&gv0.point())) {
                                     return Err(failure(
@@ -1472,8 +1526,6 @@ where
                                         .map_err(|detail| {
                                             failure("boundary_vertex1_back", detail)
                                         })?;
-                                    let polyline = intersection_curve.leader_mut();
-                                    *polyline.last_mut().unwrap() = gv1.point();
                                 }
                                 if contact0_back.is_some_and(|point| !point.near(&gv1.point())) {
                                     return Err(failure(
@@ -1517,11 +1569,19 @@ where
                                     }
                                 }
                                 let mut polyline = polyline;
-                                *polyline.first_mut().unwrap() = pv0.point();
-                                *polyline.last_mut().unwrap() = pv1.point();
-                                let leader = intersection_curve.leader_mut();
-                                *leader.first_mut().unwrap() = gv0.point();
-                                *leader.last_mut().unwrap() = gv1.point();
+                                if let Some(work) = work {
+                                    work.charge(polyline.len().saturating_mul(2))?;
+                                }
+                                restrict_intersection_guide(
+                                    &mut polyline,
+                                    contact_parameters,
+                                    [pv0.point(), pv1.point()],
+                                ).map_err(|detail| failure("boundary_contact_polygon_guide", detail))?;
+                                restrict_intersection_guide(
+                                    intersection_curve.leader_mut(),
+                                    contact_parameters,
+                                    [gv0.point(), gv1.point()],
+                                ).map_err(|detail| failure("boundary_contact_native_guide", detail))?;
                                 periodic_loops::add_intersection(
                                     (polyline, intersection_curve),
                                     Some([(pv0, gv0), (pv1, gv1)]),

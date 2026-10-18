@@ -16,6 +16,14 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Open Boolean intersections invert their actual original trim contacts before
+  modifying generated guide endpoints. Native and polygon leaders retain the
+  same directed raw-index restriction and every interior control; exact shared
+  contact vertices replace only the two restricted ends. Snapping no longer
+  retains an outside-trim guide tail that reverses endpoint continuation.
+  Original source gauges, incidence and strict material-side coverage remain
+  unchanged; no tolerance-based tail removal or retry grants acceptance.
+
 - Original plane-endpoint material-side refusals retain bounded diagnostic
   operands: the actual candidate/coedge/end binding, separate original-3D and
   chart root gauges, strict tangent/determinant signs and stored-wire/face-use
