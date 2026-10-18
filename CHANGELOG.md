@@ -23,6 +23,9 @@ monstertruck 0.4.0.
   retains an outside-trim guide tail that reverses endpoint continuation.
   Original source gauges, incidence and strict material-side coverage remain
   unchanged; no tolerance-based tail removal or retry grants acceptance.
+  Stalled original-contact inversions retain fixed-size native point, range,
+  correction and proposed-versus-clamped parameter operands; these diagnostics
+  neither extend a guide nor grant a root certificate.
 
 - Original plane-endpoint material-side refusals retain bounded diagnostic
   operands: the actual candidate/coedge/end binding, separate original-3D and

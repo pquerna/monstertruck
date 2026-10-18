@@ -330,6 +330,7 @@ mod tests {
             &branch,
             fixture.source[0].front().point(),
             None,
+            None,
         )
         .expect("actual bounded source endpoint consistency");
         assert!(proposal > branch.range_tuple().0);

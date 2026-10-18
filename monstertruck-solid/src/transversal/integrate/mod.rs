@@ -132,6 +132,33 @@ where
 {
 }
 
+/// Fixed-size operands from a stalled original-contact parameter inversion.
+///
+/// These are construction diagnostics, not a root or trim certificate.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeIntersectionParameterWitness {
+    /// Actual original source trim contact requested by the caller.
+    pub contact: [f64; 3],
+    /// Unchanged bounded guide parameter range.
+    pub range: [f64; 2],
+    /// Last evaluated bounded parameter.
+    pub parameter: f64,
+    /// Native projected-curve Newton correction.
+    pub correction: f64,
+    /// Proposed parameter before applying the unchanged bounded range.
+    pub proposed_parameter: f64,
+    /// Proposed parameter after applying that range.
+    pub clamped_parameter: f64,
+    /// Actual projected native point at the last evaluated parameter.
+    pub actual: [f64; 3],
+    /// Unchanged stored guide front and back points.
+    pub guide_ends: [[f64; 3]; 2],
+    /// Stored guide tangent at the last evaluated parameter.
+    pub guide_tangent: [f64; 3],
+    /// Physical projected-curve tangent used in the correction.
+    pub projected_tangent: [f64; 3],
+}
+
 /// Errors for boolean shape operations.
 #[derive(Debug, Error)]
 pub enum ShapeOpsError {
@@ -175,7 +202,7 @@ pub enum ShapeOpsError {
     },
     /// Intersections could not be assembled into consistent face-local loops.
     #[error(
-        "failed to construct boolean intersection loops for faces ({face_index0}, {face_index1}) at {stage}: {detail}."
+        "failed to construct boolean intersection loops for faces ({face_index0}, {face_index1}) at {stage}: {detail}, native_parameter={native_parameter:?}."
     )]
     IntersectionLoopsFailed {
         /// Face ordinal in the first shell.
@@ -186,6 +213,8 @@ pub enum ShapeOpsError {
         stage: &'static str,
         /// Failed operation within the numerical stage.
         detail: &'static str,
+        /// Bounded original-contact inversion operands when that stage stalled.
+        native_parameter: Option<NativeIntersectionParameterWitness>,
     },
     /// Face division failed for one shell.
     #[error(

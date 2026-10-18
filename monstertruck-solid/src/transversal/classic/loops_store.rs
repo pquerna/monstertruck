@@ -998,6 +998,7 @@ where
                     face_index1,
                     stage,
                     detail,
+                    native_parameter: None,
                 };
                 let ori0 = geom_shell0[face_index0].orientation();
                 let ori1 = geom_shell1[face_index1].orientation();
@@ -1302,11 +1303,18 @@ where
                                 // guide endpoint. Snapping a distant seed end can retain
                                 // an outside-root tail and reverse its final chord.
                                 let parameter = |point| {
+                                    let mut diagnostic = None;
                                     periodic_loops::intersection_parameter(
-                                        &intersection_curve, point, work,
+                                        &intersection_curve, point, work, Some(&mut diagnostic),
                                     ).map_err(|error| match error {
                                         periodic_loops::AttachmentFailure::Geometry(detail) => {
-                                            failure("boundary_contact_native_parameter", detail)
+                                            ShapeOpsError::IntersectionLoopsFailed {
+                                                face_index0,
+                                                face_index1,
+                                                stage: "boundary_contact_native_parameter",
+                                                detail,
+                                                native_parameter: diagnostic,
+                                            }
                                         }
                                         periodic_loops::AttachmentFailure::Work(error) => error,
                                     })

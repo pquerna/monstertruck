@@ -111,6 +111,7 @@ where
                                     face_index1: faces[1],
                                     stage: "original_boundary_incidence",
                                     detail,
+                                    native_parameter: None,
                                 }
                             }
                             AttachmentFailure::Work(error) => error,

@@ -9,6 +9,7 @@ pub(super) fn intersection_parameter<S>(
     curve: &IntersectionCurve<PolylineCurve, S, S>,
     point: Point3,
     work: Option<&BooleanWork<'_>>,
+    diagnostic: Option<&mut Option<NativeIntersectionParameterWitness>>,
 ) -> std::result::Result<f64, AttachmentFailure>
 where
     S: ParametricSurface3D + SearchNearestParameter<SurfaceParameter, Point = Point3>,
@@ -59,8 +60,24 @@ where
         if !correction.is_finite() {
             return Err("intersection_chart_native_parameter_step".into());
         }
-        let next = (parameter - correction).clamp(front, back);
+        let proposed_parameter = parameter - correction;
+        let next = proposed_parameter.clamp(front, back);
         if next == parameter {
+            if let Some(diagnostic) = diagnostic {
+                let position = |point: Point3| [point.x, point.y, point.z];
+                *diagnostic = Some(NativeIntersectionParameterWitness {
+                    contact: position(point),
+                    range: [front, back],
+                    parameter,
+                    correction,
+                    proposed_parameter,
+                    clamped_parameter: next,
+                    actual: position(actual),
+                    guide_ends: [position(curve.leader().front()), position(curve.leader().back())],
+                    guide_tangent: [guide.x, guide.y, guide.z],
+                    projected_tangent: [derivative.x, derivative.y, derivative.z],
+                });
+            }
             return Err("intersection_chart_native_parameter_residual".into());
         }
         parameter = next;
@@ -912,7 +929,7 @@ where
                                 .ok_or("intersection_chart_polygon_parameter")?,
                         );
                         let mut polygon_parameter = index as f64 + fraction;
-                        let mut native_parameter = intersection_parameter(&curve, point, work)?;
+                        let mut native_parameter = intersection_parameter(&curve, point, work, None)?;
                         let boundary = &native[side][faces[side]][wire][edge];
                         let (boundary_start, boundary_end) =
                             boundary.with_curve(BoundedCurve::range_tuple);
@@ -1159,7 +1176,7 @@ where
         let parameter = polygon_head_parameter(point.polygon_parameter, previous_polygon_cut);
         polygon_parts.push(cut_polygon(&mut polyline, parameter));
         previous_polygon_cut = point.polygon_parameter;
-        let parameter = intersection_parameter(&curve, point.native.point(), work)?;
+        let parameter = intersection_parameter(&curve, point.native.point(), work, None)?;
         native_parts.push(curve.cut(parameter));
     }
     polygon_parts.push(polyline);
