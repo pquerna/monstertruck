@@ -183,8 +183,8 @@ impl SurfaceCurve3D {
     /// Borrows an explicitly declared pcurve on structurally identical carrier coefficients.
     ///
     /// No sampled carrier recognition, nearest-point recovery or leader probes
-    /// authorize this association. A seam requires exactly two declared chart
-    /// branches; its oriented occurrence selects the corresponding branch.
+    /// authorize this association. A seam requires exactly two distinct complete
+    /// declared chart branches; its oriented occurrence selects the corresponding branch.
     /// Non-seam duplicates resolve only when their complete stored parameter
     /// curves, carriers and input charts are structurally identical.
     /// This preserves source correspondence, not a geometric validity proof.
@@ -211,6 +211,8 @@ impl SurfaceCurve3D {
                 Err(ExactConversionError::MissingSeamParameterBranch)
             } else if candidates.next().is_some() {
                 Err(ExactConversionError::AmbiguousStoredTrim)
+            } else if first == second {
+                Err(ExactConversionError::MissingSeamParameterBranch)
             } else {
                 Ok(if orientation { first } else { second })
             }

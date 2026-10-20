@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 mod periodic_edges;
 mod source_trims;
+use source_trims::OriginalFaceEdgeUse;
 
 /// A compressed shell in the STEP loader's concrete geometry types.
 ///
@@ -683,6 +684,7 @@ impl Table {
         face_sense: bool,
         surface: &Surface,
         face_geometry: &PlaceHolder<SurfaceAnyHolder>,
+        face_edge_uses: &HashMap<u64, OriginalFaceEdgeUse>,
         edges: &[CompressedEdge<Curve3D>],
         eidx_map: &HashMap<u64, usize>,
         sink: &LossSink,
@@ -696,26 +698,20 @@ impl Table {
         let mut lineage = Vec::new();
         for (source_coedge_index, edge_use) in edge_loop.edge_list.iter().enumerate() {
             let source_coedge = Self::ref_id(edge_use);
-            let (source_edge, source_orientation) = match edge_use {
-                PlaceHolder::Owned(EdgeAnyHolder::OrientedEdge(edge)) => {
-                    (edge.edge_element_idx(), edge.orientation)
-                }
-                PlaceHolder::Ref(Name::Entity(id)) => match self.oriented_edge.get(id) {
-                    Some(edge) => (edge.edge_element_idx(), edge.orientation),
-                    None => (Some(*id), true),
-                },
-                _ => (None, true),
-            };
+            let (source_edge, source_orientation) = self.original_edge_use(edge_use);
             let Some(index) = source_edge.and_then(|id| eidx_map.get(&id)).copied() else {
                 sink.lost(Cat::EdgeUse, Why::EdgeUseUnresolved, source_coedge, None);
                 continue;
             };
             let orientation = source_orientation == ori;
             let curve = &edges[index].curve;
-            let source = self.original_trim_source(
-                source_edge.ok_or(ExactConversionError::UnestablishedCurveCorrespondence)?,
-                face_geometry,
-            )?;
+            let original_edge =
+                source_edge.ok_or(ExactConversionError::UnestablishedCurveCorrespondence)?;
+            let edge_use = face_edge_uses
+                .get(&original_edge)
+                .copied()
+                .ok_or(ExactConversionError::UnestablishedCurveCorrespondence)?;
+            let source = self.original_trim_source(original_edge, face_geometry, edge_use)?;
             let trim_curve =
                 Self::compact_declared_trim_with(curve, orientation, &|curve, orientation| {
                     source
@@ -902,6 +898,7 @@ impl Table {
             };
             let face_sense = orientation == face.same_sense;
             let bounds = face.bounds_holder(self);
+            let face_edge_uses = self.original_face_edge_uses(&bounds, face_sense);
             sink.listed(Cat::Wire, bounds.len());
             let mut boundaries = Vec::new();
             let mut wires = Vec::new();
@@ -916,6 +913,7 @@ impl Table {
                     face_sense,
                     &surface,
                     &face.face_geometry,
+                    &face_edge_uses,
                     &edges,
                     &eidx_map,
                     &sink,

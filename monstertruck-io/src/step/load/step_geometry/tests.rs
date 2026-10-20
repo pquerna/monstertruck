@@ -143,12 +143,10 @@ fn declared_seam_pcurves_keep_oriented_two_branch_selection() {
         Err(ExactConversionError::MissingSeamParameterBranch)
     ));
     let duplicates = seam(vec![first.clone(), first.clone()]);
-    assert_eq!(
-        duplicates
-            .declared_parameter_curve_ref_on(&surface, false)
-            .expect("two stored seam branches"),
-        Some(&first)
-    );
+    assert!(matches!(
+        duplicates.declared_parameter_curve_ref_on(&surface, false),
+        Err(ExactConversionError::MissingSeamParameterBranch)
+    ));
     assert!(matches!(
         seam(vec![first.clone(), first.clone(), first])
             .declared_parameter_curve_ref_on(&surface, true),

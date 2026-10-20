@@ -16,6 +16,12 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- STEP seam selection distinguishes missing face-qualified UV from invalid 3D
+  geometry: zero original carrier associations remain inspection-only. Owned
+  seam declarations require two distinct complete parameter representations.
+  Repeated opposed uses of the same original edge in a face cannot borrow the
+  ordinary non-seam identical-duplicate rule as a second seam branch.
+
 - Non-seam STEP surface curves resolve repeated declared pcurves only when the
   complete stored parameter curves, carriers and input charts are structurally
   identical. Different declarations still refuse ambiguous trim correspondence;

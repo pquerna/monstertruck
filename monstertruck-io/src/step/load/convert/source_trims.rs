@@ -9,19 +9,79 @@ enum SourceCurve<'a> {
     Other,
 }
 
+/// Original occurrences in ONE declared face, before periodic subdivision.
+#[derive(Clone, Copy)]
+pub(super) enum OriginalFaceEdgeUse {
+    Single(bool),
+    OpposedPair,
+    Repeated,
+}
+
 /// A borrowed association in one original table's document namespace.
 /// No entity identifier or converted geometry can construct this binding alone.
 pub(super) struct TrimSource<'a> {
     table: &'a Table,
     curve: SourceCurve<'a>,
     carrier: Option<u64>,
+    edge_use: OriginalFaceEdgeUse,
 }
 
 impl Table {
+    pub(super) fn original_edge_use(
+        &self,
+        edge_use: &PlaceHolder<EdgeAnyHolder>,
+    ) -> (Option<u64>, bool) {
+        match edge_use {
+            PlaceHolder::Owned(EdgeAnyHolder::OrientedEdge(edge)) => {
+                (edge.edge_element_idx(), edge.orientation)
+            }
+            PlaceHolder::Ref(Name::Entity(id)) => match self.oriented_edge.get(id) {
+                Some(edge) => (edge.edge_element_idx(), edge.orientation),
+                None => (Some(*id), true),
+            },
+            _ => (None, true),
+        }
+    }
+
+    pub(super) fn original_face_edge_uses(
+        &self,
+        bounds: &[(Option<u64>, Option<FaceBoundHolder>)],
+        face_sense: bool,
+    ) -> HashMap<u64, OriginalFaceEdgeUse> {
+        let mut uses = HashMap::new();
+        for bound in bounds.iter().filter_map(|(_, bound)| bound.as_ref()) {
+            let edge_loop = match &bound.bound {
+                PlaceHolder::Owned(edge_loop) => Some(edge_loop),
+                PlaceHolder::Ref(Name::Entity(id)) => self.edge_loop.get(id),
+                _ => None,
+            };
+            let Some(edge_loop) = edge_loop else { continue };
+            let absolute = Self::absolute_bound_orientation(bound, face_sense);
+            for edge in &edge_loop.edge_list {
+                let (Some(edge), orientation) = self.original_edge_use(edge) else {
+                    continue;
+                };
+                let orientation = orientation == absolute;
+                uses.entry(edge)
+                    .and_modify(|prior| {
+                        *prior = match *prior {
+                            OriginalFaceEdgeUse::Single(first) if first != orientation => {
+                                OriginalFaceEdgeUse::OpposedPair
+                            }
+                            _ => OriginalFaceEdgeUse::Repeated,
+                        };
+                    })
+                    .or_insert(OriginalFaceEdgeUse::Single(orientation));
+            }
+        }
+        uses
+    }
+
     pub(super) fn original_trim_source<'a>(
         &'a self,
         edge: u64,
         face_geometry: &PlaceHolder<SurfaceAnyHolder>,
+        edge_use: OriginalFaceEdgeUse,
     ) -> Result<TrimSource<'a>, StepConvertingError> {
         let edge = self
             .edge_curve
@@ -31,6 +91,7 @@ impl Table {
             table: self,
             curve: self.original_trim_curve(&edge.edge_geometry, 0)?,
             carrier: Self::ref_id(face_geometry),
+            edge_use,
         })
     }
 
@@ -115,6 +176,8 @@ impl TrimSource<'_> {
                 let mut first = None;
                 let mut second = None;
                 let mut count = 0;
+                let seam = converted.kind() == SurfaceCurveKind::SeamCurve
+                    || matches!(self.edge_use, OriginalFaceEdgeUse::OpposedPair);
                 // Conversion preserves the original association list verbatim.
                 // Pair declarations with their conversions, then select by the
                 // original reference, never by list position or carrier proximity.
@@ -150,16 +213,24 @@ impl TrimSource<'_> {
                     count += 1;
                     if count == 1 {
                         first = Some(candidate);
-                    } else if converted.kind() == SurfaceCurveKind::SeamCurve {
+                    } else if seam {
                         second = Some(candidate);
                     } else if first != Some(candidate) {
                         return Err(ExactConversionError::AmbiguousStoredTrim.into());
                     }
                 }
-                if converted.kind() == SurfaceCurveKind::SeamCurve {
+                // No declared association to this ORIGINAL face is availability
+                // failure, not invalid 3D geometry. Keep inspection possible.
+                if count == 0 {
+                    return Ok(None);
+                }
+                if matches!(self.edge_use, OriginalFaceEdgeUse::Repeated) {
+                    return Err(ExactConversionError::AmbiguousStoredTrim.into());
+                }
+                if seam {
                     match count {
-                        0 | 1 => Err(ExactConversionError::MissingSeamParameterBranch.into()),
-                        2 => Ok(if orientation { first } else { second }),
+                        2 if first != second => Ok(if orientation { first } else { second }),
+                        1 | 2 => Err(ExactConversionError::MissingSeamParameterBranch.into()),
                         _ => Err(ExactConversionError::AmbiguousStoredTrim.into()),
                     }
                 } else {
@@ -172,7 +243,13 @@ impl TrimSource<'_> {
                 };
                 match (self.carrier, Table::ref_id(&source.basis_surface)) {
                     (Some(carrier), Some(original)) if carrier != original => Ok(None),
-                    (Some(_), Some(_)) if converted.surface() == surface => Ok(Some(converted)),
+                    (Some(_), Some(_)) if converted.surface() == surface => {
+                        if matches!(self.edge_use, OriginalFaceEdgeUse::Single(_)) {
+                            Ok(Some(converted))
+                        } else {
+                            Err(ExactConversionError::MissingSeamParameterBranch.into())
+                        }
+                    }
                     (Some(_), Some(_)) => Err(failure().into()),
                     _ if converted.surface() != surface => Ok(None),
                     _ => Err(failure().into()),
@@ -188,7 +265,7 @@ mod tests {
     use super::*;
     use std::f64::consts::TAU;
 
-    fn cylinder_source(second_basis: u64, second_face: u64) -> Table {
+    fn cylinder_source(second_basis: u64, second_face: u64, kind: &str) -> Table {
         // Two half-cylinder faces share both vertical edges and four cap arcs.
         // The equal cylindrical declarations have distinct original identities.
         let source = format!(
@@ -221,7 +298,7 @@ mod tests {
              #42=DEFINITIONAL_REPRESENTATION('',(#39),#41);\n\
              #43=DEFINITIONAL_REPRESENTATION('',(#40),#41);\n\
              #44=PCURVE('',#10,#42);\n#45=PCURVE('',#{second_basis},#43);\n\
-             #46=SURFACE_CURVE('',#29,(#44,#45),.PCURVE_S1.);\n\
+             #46={kind}('',#29,(#44,#45),.PCURVE_S1.);\n\
              #47=EDGE_CURVE('',#24,#25,#46,.T.);\n\
              #48=EDGE_CURVE('',#26,#27,#30,.T.);\n\
              #49=EDGE_CURVE('',#24,#26,#31,.T.);\n\
@@ -257,7 +334,7 @@ mod tests {
 
     #[test]
     fn original_face_ids_select_equal_carrier_uv_branches_without_splitting_edges() {
-        let table = cylinder_source(11, 11);
+        let table = cylinder_source(11, 11, "SURFACE_CURVE");
         assert!(table.entity_report.is_empty());
         let (solid, reports) = table
             .to_compressed_trimmed_solid_reported(&table.manifold_solid_brep[&85])
@@ -306,7 +383,11 @@ mod tests {
             Matrix4::from_translation(Vector3::new(0.0, 0.0, 1.0)),
         )));
         let binding = table
-            .original_trim_source(47, &table.face_surface[&80].face_geometry)
+            .original_trim_source(
+                47,
+                &table.face_surface[&80].face_geometry,
+                OriginalFaceEdgeUse::Single(true),
+            )
             .expect("the original face binding resolves");
         let error = Table::compact_declared_trim_with(&moved, true, &|curve, orientation| {
             binding
@@ -322,7 +403,7 @@ mod tests {
 
     #[test]
     fn original_face_binding_refuses_mismatched_missing_and_ambiguous_identity() {
-        let mismatched = cylinder_source(11, 14);
+        let mismatched = cylinder_source(11, 14, "SURFACE_CURVE");
         let (solid, reports) = mismatched
             .to_compressed_trimmed_solid_reported(&mismatched.manifold_solid_brep[&85])
             .expect("a face without an original matching pcurve retains unavailable UV");
@@ -341,7 +422,7 @@ mod tests {
         };
         assert_eq!(original.associated_geometry().len(), 2);
 
-        let ambiguous = cylinder_source(10, 11);
+        let ambiguous = cylinder_source(10, 11, "SURFACE_CURVE");
         let error = ambiguous
             .to_compressed_trimmed_solid_reported(&ambiguous.manifold_solid_brep[&85])
             .expect_err("distinct branches on the same original carrier remain ambiguous");
@@ -356,7 +437,7 @@ mod tests {
             "unexpected same-source ambiguity refusal: {error:?}"
         );
 
-        let mut missing = cylinder_source(11, 11);
+        let mut missing = cylinder_source(11, 11, "SURFACE_CURVE");
         let carrier = missing.cylindrical_surface[&10].clone();
         // An inline face carrier has coefficients but no original entity ID.
         missing
@@ -379,5 +460,145 @@ mod tests {
             ),
             "unexpected missing-source refusal: {error:?}"
         );
+    }
+
+    #[test]
+    fn seam_without_original_face_association_keeps_shared_inspection_geometry() {
+        let mut table = cylinder_source(11, 14, "SEAM_CURVE");
+        table
+            .face_surface
+            .get_mut(&80)
+            .expect("first original face")
+            .face_geometry = PlaceHolder::Ref(Name::Entity(14));
+        let (solid, reports) = table
+            .to_compressed_trimmed_solid_reported(&table.manifold_solid_brep[&85])
+            .expect("unbound UV must not invalidate the original spatial solid");
+        assert!(reports[0].is_lossless());
+        assert_eq!(solid.boundaries[0].faces.len(), 4);
+        assert_eq!(solid.boundaries[0].edges.len(), 6);
+        let mut shared = None;
+        for face in 0..2 {
+            let uses = &reports[0].source_shells()[0].faces[face].wires[0].coedges;
+            let index = uses
+                .iter()
+                .position(|use_| use_.source_edge == Some(47))
+                .expect("the original seam edge remains in each source face");
+            let use_ = &solid.boundaries[0].faces[face].boundaries[0][index];
+            assert!(use_.trim_curve.is_none());
+            if let Some(prior) = shared {
+                assert_eq!(use_.index, prior);
+            }
+            shared = Some(use_.index);
+        }
+    }
+
+    #[test]
+    fn bound_seam_requires_two_distinct_original_parameter_branches() {
+        let table = cylinder_source(10, 10, "SEAM_CURVE");
+        let (solid, reports) = table
+            .to_compressed_trimmed_solid_reported(&table.manifold_solid_brep[&85])
+            .expect("two distinct source-bound seam branches resolve by use orientation");
+        for face in 0..2 {
+            let uses = &reports[0].source_shells()[0].faces[face].wires[0].coedges;
+            let index = uses
+                .iter()
+                .position(|use_| use_.source_edge == Some(47))
+                .expect("the source seam is retained");
+            let use_ = &solid.boundaries[0].faces[face].boundaries[0][index];
+            let uv = use_
+                .trim_curve
+                .as_ref()
+                .expect("the actual oriented branch is bound");
+            assert_eq!(uv.front().x, if use_.orientation { 0.0 } else { TAU });
+            assert_eq!(uv.back().x, uv.front().x);
+        }
+        let mut duplicate = cylinder_source(10, 10, "SEAM_CURVE");
+        let source = duplicate.surface_curve.get_mut(&46).expect("original seam");
+        source.associated_geometry[1] = source.associated_geometry[0].clone();
+        for malformed in [cylinder_source(11, 11, "SEAM_CURVE"), duplicate] {
+            let error = malformed
+                .to_compressed_trimmed_solid_reported(&malformed.manifold_solid_brep[&85])
+                .expect_err("one distinct owned branch cannot provide a seam pair");
+            let LoadError::Conversion(error) = error else {
+                panic!("typed conversion refusal");
+            };
+            assert!(matches!(
+                error.downcast_ref::<ExactConversionError>(),
+                Some(ExactConversionError::MissingSeamParameterBranch)
+            ));
+        }
+    }
+
+    #[test]
+    fn generic_surface_curve_duplicates_cannot_supply_an_actual_face_seam() {
+        let mut table = cylinder_source(10, 10, "SURFACE_CURVE");
+        let source = table
+            .surface_curve
+            .get_mut(&46)
+            .expect("original surface curve");
+        source.associated_geometry[1] = source.associated_geometry[0].clone();
+        table
+            .to_compressed_trimmed_solid_reported(&table.manifold_solid_brep[&85])
+            .expect("ordinary identical non-seam declarations still resolve");
+        // The same source edge now occurs oppositely in TWO original bounds
+        // of this actual face. Equality of two entries is not a seam pair.
+        table
+            .face_surface
+            .get_mut(&80)
+            .expect("original face")
+            .bounds
+            .push(PlaceHolder::Ref(Name::Entity(77)));
+        let mut paired = cylinder_source(10, 10, "SURFACE_CURVE");
+        // Author one complete cylinder side, rather than two half-face uses.
+        // Its two seam occurrences belong to this SAME original face.
+        paired
+            .edge_loop
+            .get_mut(&72)
+            .expect("original side loop")
+            .edge_list = [60, 64, 65, 66, 62, 63]
+            .map(|id| PlaceHolder::Ref(Name::Entity(id)))
+            .into();
+        paired.shell.get_mut(&84).expect("original shell").cfs_faces = [80, 82, 83]
+            .map(|id| PlaceHolder::Ref(Name::Entity(id)))
+            .into();
+        paired
+            .surface_curve
+            .get_mut(&46)
+            .expect("original surface curve")
+            .associated_geometry
+            .swap(0, 1);
+        let (solid, reports) = paired
+            .to_compressed_trimmed_solid_reported(&paired.manifold_solid_brep[&85])
+            .expect("actual paired occurrences select two distinct source-bound branches");
+        assert_eq!(solid.boundaries[0].faces.len(), 3);
+        assert_eq!(solid.boundaries[0].edges.len(), 5);
+        let mut count = 0;
+        for (index, source) in reports[0].source_shells()[0].faces[0].wires[0]
+            .coedges
+            .iter()
+            .enumerate()
+        {
+            if source.source_edge != Some(47) {
+                continue;
+            }
+            let use_ = &solid.boundaries[0].faces[0].boundaries[0][index];
+            let uv = use_
+                .trim_curve
+                .as_ref()
+                .expect("the actual seam occurrence has UV");
+            assert_eq!(uv.front().x, if use_.orientation { TAU } else { 0.0 });
+            count += 1;
+        }
+        assert_eq!(count, 2);
+        let error = table
+            .to_compressed_trimmed_solid_reported(&table.manifold_solid_brep[&85])
+            .expect_err("a generic SURFACE_CURVE cannot hide a one-branch real seam");
+        let LoadError::Conversion(error) = error else {
+            panic!("typed conversion refusal");
+        };
+        assert!(matches!(
+            error.downcast_ref::<ExactConversionError>(),
+            Some(ExactConversionError::MissingSeamParameterBranch)
+        ));
     }
 }
