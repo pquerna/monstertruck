@@ -6,6 +6,7 @@ use monstertruck_topology::compress::*;
 use std::collections::HashSet;
 
 mod periodic_edges;
+mod source_trims;
 
 /// A compressed shell in the STEP loader's concrete geometry types.
 ///
@@ -607,12 +608,30 @@ impl Table {
     }
 
     /// Copies only the declared UV geometry, never its carrier surface.
+    #[cfg(test)]
     fn compact_declared_trim_on(
         curve: &Curve3D,
         surface: &Surface,
         orientation: bool,
     ) -> Result<Option<Curve2D>, StepConvertingError> {
-        let trim = Self::compact_declared_uv_on(curve, surface, orientation)?;
+        Self::compact_declared_trim_with(curve, orientation, &|curve, orientation| {
+            let declared = match curve {
+                Curve3D::SurfaceCurve(curve) => {
+                    curve.declared_parameter_curve_ref_on(surface, orientation)?
+                }
+                Curve3D::ParameterCurve(curve) if curve.surface() == surface => Some(curve),
+                _ => None,
+            };
+            Ok(declared.map(|curve| curve.curve().clone()))
+        })
+    }
+
+    fn compact_declared_trim_with(
+        curve: &Curve3D,
+        orientation: bool,
+        select: &impl Fn(&Curve3D, bool) -> Result<Option<Curve2D>, StepConvertingError>,
+    ) -> Result<Option<Curve2D>, StepConvertingError> {
+        let trim = Self::compact_declared_uv_on(curve, select, orientation)?;
         Ok(trim.map(|uv| match (orientation, uv) {
             (false, uv @ (Curve2D::BsplineCurve(_) | Curve2D::NurbsCurve(_))) => {
                 // Reversal is a parameter operator, not a rewrite of literal
@@ -632,18 +651,20 @@ impl Table {
 
     fn compact_declared_uv_on(
         curve: &Curve3D,
-        surface: &Surface,
+        select: &impl Fn(&Curve3D, bool) -> Result<Option<Curve2D>, StepConvertingError>,
         branch_orientation: bool,
     ) -> Result<Option<Curve2D>, StepConvertingError> {
         if let Curve3D::TrimmedCurve(curve) = curve {
-            if *curve.transform() != Matrix4::identity() {
-                return Err(ExactConversionError::UnestablishedCurveCorrespondence.into());
-            }
             let basis = Self::compact_declared_uv_on(
                 curve.entity().curve().as_ref(),
-                surface,
+                select,
                 branch_orientation == curve.orientation(),
             )?;
+            // A spatial wrapper with no declared UV transports no association.
+            // A retained declaration still requires the original identity map.
+            if basis.is_some() && *curve.transform() != Matrix4::identity() {
+                return Err(ExactConversionError::UnestablishedCurveCorrespondence.into());
+            }
             return Ok(basis.map(|basis| {
                 let mut trim =
                     Processor::new(TrimmedCurve::new(Box::new(basis), curve.entity().range()));
@@ -653,14 +674,7 @@ impl Table {
                 Curve2D::TrimmedCurve(SourceTrimmedCurve::internal(trim))
             }));
         }
-        let declared = match curve {
-            Curve3D::SurfaceCurve(curve) => {
-                curve.declared_parameter_curve_ref_on(surface, branch_orientation)?
-            }
-            Curve3D::ParameterCurve(curve) if curve.surface() == surface => Some(curve),
-            _ => None,
-        };
-        Ok(declared.map(|curve| curve.curve().clone()))
+        select(curve, branch_orientation)
     }
 
     fn compact_face_bound(
@@ -668,6 +682,7 @@ impl Table {
         bound: FaceBoundHolder,
         face_sense: bool,
         surface: &Surface,
+        face_geometry: &PlaceHolder<SurfaceAnyHolder>,
         edges: &[CompressedEdge<Curve3D>],
         eidx_map: &HashMap<u64, usize>,
         sink: &LossSink,
@@ -697,7 +712,16 @@ impl Table {
             };
             let orientation = source_orientation == ori;
             let curve = &edges[index].curve;
-            let trim_curve = Self::compact_declared_trim_on(curve, surface, orientation)?;
+            let source = self.original_trim_source(
+                source_edge.ok_or(ExactConversionError::UnestablishedCurveCorrespondence)?,
+                face_geometry,
+            )?;
+            let trim_curve =
+                Self::compact_declared_trim_with(curve, orientation, &|curve, orientation| {
+                    source
+                        .select(curve, surface, orientation)
+                        .map(|trim| trim.map(|trim| trim.curve().clone()))
+                })?;
             uses.push(CompressedEdgeUse {
                 index,
                 orientation,
@@ -887,8 +911,15 @@ impl Table {
                     continue;
                 };
                 let source_wire = Self::ref_id(&bound.bound);
-                let Some((wire, coedges)) =
-                    self.compact_face_bound(bound, face_sense, &surface, &edges, &eidx_map, &sink)?
+                let Some((wire, coedges)) = self.compact_face_bound(
+                    bound,
+                    face_sense,
+                    &surface,
+                    &face.face_geometry,
+                    &edges,
+                    &eidx_map,
+                    &sink,
+                )?
                 else {
                     continue;
                 };
@@ -1170,8 +1201,9 @@ impl Table {
 
     /// Constructs a trimmed solid together with every shell's source loss report.
     ///
-    /// The geometry and retained source pcurves are converted once. Declared
-    /// seam branches use structural carrier correspondence; an unavailable
+    /// The geometry and retained source pcurves are converted once. Original
+    /// face and pcurve carrier references establish their association within
+    /// this table; structural carrier agreement remains required. An unavailable
     /// pcurve remains absent and is not a trim-coverage certificate.
     ///
     /// Only declared UV geometry is copied into each coedge, in that use's

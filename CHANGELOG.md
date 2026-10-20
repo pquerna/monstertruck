@@ -21,6 +21,14 @@ monstertruck 0.4.0.
   identical. Different declarations still refuse ambiguous trim correspondence;
   oriented seam selection still requires exactly two stored branches.
 
+- Compact STEP solid conversion binds declared coedge UV to the actual face's
+  original carrier reference within the source table. Equal carrier coefficients
+  no longer confuse distinct face declarations at a cylindrical cut. Shared edge
+  geometry and every associated pcurve remain intact. Unavailable face-local UV
+  remains absent; attempting an unproved or contradictory association refuses.
+  Geometry-only trim lookup remains ambiguous for genuinely different non-seam
+  branches.
+
 - Rational curves preserve the regular parameter domain of their homogeneous
   B-spline, matching polynomial curves and rational surfaces. Unclamped exterior
   knots no longer become invalid NURBS endpoints in bounded searches, STEP
