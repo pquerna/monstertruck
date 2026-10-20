@@ -16,6 +16,11 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Non-seam STEP surface curves resolve repeated declared pcurves only when the
+  complete stored parameter curves, carriers and input charts are structurally
+  identical. Different declarations still refuse ambiguous trim correspondence;
+  oriented seam selection still requires exactly two stored branches.
+
 - Rational curves preserve the regular parameter domain of their homogeneous
   B-spline, matching polynomial curves and rational surfaces. Unclamped exterior
   knots no longer become invalid NURBS endpoints in bounded searches, STEP

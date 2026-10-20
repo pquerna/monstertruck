@@ -185,6 +185,8 @@ impl SurfaceCurve3D {
     /// No sampled carrier recognition, nearest-point recovery or leader probes
     /// authorize this association. A seam requires exactly two declared chart
     /// branches; its oriented occurrence selects the corresponding branch.
+    /// Non-seam duplicates resolve only when their complete stored parameter
+    /// curves, carriers and input charts are structurally identical.
     /// This preserves source correspondence, not a geometric validity proof.
     pub fn declared_parameter_curve_ref_on(
         &self,
@@ -212,7 +214,11 @@ impl SurfaceCurve3D {
             } else {
                 Ok(if orientation { first } else { second })
             }
-        } else if second.is_some() {
+        } else if second
+            .into_iter()
+            .chain(candidates)
+            .any(|candidate| first != Some(candidate))
+        {
             Err(ExactConversionError::AmbiguousStoredTrim)
         } else {
             Ok(first)
