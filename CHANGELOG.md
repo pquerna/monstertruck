@@ -14,6 +14,17 @@ monstertruck 0.4.0.
 
 ## Unreleased -- Spiling public fork
 
+### Added
+
+- Public `validated_surface_position_bounds` shares the original coefficient-first
+  functional evaluator, retaining only zeroth-order Taylor coefficients without
+  granting derivative, regularity, smoothness or normal authority. First-order
+  surface functionals and Hessian surface jets likewise avoid higher unrequested
+  orders; third-derivative curve consumers keep their existing order. Original
+  source evidence, C0 admission, denominator checks, cumulative work limits and
+  cancellation remain in the shared pipeline. Tensor intersection work charges
+  only the coefficients actually intersected.
+
 ### Fixed
 
 - STEP seam selection distinguishes missing face-qualified UV from invalid 3D

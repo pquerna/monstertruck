@@ -1,5 +1,5 @@
 use super::{
-    ONE, Taylor, ValidatedCurveJet, ValidatedCurveJet2D, ValidatedGeometryBudget,
+    ONE, Taylor, TaylorJet, ValidatedCurveJet, ValidatedCurveJet2D, ValidatedGeometryBudget,
     ValidatedGeometryError, ValidatedInterval, ValidatedSurfaceJet, curve_jet_from_taylor,
     interval_range,
 };
@@ -42,8 +42,8 @@ pub fn validated_curve_jet(
 }
 
 /// Zeroth-order native image bounds across continuous C0 source knots.
-/// This uses the same outward basis and denominator arithmetic, with constant
-/// Taylor inputs so derivative overflow cannot obstruct a position-only query.
+/// This uses the same outward basis and denominator arithmetic, retaining only
+/// the zeroth Taylor coefficient and performing no derivative arithmetic.
 pub(crate) fn validated_curve_position_bounds(
     curve: &Curve,
     range: [f64; 2],
@@ -52,7 +52,7 @@ pub(crate) fn validated_curve_position_bounds(
 ) -> Result<[ValidatedInterval; 3], ValidatedGeometryError> {
     let value = curve_taylor_with_policy(
         curve,
-        Taylor::interval(interval_range(range)?),
+        TaylorJet::<1>::interval(interval_range(range)?),
         0,
         false,
         true,
@@ -307,6 +307,8 @@ pub fn validated_boundary_jet(
 /// separated from zero. T-spline arithmetic is not admitted. Processor matrices
 /// must be finite. Homogeneous quotients include their parameter derivatives;
 /// a denominator not separated from zero is a typed refusal.
+/// Arithmetic retains exactly the second order returned by
+/// [`ValidatedSurfaceJet`], without constructing third derivatives.
 pub fn validated_surface_jet(
     surface: &Surface,
     range: [[f64; 2]; 2],
@@ -330,20 +332,53 @@ pub fn validated_surface_piecewise_jet(
     surface_jet_with_policy(surface, range, true, budget, cancel)
 }
 
-/// Zeroth-order original carrier image across continuous C0 source knots.
-/// Constant Taylor inputs avoid derivative overflow in position-only proofs.
-pub(crate) fn validated_surface_position_bounds(
+/// Encloses the zeroth-order original carrier image across continuous C0 knots.
+///
+/// Only zeroth-order coefficients are retained in the shared native arithmetic:
+/// no derivative convolution, intersection or quotient expansion is performed.
+/// Coordinate functionals use the same original-coefficient evidence and pole
+/// admission as [`super::projection::validated_surface_functional_jets`].
+/// Successful evaluation grants no derivative, regularity or normal authority.
+/// Invalid ranges, unsupported sources, nonfinite enclosures, exhausted budgets
+/// and cancellation retain the same typed errors as [`validated_surface_jet`].
+///
+/// ```
+/// use monstertruck_modeling::{
+///     Plane, Point3, Surface, ValidatedGeometryBudget, validated_surface_position_bounds,
+/// };
+/// use std::sync::atomic::AtomicBool;
+///
+/// # fn main() -> Result<(), monstertruck_modeling::ValidatedGeometryError> {
+/// let surface = Surface::Plane(Plane::new(
+///     Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0),
+/// ));
+/// let image = validated_surface_position_bounds(
+///     &surface, [[0.0, 1.0]; 2],
+///     &mut ValidatedGeometryBudget::new(1_000), &AtomicBool::new(false),
+/// )?;
+/// assert!(image[0].lower <= 0.0 && image[0].upper >= 1.0);
+/// assert!(image[1].lower <= 0.0 && image[1].upper >= 1.0);
+/// assert!(image[2].lower <= 0.0 && image[2].upper >= 0.0);
+/// # Ok(())
+/// # }
+/// ```
+pub fn validated_surface_position_bounds(
     surface: &Surface,
     range: [[f64; 2]; 2],
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<[ValidatedInterval; 3], ValidatedGeometryError> {
-    let value = surface_taylor_with_policy(
+    let functionals = std::array::from_fn(|axis| super::projection::ValidatedSurfaceFunctional {
+        direction: std::array::from_fn(|i| {
+            ValidatedInterval::point(if i == axis { 1.0 } else { 0.0 })
+        }),
+        origin: [super::ZERO; 3],
+        offset: super::ZERO,
+    });
+    let value = super::projection::surface_functional_taylors::<3, 1>(
         surface,
-        Taylor::interval(interval_range(range[0])?),
-        Taylor::interval(interval_range(range[1])?),
-        0,
-        true,
+        range,
+        functionals,
         budget,
         cancel,
     )?;
@@ -359,8 +394,8 @@ fn surface_jet_with_policy(
 ) -> Result<ValidatedSurfaceJet, ValidatedGeometryError> {
     let value = surface_taylor_with_policy(
         surface,
-        Taylor::variable(interval_range(range[0])?, 0),
-        Taylor::variable(interval_range(range[1])?, 1),
+        TaylorJet::<3>::variable(interval_range(range[0])?, 0),
+        TaylorJet::<3>::variable(interval_range(range[1])?, 1),
         0,
         allow_c0,
         budget,
@@ -377,36 +412,36 @@ fn surface_jet_with_policy(
     })
 }
 
-pub(crate) fn curve_taylor(
+pub(crate) fn curve_taylor<const D: usize>(
     curve: &Curve,
-    t: Taylor,
+    t: TaylorJet<D>,
     nesting: usize,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<[Taylor; 3], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; 3], ValidatedGeometryError> {
     curve_taylor_with_extension(curve, t, nesting, false, budget, cancel)
 }
 
-pub(super) fn curve_taylor_with_extension(
+pub(super) fn curve_taylor_with_extension<const D: usize>(
     curve: &Curve,
-    t: Taylor,
+    t: TaylorJet<D>,
     nesting: usize,
     conic_extension: bool,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<[Taylor; 3], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; 3], ValidatedGeometryError> {
     curve_taylor_with_policy(curve, t, nesting, conic_extension, false, budget, cancel)
 }
 
-fn curve_taylor_with_policy(
+fn curve_taylor_with_policy<const D: usize>(
     curve: &Curve,
-    t: Taylor,
+    t: TaylorJet<D>,
     nesting: usize,
     conic_extension: bool,
     allow_c0: bool,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<[Taylor; 3], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; 3], ValidatedGeometryError> {
     budget.charge(1, cancel)?;
     if nesting > MAX_NATIVE_GEOMETRY_NESTING {
         return Err(ValidatedGeometryError::ResourceLimit);
@@ -489,26 +524,26 @@ fn curve_taylor_with_policy(
     Ok(value)
 }
 
-pub(super) fn curve2d_taylor(
+pub(super) fn curve2d_taylor<const D: usize>(
     curve: &Curve2D,
-    t: Taylor,
+    t: TaylorJet<D>,
     nesting: usize,
     conic_extension: bool,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<[Taylor; 2], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; 2], ValidatedGeometryError> {
     curve2d_taylor_with_policy(curve, t, nesting, conic_extension, false, budget, cancel)
 }
 
-pub(super) fn curve2d_taylor_with_policy(
+pub(super) fn curve2d_taylor_with_policy<const D: usize>(
     curve: &Curve2D,
-    t: Taylor,
+    t: TaylorJet<D>,
     nesting: usize,
     conic_extension: bool,
     allow_c0: bool,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<[Taylor; 2], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; 2], ValidatedGeometryError> {
     budget.charge(1, cancel)?;
     if nesting > MAX_NATIVE_GEOMETRY_NESTING {
         return Err(ValidatedGeometryError::ResourceLimit);
@@ -548,7 +583,7 @@ pub(super) fn curve2d_taylor_with_policy(
                 return Err(ValidatedGeometryError::ParameterOutOfRange);
             }
             if allow_c0 {
-                let mut result: Option<[Taylor; 2]> = None;
+                let mut result: Option<[TaylorJet<D>; 2]> = None;
                 for index in 0..curve.len() - 1 {
                     budget.charge(1, cancel)?;
                     let Some(part) = clipped_parameter(t, index as f64, (index + 1) as f64) else {
@@ -558,7 +593,7 @@ pub(super) fn curve2d_taylor_with_policy(
                     let value = line_taylor(
                         [p.x, p.y],
                         [q.x, q.y],
-                        part - Taylor::constant(index as f64),
+                        part - TaylorJet::<D>::constant(index as f64),
                     )?;
                     result = Some(match result {
                         None => value,
@@ -573,7 +608,11 @@ pub(super) fn curve2d_taylor_with_policy(
                 let index = (range.midpoint().floor() as usize).min(curve.len() - 2);
                 let p = curve[index];
                 let q = curve[index + 1];
-                line_taylor([p.x, p.y], [q.x, q.y], t - Taylor::constant(index as f64))?
+                line_taylor(
+                    [p.x, p.y],
+                    [q.x, q.y],
+                    t - TaylorJet::<D>::constant(index as f64),
+                )?
             }
         }
         Curve2D::Conic(conic) => {
@@ -618,11 +657,14 @@ pub(super) fn curve2d_taylor_with_policy(
                     let positive = parameter.exp()?;
                     let negative = (-parameter).exp()?;
                     [
-                        (positive + negative) * Taylor::constant(0.5),
-                        (positive - negative) * Taylor::constant(0.5),
+                        (positive + negative) * TaylorJet::<D>::constant(0.5),
+                        (positive - negative) * TaylorJet::<D>::constant(0.5),
                     ]
                 }
-                _ => [parameter * parameter, parameter * Taylor::constant(2.0)],
+                _ => [
+                    parameter * parameter,
+                    parameter * TaylorJet::<D>::constant(2.0),
+                ],
             };
             transform2(transform, point)?
         }
@@ -647,20 +689,20 @@ pub(super) fn curve2d_taylor_with_policy(
     Ok(value)
 }
 
-pub(crate) fn processed_parameter(
+pub(crate) fn processed_parameter<const D: usize>(
     orientation: bool,
     range: Option<(f64, f64)>,
-    t: Taylor,
-) -> Result<Taylor, ValidatedGeometryError> {
+    t: TaylorJet<D>,
+) -> Result<TaylorJet<D>, ValidatedGeometryError> {
     processed_parameter_with_extension(orientation, range, t, false)
 }
 
-pub(super) fn processed_parameter_with_extension(
+pub(super) fn processed_parameter_with_extension<const D: usize>(
     orientation: bool,
     range: Option<(f64, f64)>,
-    t: Taylor,
+    t: TaylorJet<D>,
     extension: bool,
-) -> Result<Taylor, ValidatedGeometryError> {
+) -> Result<TaylorJet<D>, ValidatedGeometryError> {
     let (lower, upper) = range.ok_or(ValidatedGeometryError::InvalidInput)?;
     let range = interval_range([lower, upper])?;
     let contained = t.0[0][0].lower >= lower && t.0[0][0].upper <= upper;
@@ -671,7 +713,7 @@ pub(super) fn processed_parameter_with_extension(
         return Ok(t);
     }
     let anchor = ValidatedInterval::point(lower) + ValidatedInterval::point(upper);
-    let mut reflected = Taylor::interval(anchor) - t;
+    let mut reflected = TaylorJet::<D>::interval(anchor) - t;
     // Reflection is decreasing: evaluate each endpoint with the existing
     // outward point arithmetic, whose TwoSum proof retains exact differences.
     // Ranged subtraction would widen even exactly representable endpoint
@@ -690,15 +732,15 @@ pub(super) fn processed_parameter_with_extension(
     Ok(reflected)
 }
 
-pub(super) fn surface_taylor_with_policy(
+pub(super) fn surface_taylor_with_policy<const D: usize>(
     surface: &Surface,
-    u: Taylor,
-    v: Taylor,
+    u: TaylorJet<D>,
+    v: TaylorJet<D>,
     nesting: usize,
     allow_c0: bool,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<[Taylor; 3], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; 3], ValidatedGeometryError> {
     budget.charge(1, cancel)?;
     if nesting > MAX_NATIVE_GEOMETRY_NESTING {
         return Err(ValidatedGeometryError::ResourceLimit);
@@ -719,7 +761,7 @@ pub(super) fn surface_taylor_with_policy(
             if !(0..3).all(|i| direction[i].is_finite()) {
                 return Err(ValidatedGeometryError::InvalidInput);
             }
-            std::array::from_fn(|i| point[i] + v * Taylor::constant(direction[i]))
+            std::array::from_fn(|i| point[i] + v * TaylorJet::<D>::constant(direction[i]))
         }
         Surface::BsplineSurface(surface) => spline_surface(
             (surface.knot_vectors(), surface.control_points()),
@@ -757,7 +799,7 @@ pub(super) fn surface_taylor_with_policy(
                     allow_c0,
                     (budget, cancel),
                 )?;
-                let mut value: [Taylor; 3] = std::array::from_fn(|i| h[i]);
+                let mut value: [TaylorJet<D>; 3] = std::array::from_fn(|i| h[i]);
                 for (coordinate, component) in value.iter_mut().enumerate() {
                     if let Some(reduced) = rational_rank_one_coordinate(
                         (surface.knot_vectors(), controls),
@@ -793,12 +835,12 @@ pub(super) fn surface_taylor_with_policy(
             let sphere = processor.entity();
             let (su, cu) = u.sin_cos();
             let (sv, cv) = v.sin_cos();
-            let radius = Taylor::constant(sphere.radius());
+            let radius = TaylorJet::<D>::constant(sphere.radius());
             let center = sphere.center();
             let point = [su * cv, su * sv, cu];
             transform3(
                 *processor.transform(),
-                std::array::from_fn(|i| Taylor::constant(center[i]) + radius * point[i]),
+                std::array::from_fn(|i| TaylorJet::<D>::constant(center[i]) + radius * point[i]),
             )?
         }
         Surface::ToroidalSurface(processor) => {
@@ -810,15 +852,15 @@ pub(super) fn surface_taylor_with_policy(
             let torus = processor.entity();
             let (su, cu) = u.sin_cos();
             let (sv, cv) = v.sin_cos();
-            let minor = Taylor::constant(torus.small_radius());
-            let radial = Taylor::constant(torus.large_radius()) + minor * cv;
+            let minor = TaylorJet::<D>::constant(torus.small_radius());
+            let radial = TaylorJet::<D>::constant(torus.large_radius()) + minor * cv;
             let center = torus.center();
             transform3(
                 *processor.transform(),
                 [
-                    Taylor::constant(center.x) + radial * cu,
-                    Taylor::constant(center.y) + radial * su,
-                    Taylor::constant(center.z) + minor * sv,
+                    TaylorJet::<D>::constant(center.x) + radial * cu,
+                    TaylorJet::<D>::constant(center.y) + radial * su,
+                    TaylorJet::<D>::constant(center.z) + minor * sv,
                 ],
             )?
         }
@@ -843,13 +885,16 @@ pub(super) fn surface_taylor_with_policy(
                 budget,
                 cancel,
             )?;
-            let delta: [Taylor; 3] =
-                std::array::from_fn(|i| point[i] - Taylor::constant(origin[i]));
+            let delta: [TaylorJet<D>; 3] =
+                std::array::from_fn(|i| point[i] - TaylorJet::<D>::constant(origin[i]));
             let (sine, cosine) = v.sin_cos();
             let cross = [
-                delta[2] * Taylor::constant(axis.y) - delta[1] * Taylor::constant(axis.z),
-                delta[0] * Taylor::constant(axis.z) - delta[2] * Taylor::constant(axis.x),
-                delta[1] * Taylor::constant(axis.x) - delta[0] * Taylor::constant(axis.y),
+                delta[2] * TaylorJet::<D>::constant(axis.y)
+                    - delta[1] * TaylorJet::<D>::constant(axis.z),
+                delta[0] * TaylorJet::<D>::constant(axis.z)
+                    - delta[2] * TaylorJet::<D>::constant(axis.x),
+                delta[1] * TaylorJet::<D>::constant(axis.x)
+                    - delta[0] * TaylorJet::<D>::constant(axis.y),
             ];
             // Form the axial and radial coefficients before applying them to
             // the original profile. This is the same Rodrigues operation,
@@ -862,10 +907,12 @@ pub(super) fn surface_taylor_with_policy(
                             ValidatedInterval::point(axis[i]) * ValidatedInterval::point(axis[j]);
                         let radial =
                             ValidatedInterval::point(if i == j { 1.0 } else { 0.0 }) - axial;
-                        delta[j] * (Taylor::interval(axial) + Taylor::interval(radial) * cosine)
+                        delta[j]
+                            * (TaylorJet::<D>::interval(axial)
+                                + TaylorJet::<D>::interval(radial) * cosine)
                     })
-                    .fold(Taylor::ZERO, |a, b| a + b);
-                Taylor::constant(origin[i]) + rotated + cross[i] * sine
+                    .fold(TaylorJet::<D>::ZERO, |a, b| a + b);
+                TaylorJet::<D>::constant(origin[i]) + rotated + cross[i] * sine
             });
             transform3(*processor.transform(), point)?
         }
@@ -877,31 +924,39 @@ pub(super) fn surface_taylor_with_policy(
     Ok(value)
 }
 
-fn plane_taylor(plane: &Plane, u: Taylor, v: Taylor) -> [Taylor; 3] {
+fn plane_taylor<const D: usize>(
+    plane: &Plane,
+    u: TaylorJet<D>,
+    v: TaylorJet<D>,
+) -> [TaylorJet<D>; 3] {
     let [origin, one, another] = plane.defining_points();
     std::array::from_fn(|i| {
-        let origin = Taylor::constant(origin[i]);
+        let origin = TaylorJet::<D>::constant(origin[i]);
         let (a, b) = match plane.stored_axes() {
-            Some([a, b]) => (Taylor::constant(a[i]), Taylor::constant(b[i])),
+            Some([a, b]) => (
+                TaylorJet::<D>::constant(a[i]),
+                TaylorJet::<D>::constant(b[i]),
+            ),
             None => (
-                Taylor::constant(one[i]) - origin,
-                Taylor::constant(another[i]) - origin,
+                TaylorJet::<D>::constant(one[i]) - origin,
+                TaylorJet::<D>::constant(another[i]) - origin,
             ),
         };
         origin + u * a + v * b
     })
 }
 
-fn line_taylor<const N: usize>(
+fn line_taylor<const N: usize, const D: usize>(
     a: [f64; N],
     b: [f64; N],
-    t: Taylor,
-) -> Result<[Taylor; N], ValidatedGeometryError> {
+    t: TaylorJet<D>,
+) -> Result<[TaylorJet<D>; N], ValidatedGeometryError> {
     if !a.into_iter().chain(b).all(f64::is_finite) {
         return Err(ValidatedGeometryError::InvalidInput);
     }
-    let mut result: [Taylor; N] = std::array::from_fn(|i| {
-        Taylor::constant(a[i]) + t * (Taylor::constant(b[i]) - Taylor::constant(a[i]))
+    let mut result: [TaylorJet<D>; N] = std::array::from_fn(|i| {
+        TaylorJet::<D>::constant(a[i])
+            + t * (TaylorJet::<D>::constant(b[i]) - TaylorJet::<D>::constant(a[i]))
     });
     if t.0[0][0].lower >= 0.0 && t.0[0][0].upper <= 1.0 {
         for i in 0..N {
@@ -917,34 +972,40 @@ fn line_taylor<const N: usize>(
     Ok(result)
 }
 
-fn transform2(matrix: Matrix3, point: [Taylor; 2]) -> Result<[Taylor; 2], ValidatedGeometryError> {
+fn transform2<const D: usize>(
+    matrix: Matrix3,
+    point: [TaylorJet<D>; 2],
+) -> Result<[TaylorJet<D>; 2], ValidatedGeometryError> {
     if !(0..3).all(|i| (0..3).all(|j| matrix[i][j].is_finite())) {
         return Err(ValidatedGeometryError::InvalidInput);
     }
-    let coordinates: [Taylor; 2] = std::array::from_fn(|i| {
-        Taylor::constant(matrix[2][i])
-            + Taylor::constant(matrix[0][i]) * point[0]
-            + Taylor::constant(matrix[1][i]) * point[1]
+    let coordinates: [TaylorJet<D>; 2] = std::array::from_fn(|i| {
+        TaylorJet::<D>::constant(matrix[2][i])
+            + TaylorJet::<D>::constant(matrix[0][i]) * point[0]
+            + TaylorJet::<D>::constant(matrix[1][i]) * point[1]
     });
     // cgmath's native Matrix3/Point2 action truncates, without a homogeneous
     // divide. Rational control-net weights are handled at their original leaf.
     Ok(coordinates)
 }
-fn transform3(matrix: Matrix4, point: [Taylor; 3]) -> Result<[Taylor; 3], ValidatedGeometryError> {
+fn transform3<const D: usize>(
+    matrix: Matrix4,
+    point: [TaylorJet<D>; 3],
+) -> Result<[TaylorJet<D>; 3], ValidatedGeometryError> {
     if !(0..4).all(|i| (0..4).all(|j| matrix[i][j].is_finite())) {
         return Err(ValidatedGeometryError::InvalidInput);
     }
-    let coordinates: [Taylor; 3] = std::array::from_fn(|i| {
+    let coordinates: [TaylorJet<D>; 3] = std::array::from_fn(|i| {
         (0..3)
-            .map(|j| Taylor::constant(matrix[j][i]) * point[j])
-            .fold(Taylor::constant(matrix[3][i]), |a, b| a + b)
+            .map(|j| TaylorJet::<D>::constant(matrix[j][i]) * point[j])
+            .fold(TaylorJet::<D>::constant(matrix[3][i]), |a, b| a + b)
     });
     if (0..3).all(|i| matrix[i][3] == 0.0) && matrix[3][3] == 1.0 {
         return Ok(coordinates);
     }
     let denominator = (0..3)
-        .map(|j| Taylor::constant(matrix[j][3]) * point[j])
-        .fold(Taylor::constant(matrix[3][3]), |a, b| a + b);
+        .map(|j| TaylorJet::<D>::constant(matrix[j][3]) * point[j])
+        .fold(TaylorJet::<D>::constant(matrix[3][3]), |a, b| a + b);
     let inverse = denominator.reciprocal()?;
     Ok(coordinates.map(|value| value * inverse))
 }
@@ -1015,37 +1076,37 @@ pub(super) fn validate_knots_with_policy(
     Ok(degree)
 }
 
-pub(super) fn basis(
+pub(super) fn basis<const D: usize>(
     knots: &KnotVector,
     count: usize,
     degree: usize,
     span: usize,
-    parameter: Taylor,
+    parameter: TaylorJet<D>,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<(usize, usize, [Taylor; MAX_DEGREE + 2]), ValidatedGeometryError> {
+) -> Result<(usize, usize, [TaylorJet<D>; MAX_DEGREE + 2]), ValidatedGeometryError> {
     let start = span.saturating_sub(degree);
-    let mut values = [Taylor::ZERO; MAX_DEGREE + 2];
-    values[span - start] = Taylor::constant(1.0);
+    let mut values = [TaylorJet::<D>::ZERO; MAX_DEGREE + 2];
+    values[span - start] = TaylorJet::<D>::constant(1.0);
     for order in 1..=degree {
         budget.charge(order + 1, cancel)?;
         let end = span.min(knots.len() - order - 2);
         for index in start..=end {
             let mut a = if knots[index + order] == knots[index] {
-                Taylor::ZERO
+                TaylorJet::<D>::ZERO
             } else {
-                (parameter - Taylor::constant(knots[index]))
-                    * Taylor::interval(
+                (parameter - TaylorJet::<D>::constant(knots[index]))
+                    * TaylorJet::<D>::interval(
                         (ValidatedInterval::point(knots[index + order])
                             - ValidatedInterval::point(knots[index]))
                         .reciprocal()?,
                     )
             };
             let mut b = if knots[index + order + 1] == knots[index + 1] {
-                Taylor::ZERO
+                TaylorJet::<D>::ZERO
             } else {
-                (Taylor::constant(knots[index + order + 1]) - parameter)
-                    * Taylor::interval(
+                (TaylorJet::<D>::constant(knots[index + order + 1]) - parameter)
+                    * TaylorJet::<D>::interval(
                         (ValidatedInterval::point(knots[index + order + 1])
                             - ValidatedInterval::point(knots[index + 1]))
                         .reciprocal()?,
@@ -1078,28 +1139,32 @@ pub(super) fn basis(
             values[offset] = a * values[offset] + b * values[offset + 1];
         }
         if end < span {
-            values[end + 1 - start] = Taylor::ZERO;
+            values[end + 1 - start] = TaylorJet::<D>::ZERO;
         }
     }
     let length = count.saturating_sub(start).min(degree + 1);
     Ok((start, length, values))
 }
 
-pub(super) fn clipped_parameter(parameter: Taylor, lower: f64, upper: f64) -> Option<Taylor> {
+pub(super) fn clipped_parameter<const D: usize>(
+    parameter: TaylorJet<D>,
+    lower: f64,
+    upper: f64,
+) -> Option<TaylorJet<D>> {
     let mut result = parameter;
     result.0[0][0] = result.0[0][0].intersection(ValidatedInterval { lower, upper })?;
     Some(result)
 }
 
-fn spline_curve<const N: usize>(
+fn spline_curve<const N: usize, const D: usize>(
     knots: &KnotVector,
     count: usize,
-    parameter: Taylor,
+    parameter: TaylorJet<D>,
     control: impl Fn(usize) -> [f64; N],
     allow_c0: bool,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<[Taylor; N], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; N], ValidatedGeometryError> {
     curve_sum(
         knots,
         count,
@@ -1111,15 +1176,15 @@ fn spline_curve<const N: usize>(
     )
 }
 
-fn curve_sum<const N: usize>(
+fn curve_sum<const N: usize, const D: usize>(
     knots: &KnotVector,
     count: usize,
-    parameter: Taylor,
+    parameter: TaylorJet<D>,
     control: impl Fn(usize) -> [f64; N],
     weight_axis: Option<usize>,
     allow_c0: bool,
     (budget, cancel): (&mut ValidatedGeometryBudget, &AtomicBool),
-) -> Result<[Taylor; N], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; N], ValidatedGeometryError> {
     let degree = validate_knots_with_policy(
         knots,
         count,
@@ -1142,14 +1207,14 @@ fn curve_sum<const N: usize>(
 // The caller owns complete immutable knot admission for this same range.
 // Retain both incident closed spans at an interior knot, but only the
 // interior one-sided branch at each regular-domain endpoint.
-fn curve_sum_with_validated_knots<const N: usize>(
+fn curve_sum_with_validated_knots<const N: usize, const D: usize>(
     knots: &KnotVector,
     (count, degree): (usize, usize),
-    parameter: Taylor,
+    parameter: TaylorJet<D>,
     control: impl Fn(usize) -> [f64; N],
     weight_axis: Option<usize>,
     (budget, cancel): (&mut ValidatedGeometryBudget, &AtomicBool),
-) -> Result<[Taylor; N], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; N], ValidatedGeometryError> {
     let bound = parameter.0[0][0];
     let mut boundary = |strict: bool| -> Result<usize, ValidatedGeometryError> {
         let (mut low, mut high) = (0, knots.len());
@@ -1178,7 +1243,7 @@ fn curve_sum_with_validated_knots<const N: usize>(
     } else {
         boundary(true)?.min(knots.len() - 1)
     };
-    let mut result: Option<[Taylor; N]> = None;
+    let mut result: Option<[TaylorJet<D>; N]> = None;
     for span in first.max(degree)..end.min(count) {
         budget.charge(1, cancel)?;
         if knots[span] == knots[span + 1] {
@@ -1189,7 +1254,7 @@ fn curve_sum_with_validated_knots<const N: usize>(
         };
         let (start, length, values) = basis(knots, count, degree, span, parameter, budget, cancel)?;
         let partition_unity = span >= degree && span < count;
-        let mut value = [Taylor::ZERO; N];
+        let mut value = [TaylorJet::<D>::ZERO; N];
         let reference = control(start);
         let origin = std::array::from_fn(|axis| match weight_axis {
             Some(weight) if axis != weight && reference[weight] != 0.0 => {
@@ -1232,26 +1297,26 @@ fn curve_sum_with_validated_knots<const N: usize>(
     result.ok_or(ValidatedGeometryError::ParameterOutOfRange)
 }
 
-fn rational_curve(
+fn rational_curve<const D: usize>(
     knots: &KnotVector,
     count: usize,
-    parameter: Taylor,
+    parameter: TaylorJet<D>,
     control: impl Fn(usize) -> [f64; 3],
     allow_c0: bool,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<[Taylor; 2], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; 2], ValidatedGeometryError> {
     let h = rational_spline(knots, count, parameter, control, allow_c0, budget, cancel)?;
     Ok([h[0], h[1]])
 }
 
-fn spline_surface<P, const N: usize>(
+fn spline_surface<P, const N: usize, const D: usize>(
     (knots, controls): (&(KnotVector, KnotVector), &[Vec<P>]),
-    [u, v]: [Taylor; 2],
+    [u, v]: [TaylorJet<D>; 2],
     control: impl Fn(&P) -> [f64; N],
     allow_c0: bool,
     (budget, cancel): (&mut ValidatedGeometryBudget, &AtomicBool),
-) -> Result<[Taylor; N], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; N], ValidatedGeometryError> {
     surface_sum(
         (knots, controls),
         [u, v],
@@ -1280,9 +1345,10 @@ pub(crate) const TENSOR_COEFFICIENT_WORKSPACE_BYTES: usize = size_of::<TensorCoe
 
 // Shared named tensor state for full and K=1/2 projected evaluation: two basis
 // arrays, coefficient identity, original evidence, both independent output
-// arrays, span hull and the existing rational subdivision stack. This is not an
-// RSS/compiler-frame bound. Recursive native geometry still obeys
-// MAX_NATIVE_GEOMETRY_NESTING.
+// arrays, span hull and the existing rational subdivision stack. The default
+// third-order layout conservatively covers all lower requested orders. This is
+// not an RSS/compiler-frame bound. Recursive native geometry still obeys
+// `MAX_NATIVE_GEOMETRY_NESTING`.
 pub(crate) const TENSOR_EVALUATOR_FIXED_BYTES: usize = 2 * size_of::<[Taylor; MAX_DEGREE + 2]>()
     + TENSOR_COEFFICIENT_WORKSPACE_BYTES
     + size_of::<ControlEvidence<4>>()
@@ -1307,20 +1373,23 @@ impl<const N: usize> TensorCoefficients<N> {
     }
 
     // Original hull/evidence collection has already validated this coefficient.
-    pub(super) fn term(
+    pub(super) fn term<const D: usize>(
         &mut self,
         point: [f64; N],
         [i, j]: [usize; 2],
-        [a, b]: [Taylor; 2],
-        product: Taylor,
-    ) -> ([ValidatedInterval; N], Taylor) {
+        [a, b]: [TaylorJet<D>; 2],
+        product: TaylorJet<D>,
+    ) -> ([ValidatedInterval; N], TaylorJet<D>) {
         if !self.partition {
             return (point.map(ValidatedInterval::point), product);
         }
         if i == 0 && j == 0 {
             self.origin = point;
             self.row = point;
-            return (point.map(ValidatedInterval::point), Taylor::constant(1.0));
+            return (
+                point.map(ValidatedInterval::point),
+                TaylorJet::<D>::constant(1.0),
+            );
         }
         let difference = |origin: [f64; N]| {
             std::array::from_fn(|axis| {
@@ -1340,33 +1409,33 @@ impl<const N: usize> TensorCoefficients<N> {
         let factor = if mixed.iter().any(|coefficient| *coefficient != super::ZERO) {
             product
         } else {
-            Taylor::ZERO
+            TaylorJet::<D>::ZERO
         };
         (mixed, factor)
     }
 }
 
-pub(super) fn add_tensor_term<const K: usize>(
-    values: &mut [Taylor; K],
+pub(super) fn add_tensor_term<const K: usize, const D: usize>(
+    values: &mut [TaylorJet<D>; K],
     coefficients: [ValidatedInterval; K],
-    basis: Taylor,
+    basis: TaylorJet<D>,
 ) {
     for (value, coefficient) in values.iter_mut().zip(coefficients) {
         if coefficient != super::ZERO {
-            *value = *value + Taylor::interval(coefficient) * basis;
+            *value = *value + TaylorJet::<D>::interval(coefficient) * basis;
         }
     }
 }
 
 /// Intersect independent Taylor proofs on the identical complete source cell.
 /// An inconsistent coefficient is a failure, never a choice of one proof.
-pub(super) fn intersect_tensor_values<const K: usize>(
-    values: &mut [Taylor; K],
-    original: &[Taylor; K],
+pub(super) fn intersect_tensor_values<const K: usize, const D: usize>(
+    values: &mut [TaylorJet<D>; K],
+    original: &[TaylorJet<D>; K],
 ) -> Result<(), ValidatedGeometryError> {
     for (value, original) in values.iter_mut().zip(original) {
-        for i in 0..4 {
-            for j in 0..4 - i {
+        for i in 0..D {
+            for j in 0..D - i {
                 value.0[i][j] = value.0[i][j]
                     .intersection(original.0[i][j])
                     .ok_or(ValidatedGeometryError::ConditioningFailure)?;
@@ -1377,14 +1446,14 @@ pub(super) fn intersect_tensor_values<const K: usize>(
 }
 
 // Keep each tensor's source data, UV Taylor pair, and execution context together.
-fn surface_sum<P, const N: usize>(
+fn surface_sum<P, const N: usize, const D: usize>(
     (knots, controls): (&(KnotVector, KnotVector), &[Vec<P>]),
-    [u, v]: [Taylor; 2],
+    [u, v]: [TaylorJet<D>; 2],
     control: impl Fn(&P) -> [f64; N],
     weight_axis: Option<usize>,
     allow_c0: bool,
     (budget, cancel): (&mut ValidatedGeometryBudget, &AtomicBool),
-) -> Result<ControlSum<N>, ValidatedGeometryError> {
+) -> Result<ControlSum<N, D>, ValidatedGeometryError> {
     if controls.is_empty() || controls[0].is_empty() {
         return Err(ValidatedGeometryError::InvalidInput);
     }
@@ -1398,7 +1467,7 @@ fn surface_sum<P, const N: usize>(
     }
     let pu = validate_knots_with_policy(&knots.0, nu, u.0[0][0], true, allow_c0, budget, cancel)?;
     let pv = validate_knots_with_policy(&knots.1, nv, v.0[0][0], true, allow_c0, budget, cancel)?;
-    let mut result: Option<ControlSum<N>> = None;
+    let mut result: Option<ControlSum<N, D>> = None;
     for su in 0..knots.0.len() - 1 {
         budget.charge(1, cancel)?;
         if knots.0[su] == knots.0[su + 1] {
@@ -1438,8 +1507,8 @@ fn surface_sum<P, const N: usize>(
             };
             let (iv, lv, bv) = basis(&knots.1, nv, pv, sv, v, budget, cancel)?;
             let partition_unity = su >= pu && su < nu && sv >= pv && sv < nv;
-            let mut value = [Taylor::ZERO; N];
-            let mut original = [Taylor::ZERO; N];
+            let mut value = [TaylorJet::<D>::ZERO; N];
+            let mut original = [TaylorJet::<D>::ZERO; N];
             let mut evidence = ControlEvidence::new(weight_axis);
             let mut tensor = TensorCoefficients::new(partition_unity);
             for i in 0..lu {
@@ -1452,7 +1521,7 @@ fn surface_sum<P, const N: usize>(
                     if partition_unity {
                         budget.charge(1, cancel)?;
                         if i == 0 && j == 0 {
-                            original = p.map(Taylor::constant);
+                            original = p.map(TaylorJet::<D>::constant);
                         } else {
                             let residual = if i == 0 || j == 0 {
                                 coefficient
@@ -1466,7 +1535,7 @@ fn surface_sum<P, const N: usize>(
                 }
             }
             if partition_unity {
-                budget.charge(10 * N, cancel)?;
+                budget.charge(TaylorJet::<D>::COEFFICIENTS * N, cancel)?;
                 intersect_tensor_values(&mut value, &original)?;
             }
             let nonnegative = knots.0[su] <= u.0[0][0].lower
@@ -1661,14 +1730,14 @@ pub(crate) fn homogeneous_join_is_c1<const N: usize>(
 
 // Prove a degree-one tensor factor by homogeneous coefficient identities.
 // Checked arithmetic overflow declines this reduction, never approximates it.
-fn rational_affine_factor<P>(
+fn rational_affine_factor<P, const D: usize>(
     (knots, controls): (&(KnotVector, KnotVector), &[Vec<P>]),
-    [u, v]: [Taylor; 2],
+    [u, v]: [TaylorJet<D>; 2],
     axis: usize,
     control: &impl Fn(&P) -> [f64; 4],
     allow_c0: bool,
     (budget, cancel): (&mut ValidatedGeometryBudget, &AtomicBool),
-) -> Result<Option<[Taylor; 3]>, ValidatedGeometryError> {
+) -> Result<Option<[TaylorJet<D>; 3]>, ValidatedGeometryError> {
     budget.charge(1, cancel)?;
     if controls.is_empty() || controls[0].is_empty() {
         return Ok(None);
@@ -1778,10 +1847,10 @@ fn rational_affine_factor<P>(
         budget,
         cancel,
     )?;
-    let factor = factor_parameter - Taylor::constant(start);
-    let mut value = [Taylor::ZERO; 3];
+    let factor = factor_parameter - TaylorJet::<D>::constant(start);
+    let mut value = [TaylorJet::<D>::ZERO; 3];
     for coordinate in 0..3 {
-        let mut translation = factor * Taylor::interval(direction[coordinate]);
+        let mut translation = factor * TaylorJet::<D>::interval(direction[coordinate]);
         if factor_parameter.0[0][0].lower >= start && factor_parameter.0[0][0].upper <= end {
             translation.0[0][0] = translation.0[0][0]
                 .intersection(super::ZERO.hull(displacement[coordinate]))
@@ -1794,15 +1863,15 @@ fn rational_affine_factor<P>(
 
 // The caller has already admitted the full tensor denominator on the box.
 // Cross-products prove common tensor factors, not approximate low rank.
-fn rational_rank_one_coordinate<P>(
+fn rational_rank_one_coordinate<P, const D: usize>(
     (knots, controls): (&(KnotVector, KnotVector), &[Vec<P>]),
-    [u, v]: [Taylor; 2],
+    [u, v]: [TaylorJet<D>; 2],
     coordinate: usize,
     cancelled_axis: usize,
     control: &impl Fn(&P) -> [f64; 4],
     allow_c0: bool,
     (budget, cancel): (&mut ValidatedGeometryBudget, &AtomicBool),
-) -> Result<Option<Taylor>, ValidatedGeometryError> {
+) -> Result<Option<TaylorJet<D>>, ValidatedGeometryError> {
     budget.charge(1, cancel)?;
     let (nu, nv) = (controls.len(), controls[0].len());
     let (outer_count, inner_count, base_knots, parameter) = if cancelled_axis == 0 {
@@ -1881,12 +1950,12 @@ fn rational_rank_one_coordinate<P>(
 }
 
 #[derive(Clone, Copy)]
-struct ControlSum<const N: usize> {
-    values: [Taylor; N],
+struct ControlSum<const N: usize, const D: usize = 4> {
+    values: [TaylorJet<D>; N],
     ratios: [Option<Ratio>; N],
     euclidean_hulls: [Option<ValidatedInterval>; N],
 }
-impl<const N: usize> ControlSum<N> {
+impl<const N: usize, const D: usize> ControlSum<N, D> {
     fn hull(self, other: Self) -> Self {
         Self {
             values: std::array::from_fn(|i| self.values[i].hull(other.values[i])),
@@ -1925,12 +1994,12 @@ impl<const N: usize> ControlEvidence<N> {
             quotient_origin: [0.0; N],
         }
     }
-    fn include(
+    fn include<const D: usize>(
         &mut self,
         point: [f64; N],
-        basis: Taylor,
+        basis: TaylorJet<D>,
         partition_unity: bool,
-        values: &mut [Taylor; N],
+        values: &mut [TaylorJet<D>; N],
     ) -> Result<(), ValidatedGeometryError> {
         self.observe(point)?;
         // Curves need only the one-axis origin identity.
@@ -1950,7 +2019,7 @@ impl<const N: usize> ControlEvidence<N> {
                         - ValidatedInterval::point(euclidean_origin[i])
                             * ValidatedInterval::point(origin[weight]);
                 }
-                Taylor::interval(value)
+                TaylorJet::<D>::interval(value)
             });
         }
         for i in 0..N {
@@ -1970,7 +2039,7 @@ impl<const N: usize> ControlEvidence<N> {
                         * (ValidatedInterval::point(point[weight])
                             - ValidatedInterval::point(origin[weight]));
             }
-            values[i] = values[i] + Taylor::interval(coefficient) * basis;
+            values[i] = values[i] + TaylorJet::<D>::interval(coefficient) * basis;
         }
         Ok(())
     }
@@ -2004,12 +2073,12 @@ impl<const N: usize> ControlEvidence<N> {
         }
         Ok(())
     }
-    fn finish(
+    fn finish<const D: usize>(
         self,
-        mut values: [Taylor; N],
+        mut values: [TaylorJet<D>; N],
         partition_unity: bool,
         nonnegative: bool,
-    ) -> Result<ControlSum<N>, ValidatedGeometryError> {
+    ) -> Result<ControlSum<N, D>, ValidatedGeometryError> {
         if partition_unity {
             for (i, value) in values.iter_mut().enumerate() {
                 if self.quotient_origin[i] == 0.0
@@ -2017,7 +2086,7 @@ impl<const N: usize> ControlEvidence<N> {
                 {
                     if hull.lower == hull.upper {
                         // Identical coefficients are a constant polynomial by partition unity.
-                        *value = Taylor::interval(hull);
+                        *value = TaylorJet::<D>::interval(hull);
                     } else if nonnegative {
                         value.0[0][0] = value.0[0][0]
                             .intersection(hull)
@@ -2049,18 +2118,18 @@ impl<const N: usize> ControlEvidence<N> {
     }
 }
 
-fn normalized<const N: usize>(
-    homogeneous: ControlSum<N>,
+fn normalized<const N: usize, const D: usize>(
+    homogeneous: ControlSum<N, D>,
     euclidean_origin: &[f64; N],
-) -> Result<[Taylor; N], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; N], ValidatedGeometryError> {
     let inverse = homogeneous.values[N - 1].reciprocal()?;
-    let mut value = [Taylor::ZERO; N];
+    let mut value = [TaylorJet::<D>::ZERO; N];
     for (i, component) in value.iter_mut().enumerate() {
         *component = if i + 1 == N {
-            Taylor::constant(1.0)
+            TaylorJet::<D>::constant(1.0)
         } else if let Some(ratio) = homogeneous.ratios[i] {
             // Exact dyadic coefficient cross-products prove the quotient constant.
-            Taylor::interval(ratio.enclosure()?)
+            TaylorJet::<D>::interval(ratio.enclosure()?)
         } else {
             let mut centered = homogeneous.values[i] * inverse;
             if euclidean_origin[i] != 0.0 {
@@ -2078,18 +2147,18 @@ fn normalized<const N: usize>(
     Ok(value)
 }
 
-fn rational_spline<const N: usize>(
+fn rational_spline<const N: usize, const D: usize>(
     knots: &KnotVector,
     count: usize,
-    parameter: Taylor,
+    parameter: TaylorJet<D>,
     control: impl Fn(usize) -> [f64; N],
     allow_c0: bool,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
-) -> Result<[Taylor; N], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; N], ValidatedGeometryError> {
     let mut pending = [(parameter, 0usize); 49];
     let mut length = 1;
-    let mut result: Option<[Taylor; N]> = None;
+    let mut result: Option<[TaylorJet<D>; N]> = None;
     while length != 0 {
         budget.charge(1, cancel)?;
         length -= 1;
@@ -2130,16 +2199,16 @@ fn rational_spline<const N: usize>(
     result.ok_or(ValidatedGeometryError::ParameterOutOfRange)
 }
 
-fn rational_surface<P, const N: usize>(
+fn rational_surface<P, const N: usize, const D: usize>(
     (knots, controls): (&(KnotVector, KnotVector), &[Vec<P>]),
-    [u, v]: [Taylor; 2],
+    [u, v]: [TaylorJet<D>; 2],
     control: impl Fn(&P) -> [f64; N],
     allow_c0: bool,
     (budget, cancel): (&mut ValidatedGeometryBudget, &AtomicBool),
-) -> Result<[Taylor; N], ValidatedGeometryError> {
+) -> Result<[TaylorJet<D>; N], ValidatedGeometryError> {
     let mut pending = [([u, v], 0usize); 49];
     let mut length = 1;
-    let mut result: Option<[Taylor; N]> = None;
+    let mut result: Option<[TaylorJet<D>; N]> = None;
     while length != 0 {
         budget.charge(1, cancel)?;
         length -= 1;

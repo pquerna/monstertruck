@@ -15,11 +15,12 @@ mod smoothness;
 pub(crate) use explicit::{
     ProjectionLeaderKnotEvaluator, TENSOR_EVALUATOR_FIXED_BYTES, processed_parameter,
     validated_curve_piecewise_jet, validated_curve_position_bounds,
-    validated_projection_leader_jet, validated_surface_position_bounds,
+    validated_projection_leader_jet,
 };
 pub use explicit::{
     validated_boundary_jet, validated_curve_jet, validated_curve2d_jet,
     validated_curve2d_piecewise_jet, validated_surface_jet, validated_surface_piecewise_jet,
+    validated_surface_position_bounds,
 };
 pub use normal::validated_surface_geometric_normal;
 pub(crate) use projection::{
@@ -568,12 +569,22 @@ impl Mul for ValidatedInterval {
     }
 }
 
-/// A third-order bivariate Taylor jet; entries contain divided derivatives.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Taylor(pub(crate) [[ValidatedInterval; 4]; 4]);
+/// Default third-order bivariate jet for consumers requesting third derivatives.
+pub(crate) type Taylor = TaylorJet<4>;
 
-impl Taylor {
-    pub(crate) const ZERO: Self = Self([[ZERO; 4]; 4]);
+/// Bivariate divided derivatives through total degree `D - 1`.
+///
+/// The coefficient dimension is explicit so stable Rust can retain only the
+/// requested order without generic constant expressions in array lengths.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TaylorJet<const D: usize>(pub(crate) [[ValidatedInterval; D]; D]);
+
+impl<const D: usize> TaylorJet<D> {
+    pub(crate) const ZERO: Self = {
+        assert!(D >= 1 && D <= 4);
+        Self([[ZERO; D]; D])
+    };
+    pub(crate) const COEFFICIENTS: usize = D * (D + 1) / 2;
     pub(crate) fn constant(value: f64) -> Self { Self::interval(ValidatedInterval::point(value)) }
     pub(crate) fn interval(value: ValidatedInterval) -> Self {
         let mut result = Self::ZERO;
@@ -582,11 +593,13 @@ impl Taylor {
     }
     pub(crate) fn variable(value: ValidatedInterval, axis: usize) -> Self {
         let mut result = Self::interval(value);
-        result.0[usize::from(axis == 0)][usize::from(axis == 1)] = ONE;
+        if D > 1 {
+            result.0[usize::from(axis == 0)][usize::from(axis == 1)] = ONE;
+        }
         result
     }
     pub(crate) fn finite(self) -> Result<Self, ValidatedGeometryError> {
-        if (0..4).all(|i| (0..4 - i).all(|j| self.0[i][j].is_finite())) {
+        if (0..D).all(|i| (0..D - i).all(|j| self.0[i][j].is_finite())) {
             Ok(self)
         } else {
             Err(ValidatedGeometryError::ConditioningFailure)
@@ -599,42 +612,70 @@ impl Taylor {
     }
     pub(crate) fn reciprocal(self) -> Result<Self, ValidatedGeometryError> {
         let inverse = self.0[0][0].reciprocal()?;
+        if D == 1 {
+            return Ok(Self::interval(inverse));
+        }
         let mut delta = self;
         delta.0[0][0] = ZERO;
         let delta = delta * Self::interval(-inverse);
+        if D == 2 {
+            return Ok((Self::constant(1.0) + delta) * Self::interval(inverse));
+        }
         let square = delta * delta;
+        if D == 3 {
+            return Ok((Self::constant(1.0) + delta + square) * Self::interval(inverse));
+        }
         Ok((Self::constant(1.0) + delta + square + square * delta) * Self::interval(inverse))
     }
     pub(crate) fn sin_cos(self) -> (Self, Self) {
         let (sine, cosine) = sin_cos_interval(self.0[0][0]);
+        if D == 1 {
+            return (Self::interval(sine), Self::interval(cosine));
+        }
         let mut delta = self;
         delta.0[0][0] = ZERO;
+        let linear_sine = Self::interval(sine) + Self::interval(cosine) * delta;
+        let linear_cosine = Self::interval(cosine) - Self::interval(sine) * delta;
+        if D == 2 {
+            return (linear_sine, linear_cosine);
+        }
         let square = delta * delta * Self::constant(0.5);
+        let quadratic_sine = linear_sine - Self::interval(sine) * square;
+        let quadratic_cosine = linear_cosine - Self::interval(cosine) * square;
+        if D == 3 {
+            return (quadratic_sine, quadratic_cosine);
+        }
         let third = ValidatedInterval {
             lower: (1.0_f64 / 3.0).next_down(),
             upper: (1.0_f64 / 3.0).next_up(),
         };
         let cube = square * delta * Self::interval(third);
         (
-            Self::interval(sine) + Self::interval(cosine) * delta
-                - Self::interval(sine) * square
-                - Self::interval(cosine) * cube,
-            Self::interval(cosine) - Self::interval(sine) * delta - Self::interval(cosine) * square
-                + Self::interval(sine) * cube,
+            quadratic_sine - Self::interval(cosine) * cube,
+            quadratic_cosine + Self::interval(sine) * cube,
         )
     }
     pub(crate) fn exp(self) -> Result<Self, ValidatedGeometryError> {
         let value = exp_interval(self.0[0][0])?;
+        if D == 1 {
+            return Self::interval(value).finite();
+        }
         let mut delta = self;
         delta.0[0][0] = ZERO;
+        if D == 2 {
+            return ((Self::constant(1.0) + delta) * Self::interval(value)).finite();
+        }
         let square = delta * delta * Self::constant(0.5);
+        if D == 3 {
+            return ((Self::constant(1.0) + delta + square) * Self::interval(value)).finite();
+        }
         let cube = square * delta * Self::interval(ValidatedInterval::point(3.0).reciprocal()?);
         (Self::constant(1.0) + delta + square + cube)
             .mul(Self::interval(value))
             .finite()
     }
 }
-impl Add for Taylor {
+impl<const D: usize> Add for TaylorJet<D> {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
         Self(std::array::from_fn(|i| {
@@ -642,20 +683,20 @@ impl Add for Taylor {
         }))
     }
 }
-impl Neg for Taylor {
+impl<const D: usize> Neg for TaylorJet<D> {
     type Output = Self;
     fn neg(self) -> Self { Self(self.0.map(|row| row.map(Neg::neg))) }
 }
-impl Sub for Taylor {
+impl<const D: usize> Sub for TaylorJet<D> {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self { self + -rhs }
 }
-impl Mul for Taylor {
+impl<const D: usize> Mul for TaylorJet<D> {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self {
         Self(std::array::from_fn(|i| {
             std::array::from_fn(|j| {
-                if i + j > 3 {
+                if i + j >= D {
                     ZERO
                 } else {
                     (0..=i)

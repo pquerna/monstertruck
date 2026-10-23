@@ -4,8 +4,8 @@ use super::explicit::{
     processed_parameter_with_extension, surface_taylor_with_policy, validate_knots_with_policy,
 };
 use super::{
-    Taylor, ValidatedGeometryBudget, ValidatedGeometryError as E, ValidatedInterval as I,
-    ValidatedScalarCurveJet, ZERO, curve_jet_from_taylor, interval_range,
+    Taylor, TaylorJet, ValidatedGeometryBudget, ValidatedGeometryError as E,
+    ValidatedInterval as I, ValidatedScalarCurveJet, ZERO, curve_jet_from_taylor, interval_range,
 };
 use crate::{
     Conic2D, Curve, Curve2D, KnotVector, Matrix4, ParametricCurve, Plane, Surface,
@@ -87,7 +87,8 @@ impl ValidatedSurfaceFunctional {
 /// derivative certificate is supplied. Empty rows and nonfinite inputs refuse.
 ///
 /// Evaluation uses fixed-size stack storage, the caller's cumulative work
-/// allowance and cooperative cancellation, with no unused scalar output rows.
+/// allowance and cooperative cancellation. Only the requested first-order
+/// Taylor coefficients are evaluated; no Hessian or third-order work is done.
 pub fn validated_surface_functional_jets<const N: usize>(
     surface: &Surface,
     domain: [[f64; 2]; 2],
@@ -95,6 +96,22 @@ pub fn validated_surface_functional_jets<const N: usize>(
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<[ValidatedSurfaceFunctionalJet; N], E> {
+    let values = surface_functional_taylors::<N, 2>(surface, domain, functionals, budget, cancel)?;
+    Ok(values.map(|value| ValidatedSurfaceFunctionalJet {
+        position: value.0[0][0],
+        du: value.0[1][0],
+        dv: value.0[0][1],
+    }))
+}
+
+// Original coefficient-first dispatch shared by requested Taylor orders.
+pub(super) fn surface_functional_taylors<const N: usize, const D: usize>(
+    surface: &Surface,
+    domain: [[f64; 2]; 2],
+    functionals: [ValidatedSurfaceFunctional; N],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<[TaylorJet<D>; N], E> {
     budget.charge(1, cancel)?;
     if N == 0 {
         return Err(E::InvalidInput);
@@ -113,8 +130,8 @@ pub fn validated_surface_functional_jets<const N: usize>(
     }
     let execution = &mut ProjectionExecution { budget, cancel };
     let uv = [
-        Taylor::variable(domain[0], 0),
-        Taylor::variable(domain[1], 1),
+        TaylorJet::<D>::variable(domain[0], 0),
+        TaylorJet::<D>::variable(domain[1], 1),
     ];
     let values = match surface {
         Surface::BsplineSurface(surface) => projected_tensor_functionals(
@@ -178,27 +195,17 @@ pub fn validated_surface_functional_jets<const N: usize>(
             functionals.map(|functional| {
                 (0..3)
                     .map(|i| {
-                        (source[i] - Taylor::interval(functional.origin[i]))
-                            * Taylor::interval(functional.direction[i])
+                        (source[i] - TaylorJet::<D>::interval(functional.origin[i]))
+                            * TaylorJet::<D>::interval(functional.direction[i])
                     })
-                    .fold(Taylor::interval(functional.offset), |a, b| a + b)
+                    .fold(TaylorJet::<D>::interval(functional.offset), |a, b| a + b)
             })
         }
     };
-    let mut result = [ValidatedSurfaceFunctionalJet {
-        position: ZERO,
-        du: ZERO,
-        dv: ZERO,
-    }; N];
-    for k in 0..N {
-        let value = values[k].finite()?;
-        result[k] = ValidatedSurfaceFunctionalJet {
-            position: value.0[0][0],
-            du: value.0[1][0],
-            dv: value.0[0][1],
-        };
-    }
-    Ok(result)
+    values
+        .into_iter()
+        .try_for_each(|value| value.finite().map(|_| ()))?;
+    Ok(values)
 }
 
 fn functional_coefficients<const N: usize>(
@@ -212,12 +219,12 @@ fn functional_coefficients<const N: usize>(
     Ok(values)
 }
 
-fn projected_revolution_functionals<const N: usize>(
+fn projected_revolution_functionals<const N: usize, const D: usize>(
     surface: &Surface,
-    uv: [Taylor; 2],
+    uv: [TaylorJet<D>; 2],
     functionals: [ValidatedSurfaceFunctional; N],
     execution: &mut ProjectionExecution<'_>,
-) -> Result<[Taylor; N], E> {
+) -> Result<[TaylorJet<D>; N], E> {
     let Surface::RevolutionSurface(processor) = surface else {
         unreachable!()
     };
@@ -236,15 +243,15 @@ fn projected_revolution_functionals<const N: usize>(
     projected_revolution_subdivided(surface, uv, functionals, execution)
 }
 
-fn projected_revolution_subdivided<const N: usize>(
+fn projected_revolution_subdivided<const N: usize, const D: usize>(
     surface: &Surface,
-    uv: [Taylor; 2],
+    uv: [TaylorJet<D>; 2],
     functionals: [ValidatedSurfaceFunctional; N],
     execution: &mut ProjectionExecution<'_>,
-) -> Result<[Taylor; N], E> {
+) -> Result<[TaylorJet<D>; N], E> {
     let mut pending = [(uv, 0usize); 49];
     let mut length = 1;
-    let mut result: Option<[Taylor; N]> = None;
+    let mut result: Option<[TaylorJet<D>; N]> = None;
     while length != 0 {
         execution.budget.charge(1, execution.cancel)?;
         length -= 1;
@@ -279,12 +286,12 @@ fn projected_revolution_subdivided<const N: usize>(
     result.ok_or(E::ParameterOutOfRange)
 }
 
-fn projected_revolution_cell<const N: usize>(
+fn projected_revolution_cell<const N: usize, const D: usize>(
     surface: &Surface,
-    [u, v]: [Taylor; 2],
+    [u, v]: [TaylorJet<D>; 2],
     functionals: [ValidatedSurfaceFunctional; N],
     execution: &mut ProjectionExecution<'_>,
-) -> Result<[Taylor; N], E> {
+) -> Result<[TaylorJet<D>; N], E> {
     let Surface::RevolutionSurface(processor) = surface else {
         unreachable!()
     };
@@ -356,12 +363,12 @@ fn projected_revolution_cell<const N: usize>(
         });
         // Rotation is applied to scalar CONTROL coefficients, before the
         // original shared profile basis. No spatial surface jet is built.
-        let mut value = Taylor::interval(constant + scalar[0]);
+        let mut value = TaylorJet::<D>::interval(constant + scalar[0]);
         if scalar[1] != ZERO {
-            value = value + Taylor::interval(scalar[1]) * cosine;
+            value = value + TaylorJet::<D>::interval(scalar[1]) * cosine;
         }
         if scalar[2] != ZERO {
-            value = value + Taylor::interval(scalar[2]) * sine;
+            value = value + TaylorJet::<D>::interval(scalar[2]) * sine;
         }
         value
     };
@@ -407,12 +414,12 @@ fn projected_revolution_cell<const N: usize>(
 
 // Separate compile-time row groups allow N numerators plus exactly one
 // projective denominator on stable Rust, without an N+1 allocation or dummy row.
-fn projected_profile_functionals<const K: usize, const L: usize>(
+fn projected_profile_functionals<const K: usize, const L: usize, const D: usize>(
     curve: &Curve,
-    parameter: Taylor,
-    coefficient: impl Fn([I; 4]) -> Result<([Taylor; K], [Taylor; L]), E>,
+    parameter: TaylorJet<D>,
+    coefficient: impl Fn([I; 4]) -> Result<([TaylorJet<D>; K], [TaylorJet<D>; L]), E>,
     execution: &mut ProjectionExecution<'_>,
-) -> Result<([Taylor; K], [Taylor; L]), E> {
+) -> Result<([TaylorJet<D>; K], [TaylorJet<D>; L]), E> {
     execution.budget.charge(1, execution.cancel)?;
     let checked_coefficient = |point: [I; 4]| {
         if !point.into_iter().all(I::is_finite) {
@@ -427,8 +434,8 @@ fn projected_profile_functionals<const K: usize, const L: usize>(
             let b = [line.1.x, line.1.y, line.1.z, 1.0].map(I::point);
             let (start, extra_start) = checked_coefficient(a)?;
             let (delta, extra_delta) = checked_coefficient(std::array::from_fn(|i| b[i] - a[i]))?;
-            let evaluate = |start: Taylor, delta: Taylor| {
-                if delta.0 == Taylor::ZERO.0 {
+            let evaluate = |start: TaylorJet<D>, delta: TaylorJet<D>| {
+                if delta.0 == TaylorJet::<D>::ZERO.0 {
                     start
                 } else {
                     start + delta * parameter
@@ -860,18 +867,18 @@ fn projected_tensor<P, const N: usize>(
     .map(|[value]| value)
 }
 
-fn projected_tensor_functionals<P, const N: usize, const K: usize>(
+fn projected_tensor_functionals<P, const N: usize, const K: usize, const D: usize>(
     source: (&(KnotVector, KnotVector), &[Vec<P>]),
-    uv: [Taylor; 2],
+    uv: [TaylorJet<D>; 2],
     control: impl Fn(&P) -> [f64; N],
     coefficient: impl Fn([f64; N]) -> Result<[I; K], E>,
     difference: impl Fn([I; N]) -> Result<[I; K], E>,
     policy: SplineProjectionPolicy,
     execution: &mut ProjectionExecution<'_>,
-) -> Result<[Taylor; K], E> {
+) -> Result<[TaylorJet<D>; K], E> {
     let mut pending = [(uv, 0usize); 49];
     let mut length = 1;
-    let mut result: Option<[Taylor; K]> = None;
+    let mut result: Option<[TaylorJet<D>; K]> = None;
     while length != 0 {
         execution.budget.charge(1, execution.cancel)?;
         length -= 1;
@@ -914,15 +921,15 @@ fn projected_tensor_functionals<P, const N: usize, const K: usize>(
     result.ok_or(E::ParameterOutOfRange)
 }
 
-fn projected_tensor_cell<P, const N: usize, const K: usize>(
+fn projected_tensor_cell<P, const N: usize, const K: usize, const D: usize>(
     (knots, controls): (&(KnotVector, KnotVector), &[Vec<P>]),
-    [u, v]: [Taylor; 2],
+    [u, v]: [TaylorJet<D>; 2],
     control: &impl Fn(&P) -> [f64; N],
     coefficient: &impl Fn([f64; N]) -> Result<[I; K], E>,
     difference: &impl Fn([I; N]) -> Result<[I; K], E>,
     SplineProjectionPolicy { rational, allow_c0 }: SplineProjectionPolicy,
     execution: &mut ProjectionExecution<'_>,
-) -> Result<[Taylor; K], E> {
+) -> Result<[TaylorJet<D>; K], E> {
     if controls.is_empty() || controls[0].is_empty() {
         return Err(E::InvalidInput);
     }
@@ -952,7 +959,7 @@ fn projected_tensor_cell<P, const N: usize, const K: usize>(
         execution.budget,
         execution.cancel,
     )?;
-    let mut result: Option<[Taylor; K]> = None;
+    let mut result: Option<[TaylorJet<D>; K]> = None;
     for su in 0..knots.0.len() - 1 {
         execution.budget.charge(1, execution.cancel)?;
         if knots.0[su] == knots.0[su + 1] {
@@ -993,10 +1000,10 @@ fn projected_tensor_cell<P, const N: usize, const K: usize>(
             let (iv, lv, bv) = basis(&knots.1, nv, pv, sv, v, execution.budget, execution.cancel)?;
             let partition = su >= pu && su < nu && sv >= pv && sv < nv;
             let mut tensor = TensorCoefficients::new(partition);
-            let mut numerator = [Taylor::ZERO; K];
-            let mut denominator = [Taylor::ZERO];
-            let mut original_numerator = [Taylor::ZERO; K];
-            let mut original_denominator = [Taylor::ZERO];
+            let mut numerator = [TaylorJet::<D>::ZERO; K];
+            let mut denominator = [TaylorJet::<D>::ZERO];
+            let mut original_numerator = [TaylorJet::<D>::ZERO; K];
+            let mut original_denominator = [TaylorJet::<D>::ZERO];
             let mut numerator_hull: [Option<I>; K] = [None; K];
             let mut denominator_hull: Option<I> = None;
             for (i, a) in bu[..lu].iter().enumerate() {
@@ -1021,7 +1028,7 @@ fn projected_tensor_cell<P, const N: usize, const K: usize>(
                     if partition {
                         execution.budget.charge(1, execution.cancel)?;
                         if i == 0 && j == 0 {
-                            original_numerator = value.map(Taylor::interval);
+                            original_numerator = value.map(TaylorJet::<D>::interval);
                         } else {
                             let original_projected = if i == 0 || j == 0 {
                                 projected
@@ -1042,7 +1049,7 @@ fn projected_tensor_cell<P, const N: usize, const K: usize>(
                         if partition {
                             execution.budget.charge(1, execution.cancel)?;
                             if i == 0 && j == 0 {
-                                original_denominator = [Taylor::interval(weight)];
+                                original_denominator = [TaylorJet::<D>::interval(weight)];
                             } else {
                                 add_tensor_term(
                                     &mut original_denominator,
@@ -1057,10 +1064,14 @@ fn projected_tensor_cell<P, const N: usize, const K: usize>(
                 }
             }
             if partition {
-                execution.budget.charge(10 * K, execution.cancel)?;
+                execution
+                    .budget
+                    .charge(TaylorJet::<D>::COEFFICIENTS * K, execution.cancel)?;
                 intersect_tensor_values(&mut numerator, &original_numerator)?;
                 if rational {
-                    execution.budget.charge(10, execution.cancel)?;
+                    execution
+                        .budget
+                        .charge(TaylorJet::<D>::COEFFICIENTS, execution.cancel)?;
                     intersect_tensor_values(&mut denominator, &original_denominator)?;
                 }
             }
@@ -1624,15 +1635,15 @@ pub(crate) fn projected_spline<const N: usize>(
     result.ok_or(E::ParameterOutOfRange)
 }
 
-fn projected_spline_cell<const N: usize, const K: usize, const L: usize>(
+fn projected_spline_cell<const N: usize, const K: usize, const L: usize, const D: usize>(
     (knots, count): (&KnotVector, usize),
-    parameter: Taylor,
+    parameter: TaylorJet<D>,
     control: &impl Fn(usize) -> [f64; N],
-    coefficient: &impl Fn([f64; N]) -> Result<([Taylor; K], [Taylor; L]), E>,
+    coefficient: &impl Fn([f64; N]) -> Result<([TaylorJet<D>; K], [TaylorJet<D>; L]), E>,
     SplineProjectionPolicy { rational, allow_c0 }: SplineProjectionPolicy,
     constant_coefficients: bool,
     execution: &mut ProjectionExecution<'_>,
-) -> Result<([Taylor; K], [Taylor; L]), E> {
+) -> Result<([TaylorJet<D>; K], [TaylorJet<D>; L]), E> {
     let degree = validate_knots_with_policy(
         knots,
         count,
@@ -1642,7 +1653,7 @@ fn projected_spline_cell<const N: usize, const K: usize, const L: usize>(
         execution.budget,
         execution.cancel,
     )?;
-    let mut result: Option<([Taylor; K], [Taylor; L])> = None;
+    let mut result: Option<([TaylorJet<D>; K], [TaylorJet<D>; L])> = None;
     for span in 0..knots.len() - 1 {
         execution.budget.charge(1, execution.cancel)?;
         if knots[span] == knots[span + 1] {
@@ -1660,9 +1671,9 @@ fn projected_spline_cell<const N: usize, const K: usize, const L: usize>(
             execution.budget,
             execution.cancel,
         )?;
-        let mut numerator = ([Taylor::ZERO; K], [Taylor::ZERO; L]);
+        let mut numerator = ([TaylorJet::<D>::ZERO; K], [TaylorJet::<D>::ZERO; L]);
         let mut numerator_hull: ([Option<I>; K], [Option<I>; L]) = ([None; K], [None; L]);
-        let mut denominator = Taylor::ZERO;
+        let mut denominator = TaylorJet::<D>::ZERO;
         let mut weight_hull: Option<I> = None;
         for (index, basis) in basis[..length].iter().enumerate() {
             execution.budget.charge(1 + K + L, execution.cancel)?;
@@ -1675,7 +1686,7 @@ fn projected_spline_cell<const N: usize, const K: usize, const L: usize>(
                 .zip(numerator_hull.0.iter_mut().chain(&mut numerator_hull.1))
                 .zip(coefficients.0.into_iter().chain(coefficients.1))
             {
-                if coefficient.0 != Taylor::ZERO.0 {
+                if coefficient.0 != TaylorJet::<D>::ZERO.0 {
                     *numerator = *numerator + coefficient * *basis;
                 }
                 *hull = Some(hull.map_or(coefficient.0[0][0], |previous| {
@@ -1684,7 +1695,7 @@ fn projected_spline_cell<const N: usize, const K: usize, const L: usize>(
             }
             if rational {
                 let weight = I::point(point[N - 1]);
-                denominator = denominator + Taylor::interval(weight) * *basis;
+                denominator = denominator + TaylorJet::<D>::interval(weight) * *basis;
                 weight_hull = Some(weight_hull.map_or(weight, |previous| previous.hull(weight)));
             }
         }
@@ -1697,7 +1708,7 @@ fn projected_spline_cell<const N: usize, const K: usize, const L: usize>(
             {
                 if let Some(hull) = hull {
                     if constant_coefficients && hull.lower == hull.upper {
-                        *numerator = Taylor::interval(hull);
+                        *numerator = TaylorJet::<D>::interval(hull);
                     } else {
                         numerator.0[0][0] = numerator.0[0][0]
                             .intersection(hull)
@@ -1707,7 +1718,7 @@ fn projected_spline_cell<const N: usize, const K: usize, const L: usize>(
             }
             if let Some(hull) = weight_hull {
                 if hull.lower == hull.upper {
-                    denominator = Taylor::interval(hull);
+                    denominator = TaylorJet::<D>::interval(hull);
                 } else {
                     denominator.0[0][0] = denominator.0[0][0]
                         .intersection(hull)

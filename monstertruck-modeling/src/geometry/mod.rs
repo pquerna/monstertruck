@@ -71,12 +71,12 @@ pub use validated_interval::{
     ValidatedCurveJet, ValidatedCurveJet2D, ValidatedGeometryBudget, ValidatedGeometryError,
     ValidatedInterval, ValidatedPlaneCandidateWitness, ValidatedPlaneCoverageRejection,
     ValidatedPlaneCoverageWitness, ValidatedPlaneEndpointOrientationWitness,
-    ValidatedPlaneEndpointWitness, ValidatedPlaneJunctionCondition, ValidatedPlaneJunctionRejection,
-    ValidatedPlaneJunctionWitness, ValidatedScalarCurveJet,
+    ValidatedPlaneEndpointWitness, ValidatedPlaneJunctionCondition,
+    ValidatedPlaneJunctionRejection, ValidatedPlaneJunctionWitness, ValidatedScalarCurveJet,
     ValidatedSurfaceFunctional, ValidatedSurfaceFunctionalJet, ValidatedSurfaceJet,
     validated_boundary_jet, validated_curve_jet, validated_curve_projected_jet,
     validated_curve2d_jet, validated_curve2d_piecewise_jet, validated_sin_cos,
     validated_surface_functional_jets, validated_surface_geometric_normal, validated_surface_jet,
-    validated_surface_piecewise_jet,
+    validated_surface_piecewise_jet, validated_surface_position_bounds,
 };
 pub use validated_phase::{validated_asin, validated_atan2};
