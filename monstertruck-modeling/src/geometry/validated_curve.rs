@@ -391,6 +391,9 @@ impl PreparedValidatedCurve<'_> {
     /// and rational curve/profile joins can qualify through exact homogeneous
     /// first-jet coefficient identities, without family recognition.
     /// False never invalidates the binding's zeroth-order point enclosure.
+    /// An original carrier qualified on a piece's retained uniqueness domain
+    /// also qualifies that piece's roots. Unproved whole-domain smoothness
+    /// retains fresh root-box qualification for the requested subrange.
     pub fn is_smooth_on(
         &self,
         range: [f64; 2],
@@ -434,23 +437,32 @@ impl PreparedValidatedCurve<'_> {
                     .source_parameters
                     .ok_or(ValidatedGeometryError::InvalidInput)?,
             );
-            let tube = Certification::Prepared(self).certify(
-                piece.projection,
-                part,
-                original,
-                budget,
-                cancel,
-            )?;
-            let charts = unflatten(tube.rooted_domain);
-            if !surface_box_smooth(first, charts[0][0], charts[0][1], budget, cancel)?
-                || !surface_box_smooth(second, charts[1][0], charts[1][1], budget, cancel)?
-            {
-                return Ok(false);
-            }
             if matches!(piece.projection, Projection::Native)
                 && !curve_span_smooth(leader, part, 2, true, budget, cancel)?
             {
                 return Ok(false);
+            }
+            // Preparation retained the actual whole-piece uniqueness domain,
+            // not a sampled root box or a different carrier's chart.
+            let retained = unflatten(original);
+            let first_smooth =
+                surface_box_smooth(first, retained[0][0], retained[0][1], budget, cancel)?;
+            let second_smooth =
+                surface_box_smooth(second, retained[1][0], retained[1][1], budget, cancel)?;
+            if !first_smooth || !second_smooth {
+                let tube = Certification::Prepared(self).certify(
+                    piece.projection,
+                    part,
+                    original,
+                    budget,
+                    cancel,
+                )?;
+                let charts = unflatten(tube.rooted_domain);
+                if !surface_box_smooth(first, charts[0][0], charts[0][1], budget, cancel)?
+                    || !surface_box_smooth(second, charts[1][0], charts[1][1], budget, cancel)?
+                {
+                    return Ok(false);
+                }
             }
             covered = true;
         }
@@ -3451,6 +3463,137 @@ mod continuation_regressions {
         BsplineSurface, Invertible, Line, NurbsSurface, Processor, RevolutionSurface, TrimmedCurve,
         Vector3, Vector4,
     };
+
+    #[test]
+    fn retained_carrier_smoothness_reuses_whole_domains_and_keeps_c0_root_box_fallback() {
+        for kink in [false, true] {
+            let bend = 1.0 / 1024.0;
+            let columns = if kink {
+                vec![(0.0, 0.0), (1.0, 0.0), (2.0, bend)]
+            } else {
+                vec![(0.0, 0.0), (2.0, 0.0)]
+            };
+            let source = Surface::BsplineSurface(BsplineSurface::new(
+                (
+                    KnotVector::from(if kink {
+                        vec![0.0, 0.0, 1.0, 2.0, 2.0]
+                    } else {
+                        vec![0.0, 0.0, 2.0, 2.0]
+                    }),
+                    KnotVector::from(vec![0.0, 0.0, 1.0, 1.0]),
+                ),
+                columns
+                    .into_iter()
+                    .map(|(x, y)| vec![Point3::new(x, y, 0.0), Point3::new(x, y, 1.0)])
+                    .collect(),
+            ));
+            let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
+                Box::new(source),
+                Box::new(Surface::Plane(Plane::new(
+                    Point3::new(0.0, 0.0, 0.0),
+                    Point3::new(1.0, 0.0, 0.0),
+                    Point3::new(0.0, 1.0, 0.0),
+                ))),
+                Box::new(Curve::Line(Line(
+                    Point3::new(0.0, 0.0, 0.0),
+                    Point3::new(2.0, 0.0, 0.0),
+                ))),
+                None,
+                None,
+            ));
+            let cancel = AtomicBool::new(false);
+            let mut preparation = ValidatedGeometryBudget::new(4_000_000);
+            let domain = [
+                interval_range([-0.25, 2.25]).unwrap(),
+                interval_range([-0.25, 0.25]).unwrap(),
+                interval_range([-0.25, 2.25]).unwrap(),
+                interval_range([-0.25, 0.25]).unwrap(),
+            ];
+            // Retain the genuine complete-piece uniqueness domain, exactly as
+            // preparation does, rather than substituting a narrow root image.
+            let tube = certify(
+                &curve,
+                Projection::Native,
+                interval_range([0.0, 1.0]).unwrap(),
+                domain,
+                &mut preparation,
+                &cancel,
+            )
+            .unwrap();
+            let prepared = PreparedValidatedCurve {
+                source: PreparedSource::Borrowed(&curve),
+                range: [0.0, 1.0],
+                pieces: vec![ValidatedCurvePiece {
+                    parameter: [0.0, 1.0],
+                    jet: implicit_jet(&tube).unwrap(),
+                    source_parameters: Some(unflatten(tube.domain)),
+                    contraction_bound: tube.contraction_bound(),
+                    surface_residual: tube.surface_residual(),
+                    projection: Projection::Native,
+                }],
+                options: ValidatedCurveOptions::default(),
+                mapped: None,
+            };
+            let (first, second, _) = carriers(&curve).unwrap();
+            let charts = unflatten(tube.domain);
+            assert_eq!(
+                surface_box_smooth(first, charts[0][0], charts[0][1], &mut preparation, &cancel)
+                    .unwrap(),
+                !kink,
+            );
+            assert!(
+                surface_box_smooth(
+                    second,
+                    charts[1][0],
+                    charts[1][1],
+                    &mut preparation,
+                    &cancel
+                )
+                .unwrap()
+            );
+            let requested = [0.1, 0.2];
+            let mut fresh_work = ValidatedGeometryBudget::new(4_000_000);
+            let fresh = certify(
+                &curve,
+                Projection::Native,
+                interval_range(requested).unwrap(),
+                tube.domain,
+                &mut fresh_work,
+                &cancel,
+            )
+            .unwrap();
+            let rooted = unflatten(fresh.rooted_domain);
+            assert!(
+                surface_box_smooth(first, rooted[0][0], rooted[0][1], &mut preparation, &cancel)
+                    .unwrap()
+            );
+            let mut query_work = ValidatedGeometryBudget::new(4_000_000);
+            assert!(
+                prepared
+                    .is_smooth_on(requested, &mut query_work, &cancel)
+                    .unwrap()
+            );
+            if kink {
+                assert!(
+                    !prepared
+                        .is_smooth_on([0.0, 1.0], &mut preparation, &cancel)
+                        .unwrap()
+                );
+            } else {
+                // Whole-carrier qualification performs less work than even
+                // the fresh root certificate, without relying on fixed counts.
+                assert!(query_work.consumed() < fresh_work.consumed());
+            }
+            assert!(matches!(
+                prepared.is_smooth_on(requested, &mut ValidatedGeometryBudget::new(0), &cancel),
+                Err(ValidatedGeometryError::ResourceLimit)
+            ));
+            assert!(matches!(
+                prepared.is_smooth_on(requested, &mut preparation, &AtomicBool::new(true)),
+                Err(ValidatedGeometryError::Cancelled)
+            ));
+        }
+    }
 
     #[test]
     fn continuous_c0_sources_retain_whole_image_without_a_false_taylor_receipt() {

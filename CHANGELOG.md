@@ -30,6 +30,12 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Prepared implicit-curve smoothness reuses each piece's original whole-domain
+  carrier qualification, without repeating root certification when both carriers
+  prove smooth. Unproved whole-domain smoothness retains fresh subrange root-box
+  qualification; native leader C2, projection-joint checks and terminal errors
+  remain mandatory. No borrowed chart or cached root gains new authority.
+
 - STEP seam selection distinguishes missing face-qualified UV from invalid 3D
   geometry: zero original carrier associations remain inspection-only. Owned
   seam declarations require two distinct complete parameter representations.
