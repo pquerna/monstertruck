@@ -14,8 +14,8 @@ mod projection;
 mod smoothness;
 pub(crate) use explicit::{
     ProjectionLeaderKnotEvaluator, TENSOR_EVALUATOR_FIXED_BYTES, processed_parameter,
-    validated_curve_piecewise_jet, validated_curve_position_bounds,
-    validated_projection_leader_jet,
+    surface_piecewise_first_jet, surface_piecewise_position, validated_curve_piecewise_jet,
+    validated_curve_position_bounds, validated_projection_leader_jet,
 };
 pub use explicit::{
     validated_boundary_jet, validated_curve_jet, validated_curve2d_jet,
@@ -25,7 +25,7 @@ pub use explicit::{
 pub use normal::validated_surface_geometric_normal;
 pub(crate) use projection::{
     ProjectionExecution, ScalarProjection, projected_spline, projected_surface_curve_jet,
-    projected_surface_taylor,
+    projected_surface_taylor, validated_surface_functional_values,
 };
 pub use projection::{
     ValidatedSurfaceFunctional, ValidatedSurfaceFunctionalJet, validated_curve_projected_jet,
@@ -380,6 +380,14 @@ pub struct ValidatedSurfaceJet {
     pub duv: [ValidatedInterval; 3],
     /// Twice differentiated in the second chart coordinate.
     pub dvv: [ValidatedInterval; 3],
+}
+
+/// Internal first-order source data; it carries no Hessian or smoothness claim.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SurfaceFirstJet {
+    pub(crate) position: [ValidatedInterval; 3],
+    pub(crate) du: [ValidatedInterval; 3],
+    pub(crate) dv: [ValidatedInterval; 3],
 }
 
 /// Correlated scalar bounds for `direction dot (curve(t) - origin)`.

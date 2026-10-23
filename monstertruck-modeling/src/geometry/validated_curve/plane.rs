@@ -24,8 +24,9 @@
 //! spatial gradients; no root-image clipping substitutes for that path proof.
 
 use super::super::validated_interval::{
-    ProjectionExecution, TENSOR_EVALUATOR_FIXED_BYTES, ValidatedSurfaceFunctional,
-    ValidatedSurfaceFunctionalJet, validated_surface_functional_jets,
+    ProjectionExecution, SurfaceFirstJet, TENSOR_EVALUATOR_FIXED_BYTES, ValidatedSurfaceFunctional,
+    ValidatedSurfaceFunctionalJet, surface_piecewise_first_jet, surface_piecewise_position,
+    validated_surface_functional_jets, validated_surface_functional_values,
 };
 use super::*;
 
@@ -57,9 +58,9 @@ struct CoordinateJet {
 }
 
 // Bound retained proof locals separately from the shared source evaluator's
-// bounded scratch. Two scalar systems replace three spatial systems; rooted
-// spatial reconstruction remains mandatory, with a second full convex-domain
-// jet when its center lies outside the root image.
+// bounded scratch. Keep the original conservative two-system/two-Hessian
+// allowance: rooted Hessians remain mandatory, while convex-domain gradients
+// and their extracted derivative vectors fit the other spatial-jet slot.
 const PLANE_WORKSPACE_BYTES: usize = 2 * size_of::<PlaneSystem>()
     + 2 * size_of::<ValidatedSurfaceJet>()
     + 2 * size_of::<ValidatedSurfaceFunctional>()
@@ -87,6 +88,10 @@ const _: () = assert!(size_of::<PlaneKrawczykReceipt>() <= size_of::<System>());
 // can reuse the dead enclosure slot rather than grow the proof-frame allowance.
 const _: () = assert!(size_of::<ValidatedCurveJet>() <= size_of::<PlaneJet>());
 const _: () = assert!(size_of::<[ValidatedSurfaceFunctionalJet; 2]>() <= size_of::<PlaneSystem>());
+const _: () = assert!(
+    size_of::<SurfaceFirstJet>() + 2 * size_of::<[ValidatedInterval; 3]>()
+        <= size_of::<ValidatedSurfaceJet>()
+);
 
 // Both proof paths call the same fixed source evaluator. Track its concrete
 // tensor state (including original-coefficient partition scratch) on BOTH sides,
@@ -166,15 +171,16 @@ impl Chart {
     fn mean_value_parameters(
         &self,
         center: [ValidatedInterval; 2],
-        source: &ValidatedSurfaceJet,
+        du: [ValidatedInterval; 3],
+        dv: [ValidatedInterval; 3],
         delta: [ValidatedInterval; 2],
         budget: &mut ValidatedGeometryBudget,
         cancel: &AtomicBool,
     ) -> Result<[ValidatedInterval; 2], ValidatedGeometryError> {
         budget.charge(1, cancel)?;
         budget.charge(2, cancel)?;
-        let du = self.vector_parameters(source.du);
-        let dv = self.vector_parameters(source.dv);
+        let du = self.vector_parameters(du);
+        let dv = self.vector_parameters(dv);
         let mut parameters = [ZERO; 2];
         for i in 0..2 {
             budget.charge(1, cancel)?;
@@ -214,6 +220,21 @@ impl Chart {
     }
 }
 
+fn native_functionals(chart: &Chart, guide: &ValidatedCurveJet) -> [ValidatedSurfaceFunctional; 2] {
+    [
+        ValidatedSurfaceFunctional {
+            direction: chart.normal,
+            origin: chart.origin,
+            offset: ZERO,
+        },
+        ValidatedSurfaceFunctional {
+            direction: guide.first,
+            origin: guide.position,
+            offset: ZERO,
+        },
+    ]
+}
+
 fn system(
     source: &Surface,
     chart: &Chart,
@@ -228,18 +249,7 @@ fn system(
             let projected = validated_surface_functional_jets(
                 source,
                 domain.map(|bound| [bound.lower, bound.upper]),
-                [
-                    ValidatedSurfaceFunctional {
-                        direction: chart.normal,
-                        origin: chart.origin,
-                        offset: ZERO,
-                    },
-                    ValidatedSurfaceFunctional {
-                        direction: guide.first,
-                        origin: guide.position,
-                        offset: ZERO,
-                    },
-                ],
+                native_functionals(chart, guide),
                 budget,
                 cancel,
             )?;
@@ -251,7 +261,7 @@ fn system(
         PlaneJet::BetweenPlanes { .. } => {
             // Retain the exact raw-t affine coefficient law and endpoint
             // branches; never distribute independent interval time factors.
-            let source = validated_surface_piecewise_jet(
+            let source = surface_piecewise_first_jet(
                 source,
                 domain.map(|bound| [bound.lower, bound.upper]),
                 budget,
@@ -281,6 +291,44 @@ fn system(
     Ok(system)
 }
 
+// Center residuals do not consume a Jacobian or grant derivative authority.
+fn system_values(
+    source: &Surface,
+    chart: &Chart,
+    coordinate: &CoordinateJet,
+    domain: [ValidatedInterval; 2],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<[ValidatedInterval; 2], ValidatedGeometryError> {
+    budget.charge(1, cancel)?;
+    let value = match &coordinate.jet {
+        PlaneJet::Native(guide) => validated_surface_functional_values(
+            source,
+            domain.map(|bound| [bound.lower, bound.upper]),
+            native_functionals(chart, guide),
+            budget,
+            cancel,
+        )?,
+        PlaneJet::BetweenPlanes { .. } => {
+            let position = surface_piecewise_position(
+                source,
+                domain.map(|bound| [bound.lower, bound.upper]),
+                budget,
+                cancel,
+            )?;
+            [
+                dot3(chart.normal, subtract3(position, chart.origin)),
+                coordinate.jet.residual(coordinate.parameter, position),
+            ]
+        }
+    };
+    if value.into_iter().all(ValidatedInterval::is_finite) {
+        Ok(value)
+    } else {
+        Err(ValidatedGeometryError::ConditioningFailure)
+    }
+}
+
 /// Independent time mean-value enclosure at the unchanged source center.
 /// Only the residual's anchor is queried at one time; its derivative uses the
 /// original whole-span leader jet and original source functional coefficients.
@@ -307,7 +355,7 @@ fn native_center_residual(
         .into_iter()
         .map(ValidatedInterval::square)
         .fold(ZERO, |a, b| a + b);
-    let residuals = validated_surface_functional_jets(
+    let residuals = validated_surface_functional_values(
         source,
         center.map(|bound| [bound.lower, bound.upper]),
         [
@@ -327,8 +375,7 @@ fn native_center_residual(
     )?;
     execution.budget.charge(1, execution.cancel)?;
     Ok(Some(
-        residuals[0].position
-            + residuals[1].position * (coordinate.parameter - ValidatedInterval::point(middle)),
+        residuals[0] + residuals[1] * (coordinate.parameter - ValidatedInterval::point(middle)),
     ))
 }
 
@@ -380,7 +427,7 @@ pub(super) fn certify(
     if !rho.is_finite() || rho >= 1.0 {
         return Err(ValidatedGeometryError::ConditioningFailure);
     }
-    let mut center = system(
+    let mut center = system_values(
         source,
         &chart,
         &coordinate,
@@ -396,11 +443,11 @@ pub(super) fn certify(
         &mut ProjectionExecution { budget, cancel },
     )? {
         budget.charge(1, cancel)?;
-        center.value[1] = center.value[1]
+        center[1] = center[1]
             .intersection(time_centered)
             .ok_or(ValidatedGeometryError::ConditioningFailure)?;
     }
-    let correction = product(inverse, center.value);
+    let correction = product(inverse, center);
     let delta = std::array::from_fn(|i| source_domain[i] - ValidatedInterval::point(middle[i]));
     let error = interval_product(defect, delta);
     let base: [ValidatedInterval; 2] =
@@ -459,37 +506,37 @@ pub(super) fn certify(
         budget.charge(1, cancel)?;
         let center_in_image =
             (0..2).all(|i| image[i].lower <= middle[i] && middle[i] <= image[i].upper);
-        let gradients = if center_in_image {
-            &rooted
+        let (du, dv) = if center_in_image {
+            (rooted.du, rooted.dv)
         } else {
-            match &mut original_gradients {
+            let gradients = match &mut original_gradients {
                 Some(gradients) => gradients,
-                slot => slot.insert(validated_surface_piecewise_jet(
+                slot => slot.insert(surface_piecewise_first_jet(
                     source,
                     source_domain.map(|bound| [bound.lower, bound.upper]),
                     budget,
                     cancel,
                 )?),
-            }
+            };
+            (gradients.du, gradients.dv)
         };
         let image_delta = std::array::from_fn(|i| image[i] - ValidatedInterval::point(middle[i]));
         let center_chart = match retained_center_chart {
             Some(center) => center,
             None => {
-                let center = validated_surface_functional_jets(
+                let center = validated_surface_functional_values(
                     source,
                     middle.map(|value| [value; 2]),
                     chart.functionals(),
                     budget,
                     cancel,
-                )?
-                .map(|jet| jet.position);
+                )?;
                 retained_center_chart = Some(center);
                 center
             }
         };
         let mean_uv =
-            chart.mean_value_parameters(center_chart, gradients, image_delta, budget, cancel)?;
+            chart.mean_value_parameters(center_chart, du, dv, image_delta, budget, cancel)?;
         let mut uv = direct_uv;
         for i in 0..2 {
             budget.charge(1, cancel)?;
@@ -520,7 +567,7 @@ pub(super) fn certify(
                 // The old whole-box gradients are dead after their mean-UV
                 // enclosure; reuse that same accounted spatial-jet slot.
                 original_gradients = None;
-                let segment = original_gradients.insert(validated_surface_piecewise_jet(
+                let segment = original_gradients.insert(surface_piecewise_first_jet(
                     source,
                     segment_domain.map(|bound| [bound.lower, bound.upper]),
                     budget,
@@ -528,7 +575,8 @@ pub(super) fn certify(
                 )?);
                 let segment_uv = chart.mean_value_parameters(
                     center_chart,
-                    segment,
+                    segment.du,
+                    segment.dv,
                     image_delta,
                     budget,
                     cancel,
@@ -768,13 +816,12 @@ pub(super) fn numerical_root(
         }
     }
     budget.charge(1, cancel)?;
-    let point = validated_surface_piecewise_jet(
+    let point = surface_piecewise_position(
         source,
         [center[source_index], center[source_index + 1]].map(|value| [value, value]),
         budget,
         cancel,
-    )?
-    .position;
+    )?;
     let uv = chart.parameters(point).map(ValidatedInterval::midpoint);
     let plane_index = 2 - source_index;
     center[plane_index..plane_index + 2].copy_from_slice(&uv);
@@ -1710,7 +1757,14 @@ mod regressions {
         };
         let image_delta = [interval_range([0.5, 1.0]).unwrap(), span];
         let mean = chart
-            .mean_value_parameters([ZERO; 2], &curved, image_delta, &mut work, &cancel)
+            .mean_value_parameters(
+                [ZERO; 2],
+                curved.du,
+                curved.dv,
+                image_delta,
+                &mut work,
+                &cancel,
+            )
             .unwrap();
         contains(mean[0], 0.25);
         contains(mean[0], 1.0);

@@ -1,7 +1,7 @@
 use super::{
-    ONE, Taylor, TaylorJet, ValidatedCurveJet, ValidatedCurveJet2D, ValidatedGeometryBudget,
-    ValidatedGeometryError, ValidatedInterval, ValidatedSurfaceJet, curve_jet_from_taylor,
-    interval_range,
+    ONE, SurfaceFirstJet, Taylor, TaylorJet, ValidatedCurveJet, ValidatedCurveJet2D,
+    ValidatedGeometryBudget, ValidatedGeometryError, ValidatedInterval, ValidatedSurfaceJet,
+    curve_jet_from_taylor, interval_range,
 };
 use crate::{
     Conic2D, Curve, Curve2D, KnotVector, Matrix3, Matrix4, ParametricCurve, Plane, Surface,
@@ -379,6 +379,48 @@ pub fn validated_surface_position_bounds(
         surface,
         range,
         functionals,
+        budget,
+        cancel,
+    )?;
+    Ok(value.map(|v| v.0[0][0]))
+}
+
+/// First-order data in the explicit evaluator's unchanged source convention.
+pub(crate) fn surface_piecewise_first_jet(
+    surface: &Surface,
+    range: [[f64; 2]; 2],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<SurfaceFirstJet, ValidatedGeometryError> {
+    let value = surface_taylor_with_policy(
+        surface,
+        TaylorJet::<2>::variable(interval_range(range[0])?, 0),
+        TaylorJet::<2>::variable(interval_range(range[1])?, 1),
+        0,
+        true,
+        budget,
+        cancel,
+    )?;
+    Ok(SurfaceFirstJet {
+        position: value.map(|v| v.0[0][0]),
+        du: value.map(|v| v.0[1][0]),
+        dv: value.map(|v| v.0[0][1]),
+    })
+}
+
+/// Zeroth-order data in the explicit evaluator's unchanged source convention.
+pub(crate) fn surface_piecewise_position(
+    surface: &Surface,
+    range: [[f64; 2]; 2],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<[ValidatedInterval; 3], ValidatedGeometryError> {
+    let value = surface_taylor_with_policy(
+        surface,
+        TaylorJet::<1>::interval(interval_range(range[0])?),
+        TaylorJet::<1>::interval(interval_range(range[1])?),
+        0,
+        true,
         budget,
         cancel,
     )?;

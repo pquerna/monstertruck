@@ -23,7 +23,10 @@ monstertruck 0.4.0.
   orders; third-derivative curve consumers keep their existing order. Original
   source evidence, C0 admission, denominator checks, cumulative work limits and
   cancellation remain in the shared pipeline. Tensor intersection work charges
-  only the coefficients actually intersected.
+  only the coefficients actually intersected. Reduced-plane root contraction
+  likewise requests only scalar values at its centers and first-order spatial
+  data for its gradient-only proofs. Final whole-span rooted Hessians, native
+  guide third derivatives and retained branch/tube authority remain mandatory.
 
 ### Fixed
 

@@ -104,6 +104,18 @@ pub fn validated_surface_functional_jets<const N: usize>(
     }))
 }
 
+/// Zeroth-order original coefficient functionals, with the same source admission.
+pub(crate) fn validated_surface_functional_values<const N: usize>(
+    surface: &Surface,
+    domain: [[f64; 2]; 2],
+    functionals: [ValidatedSurfaceFunctional; N],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<[I; N], E> {
+    let values = surface_functional_taylors::<N, 1>(surface, domain, functionals, budget, cancel)?;
+    Ok(values.map(|value| value.0[0][0]))
+}
+
 // Original coefficient-first dispatch shared by requested Taylor orders.
 pub(super) fn surface_functional_taylors<const N: usize, const D: usize>(
     surface: &Surface,
