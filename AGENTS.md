@@ -37,6 +37,10 @@ zero-area loop in its open covering chart. Material ray counts respect face
 orientation; Unknown faces retain propagated shared boundary replacements.
 Open intersection attachment uses an endpoint without chart selection only when
 that endpoint has a unique boundary occurrence.
+Closed source-bound contact inversion uses its paired generated-guide occurrence
+to select the cyclic branch, then retains native carrier and endpoint residual
+checks. Only the generated guide gauge is cyclic; original seam roots and
+boundary parameters are never normalized by spatial nearness.
 Closed-chart departure follows the physical transverse tangent of both original
 carriers and the pre-cut orientation certificate, not guide parameter speed.
 Zero/nonfinite transversality, unresolved orientation and invalid wedges refuse.

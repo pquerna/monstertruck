@@ -30,6 +30,12 @@ monstertruck 0.4.0.
 
 ### Fixed
 
+- Closed periodic boolean contacts seed native inversion from their paired
+  generated-guide occurrence, rather than a globally nearest closing chord.
+  Exact generated period endpoints use the generated origin; original seam
+  roots and boundary gauges remain unchanged. Carrier/endpoint residuals,
+  strict contact ordering and occurrence-level attachment remain mandatory.
+
 - Prepared implicit-curve smoothness reuses each piece's original whole-domain
   carrier qualification, without repeating root certification when both carriers
   prove smooth. Unproved whole-domain smoothness retains fresh subrange root-box

@@ -1,6 +1,8 @@
 //! Attach intersections to their actual paired chart-boundary uses.
 //! Open and spatially closed paths can both cross a periodic chart seam.
 //! Native and polygon stores replay the same occurrence-level partition.
+//! A closed guide's source-bound contact keeps its paired raw-guide occurrence
+//! as the inverse seed; a globally nearest chord cannot choose its cyclic branch.
 
 use super::*;
 use crate::transversal::integrate::NativeIntersectionParameterWitness;
@@ -11,6 +13,8 @@ use std::mem::size_of;
 pub(super) enum IntersectionParameterBinding {
     /// Existing endpoint representation remains part of the inverse contract.
     BoundCurve,
+    /// Existing contact seeded by its corresponding raw-guide occurrence.
+    BoundPairedLeader(f64),
     /// Original contact is not bound to a generated guide endpoint yet.
     OriginalContactConstruction,
 }
@@ -28,11 +32,21 @@ where
     if let Some(work) = work {
         work.charge(curve.leader().len())?;
     }
-    let mut parameter = curve
-        .leader()
-        .search_nearest_parameter(point, None, 100)
-        .ok_or("intersection_chart_native_parameter")?;
     let (front, back) = curve.range_tuple();
+    let mut parameter = match binding {
+        IntersectionParameterBinding::BoundPairedLeader(parameter)
+            if parameter.is_finite() && parameter >= front && parameter <= back =>
+        {
+            parameter
+        }
+        IntersectionParameterBinding::BoundPairedLeader(_) => {
+            return Err("intersection_chart_native_parameter_hint".into());
+        }
+        _ => curve
+            .leader()
+            .search_nearest_parameter(point, None, 100)
+            .ok_or("intersection_chart_native_parameter")?,
+    };
     for _ in 0..100 {
         if let Some(work) = work {
             work.check()?;
@@ -47,13 +61,16 @@ where
         }
         let endpoint_matches = match binding {
             IntersectionParameterBinding::OriginalContactConstruction => true,
-            IntersectionParameterBinding::BoundCurve if parameter.near(&front) => {
+            IntersectionParameterBinding::BoundCurve
+            | IntersectionParameterBinding::BoundPairedLeader(_) if parameter.near(&front) => {
                 curve.leader().front().near(&point)
             }
-            IntersectionParameterBinding::BoundCurve if parameter.near(&back) => {
+            IntersectionParameterBinding::BoundCurve
+            | IntersectionParameterBinding::BoundPairedLeader(_) if parameter.near(&back) => {
                 curve.leader().back().near(&point)
             }
-            IntersectionParameterBinding::BoundCurve => true,
+            IntersectionParameterBinding::BoundCurve
+            | IntersectionParameterBinding::BoundPairedLeader(_) => true,
         };
         // Construction binds the original contact only after restricting this
         // guide. It needs the actual carrier root, not an unbound seed endpoint.
@@ -808,6 +825,9 @@ where
         paired_chart_edges(&native[1][faces[1]]),
     ];
     let closed = endpoints.is_none();
+    if closed && polyline.len() != curve.leader().len() {
+        return Err("intersection_chart_unpaired_guides".into());
+    }
     if closed {
         let mut original = None;
         for side in 0..2 {
@@ -946,9 +966,21 @@ where
                                 .ok_or("intersection_chart_polygon_parameter")?,
                         );
                         let mut polygon_parameter = index as f64 + fraction;
-                        let mut native_parameter = intersection_parameter(
-                            &curve, point, IntersectionParameterBinding::BoundCurve, work, None,
-                        )?;
+                        // The two closed guides retain the same control partition.
+                        // Select the declared cyclic occurrence before inversion,
+                        // not whichever closing chord wins a floating-point tie.
+                        // Only this generated guide gauge is cyclic; the original
+                        // boundary root and its native parameter remain unchanged.
+                        if closed && polygon_parameter == polyline.range_tuple().1 {
+                            polygon_parameter = polyline.range_tuple().0;
+                        }
+                        let binding = if closed {
+                            IntersectionParameterBinding::BoundPairedLeader(polygon_parameter)
+                        } else {
+                            IntersectionParameterBinding::BoundCurve
+                        };
+                        let mut native_parameter =
+                            intersection_parameter(&curve, point, binding, work, None)?;
                         let boundary = &native[side][faces[side]][wire][edge];
                         let (boundary_start, boundary_end) =
                             boundary.with_curve(BoundedCurve::range_tuple);
@@ -1378,7 +1410,315 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alternative::Alternative;
     use monstertruck_modeling as modeling;
+
+    type ContactCurve = Alternative<
+        modeling::Curve,
+        IntersectionCurve<PolylineCurve, modeling::Surface, modeling::Surface>,
+    >;
+    type ContactFace = Face<Point3, ContactCurve, modeling::Surface>;
+
+    const CONTACT_HEIGHT: f64 = 0.9499998642846288;
+    const CONTACT_PERIOD: usize = 136;
+
+    fn closed_bore_contact(
+        sense: f64,
+    ) -> ([ContactFace; 2], NativeIntersection<modeling::Surface>) {
+        let center = Point3::new(24.0, 11.0, 0.0);
+        let bottom: modeling::Wire =
+            modeling::primitive::circle(Point3::new(25.3, 11.0, 0.0), center, Vector3::unit_z(), 2);
+        let top = modeling::builder::translated(&bottom, Vector3::new(0.0, 0.0, 6.4));
+        let seam = Edge::new(
+            bottom.front_vertex().unwrap(),
+            top.front_vertex().unwrap(),
+            modeling::Curve::BsplineCurve(BsplineCurve::new(
+                KnotVector::from(vec![1.0, 1.0, 7.4, 7.4]),
+                vec![Point3::new(25.3, 11.0, 0.0), Point3::new(25.3, 11.0, 6.4)],
+            )),
+        );
+        let mut boundary = top.inverse();
+        boundary.push_back(seam.inverse());
+        boundary.extend(bottom.iter().cloned());
+        boundary.push_back(seam);
+        let wall =
+            modeling::Surface::RevolutionSurface(Processor::new(RevolutionSurface::by_revolution(
+                modeling::Curve::Line(Line(
+                    Point3::new(25.3, 11.0, 6.4),
+                    Point3::new(25.3, 11.0, 0.0),
+                )),
+                center,
+                Vector3::unit_z(),
+            )));
+        let lateral = modeling::Face::try_new(vec![boundary], wall).unwrap();
+        let corners = Vertex::from_points([
+            Point3::new(20.0, 7.0, CONTACT_HEIGHT),
+            Point3::new(28.0, 7.0, CONTACT_HEIGHT),
+            Point3::new(28.0, 15.0, CONTACT_HEIGHT),
+            Point3::new(20.0, 15.0, CONTACT_HEIGHT),
+        ]);
+        let rectangle = (0..4)
+            .map(|index| modeling::builder::line(&corners[index], &corners[(index + 1) % 4]))
+            .collect();
+        let cap = modeling::Face::try_new(
+            vec![rectangle],
+            modeling::Surface::Plane(Plane::new(
+                Point3::new(0.0, 0.0, CONTACT_HEIGHT),
+                Point3::new(1.0, 0.0, CONTACT_HEIGHT),
+                Point3::new(0.0, 1.0, CONTACT_HEIGHT),
+            )),
+        )
+        .unwrap();
+        let faces = [lateral, cap].map(|face| {
+            face.mapped(
+                |point| *point,
+                |curve| Alternative::FirstType(curve.clone()),
+                Clone::clone,
+            )
+        });
+        let polyline = PolylineCurve(
+            (0..=CONTACT_PERIOD)
+                .map(|index| {
+                    let angle = if index == CONTACT_PERIOD {
+                        0.0
+                    } else {
+                        sense * std::f64::consts::TAU * index as f64 / CONTACT_PERIOD as f64
+                    };
+                    Point3::new(
+                        24.0 + 1.3 * angle.cos(),
+                        11.0 + 1.3 * angle.sin(),
+                        CONTACT_HEIGHT,
+                    )
+                })
+                .collect(),
+        );
+        let mut leader = polyline.clone();
+        // The source root precedes the cleaned guide origin by roundoff.
+        // An unconstrained nearest chord therefore selects the closing branch.
+        leader[0].y += sense * 1.0e-12;
+        leader[CONTACT_PERIOD] = leader[0];
+        let curve = IntersectionCurve::new(faces[0].surface(), faces[1].surface(), leader);
+        (faces, (polyline, curve))
+    }
+
+    #[test]
+    fn closed_periodic_contact_inverse_keeps_both_declared_leader_branches() {
+        for sense in [-1.0, 1.0] {
+            let (_, (polyline, curve)) = closed_bore_contact(sense);
+            let point = polyline.front();
+            for parameter in [0.0, CONTACT_PERIOD as f64] {
+                assert_eq!(
+                    intersection_parameter(
+                        &curve,
+                        point,
+                        IntersectionParameterBinding::BoundPairedLeader(parameter),
+                        None,
+                        None,
+                    )
+                    .unwrap(),
+                    parameter,
+                    "the paired occurrence selects a branch, not a coordinate alias"
+                );
+            }
+            let opposite = polyline.evaluate(CONTACT_PERIOD as f64 / 2.0);
+            let parameter = intersection_parameter(
+                &curve,
+                opposite,
+                IntersectionParameterBinding::BoundPairedLeader(CONTACT_PERIOD as f64 / 2.0),
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(parameter, CONTACT_PERIOD as f64 / 2.0);
+            assert!(curve.evaluate(parameter).near(&opposite));
+        }
+    }
+
+    #[test]
+    fn closed_periodic_contact_replays_source_seam_corners_and_complete_paired_leaders() {
+        for sense in [-1.0, 1.0] {
+            let (faces, (polyline, curve)) = closed_bore_contact(sense);
+            let polygon_faces = faces.each_ref().map(|face| {
+                face.mapped(
+                    |point| *point,
+                    |curve| PolylineCurve::from_curve(curve, curve.range_tuple(), 1.0e-5),
+                    |_| (),
+                )
+            });
+            let mut native: [LoopsStore<Point3, ContactCurve>; 2] =
+                faces.each_ref().map(|face| std::iter::once(face).collect());
+            let mut polygon: [LoopsStore<Point3, PolylineCurve>; 2] = polygon_faces
+                .each_ref()
+                .map(|face| std::iter::once(face).collect());
+            let [(wire, edge)] = paired_chart_edges(&native[0][0])[..] else {
+                panic!("one original seam identity with two opposite chart uses");
+            };
+            let seam = faces[0].absolute_boundaries()[wire][edge].absolute_clone();
+            assert_eq!(seam.with_curve(BoundedCurve::range_tuple), (1.0, 7.4));
+            assert!(
+                seam.with_curve(|curve| curve.evaluate(1.0 + CONTACT_HEIGHT))
+                    .near(&polyline.front())
+            );
+            let original_polygon = polyline.clone();
+            let original_leader = curve.leader().clone();
+            let surfaces = faces.each_ref().map(Face::surface);
+            let orientation = ShapesOpStatus::from_is_curve(&curve).unwrap();
+            let mut children = Vec::new();
+            let mut record = |parent, child: &Edge<Point3, ContactCurve>, _| {
+                if parent == seam.id() {
+                    children.push(child.clone());
+                }
+                true
+            };
+            let [native0, native1] = &mut native;
+            let [polygon0, polygon1] = &mut polygon;
+            add_intersection(
+                (polyline, curve),
+                None,
+                IntersectionStores {
+                    native: [native0, native1],
+                    polygon: [polygon0, polygon1],
+                    original_boundaries: faces
+                        .each_ref()
+                        .map(|face| face.absolute_boundaries().as_slice()),
+                    sides: [
+                        (0, &surfaces[0], orientation),
+                        (0, &surfaces[1], orientation.not()),
+                    ],
+                },
+                orientation,
+                1.0e-5,
+                None,
+                &mut Some(&mut record),
+            )
+            .expect("a source-bound closed contact owns its paired cyclic guide origin");
+            assert_eq!(children.len(), 2);
+            assert_eq!(seam.with_curve(BoundedCurve::range_tuple), (1.0, 7.4));
+            let mut domains = children
+                .iter()
+                .map(|edge| edge.with_curve(BoundedCurve::range_tuple))
+                .collect::<Vec<_>>();
+            domains.sort_by(|left, right| left.0.total_cmp(&right.0));
+            assert_eq!(domains[0].0, 1.0);
+            assert_eq!(domains[0].1, domains[1].0);
+            assert_eq!(domains[1].1, 7.4);
+            for child in children {
+                let uses = native[0][0]
+                    .iter()
+                    .flat_map(|wire| wire.iter())
+                    .filter(|edge| edge.id() == child.id())
+                    .collect::<Vec<_>>();
+                assert_eq!(uses.len(), 2);
+                assert_ne!(uses[0].orientation(), uses[1].orientation());
+                assert!(
+                    child.front().point().near(&original_polygon.front())
+                        || child.back().point().near(&original_polygon.front())
+                );
+            }
+            assert!(
+                native[0][0]
+                    .iter()
+                    .any(|wire| wire.status() == ShapesOpStatus::And)
+            );
+            assert!(
+                native[0][0]
+                    .iter()
+                    .any(|wire| wire.status() == ShapesOpStatus::Or)
+            );
+            let mut replayed = HashMap::default();
+            for side in 0..2 {
+                assert_eq!(native[side][0].len(), polygon[side][0].len());
+                for (native, polygon) in native[side][0].iter().zip(polygon[side][0].iter()) {
+                    assert!(native.is_closed() && polygon.is_closed());
+                    assert_eq!(native.len(), polygon.len());
+                    for (native, polygon) in native.iter().zip(polygon.iter()) {
+                        assert!(native.is_geometric_consistent());
+                        assert!(native.front().point().near(&polygon.front().point()));
+                        assert!(native.back().point().near(&polygon.back().point()));
+                        assert_eq!(native.orientation(), polygon.orientation());
+                        native.with_curve(|curve| {
+                            if let Alternative::SecondType(curve) = curve {
+                                replayed
+                                    .entry(native.id())
+                                    .or_insert_with(|| (curve.leader().clone(), polygon.curve()));
+                            }
+                        });
+                    }
+                }
+            }
+            assert_eq!(replayed.len(), 2);
+            for index in 1..CONTACT_PERIOD {
+                assert!(
+                    replayed
+                        .values()
+                        .any(|(leader, _)| leader.contains(&original_leader[index]))
+                );
+                assert!(
+                    replayed
+                        .values()
+                        .any(|(_, polygon)| polygon.contains(&original_polygon[index]))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn closed_periodic_contact_seed_cannot_certify_unrelated_or_malformed_attachment() {
+        let (faces, (polyline, curve)) = closed_bore_contact(1.0);
+        let point = polyline.front();
+        for parameter in [f64::NAN, -1.0, CONTACT_PERIOD as f64 + 1.0] {
+            assert!(matches!(
+                intersection_parameter(
+                    &curve,
+                    point,
+                    IntersectionParameterBinding::BoundPairedLeader(parameter),
+                    None,
+                    None,
+                ),
+                Err(AttachmentFailure::Geometry(
+                    "intersection_chart_native_parameter_hint"
+                ))
+            ));
+        }
+        assert!(
+            intersection_parameter(
+                &curve,
+                point + Vector3::new(0.0, 0.0, 0.01),
+                IntersectionParameterBinding::BoundPairedLeader(0.0),
+                None,
+                None,
+            )
+            .is_err()
+        );
+        let loops = Loops::from(&faces[0]);
+        let [(wire, edge)] = paired_chart_edges(&loops)[..] else {
+            panic!("one original paired seam");
+        };
+        let seam = &faces[0].absolute_boundaries()[wire][edge];
+        let unrelated = Edge::new(seam.absolute_front(), seam.absolute_back(), seam.curve());
+        let contacts = [LoopPoint {
+            polygon_parameter: 0.0,
+            native_parameter: 0.0,
+            polygon: Vertex::new(point),
+            native: Vertex::new(point),
+            on_boundary: [true, false],
+            roots: [Some((seam.id(), 1.0 + CONTACT_HEIGHT)), None],
+            direction: None,
+            qualified_departure: false,
+        }];
+        assert_eq!(
+            contact_index(
+                &contacts,
+                0,
+                (unrelated.id(), 1.0 + CONTACT_HEIGHT),
+                0.0,
+                None,
+                point,
+                point,
+            ),
+            Err("intersection_chart_ambiguous_contact")
+        );
+    }
 
     fn overlap_square() -> (modeling::Wire, Wire<Point3, PolylineCurve>) {
         let points = [
